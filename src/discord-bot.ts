@@ -1123,6 +1123,7 @@ async function runPromptWithPlaceholder(
   });
 
   const stopTyping = startTypingIndicator(thread);
+  await maybeRenameThreadForPrompt(thread, record, prompt, options.registry);
   const progress = createProgressUpdater(placeholder, record, prompt);
   await placeholder.edit(buildWorkingPayload(record, prompt, {
     phase: "starting",
@@ -1169,13 +1170,9 @@ function buildThreadCreatedPayload(prompt: string): MessageCreateOptions {
 function buildWorkingPayload(record: ThreadRecord, prompt: string, progress: PromptProgress): RichPayload {
   const embed = new EmbedBuilder()
     .setColor(progress.isError ? 0xed4245 : 0x5865f2)
-    .setTitle(statusIcon(progress.phase, progress.isError) + " " + progress.title)
+    .setTitle(formatWorkingTitle(progress))
     .setDescription(formatWorkingDescription(prompt, progress))
     .setTimestamp(new Date());
-
-  if (progress.phase === "tool" && progress.detail) {
-    embed.addFields({ name: "Tool detail", value: truncateForEmbed(progress.detail, 450) });
-  }
 
   if (record.workspaceName) {
     embed.setFooter({ text: `workspace: ${record.workspaceName}` });
@@ -1241,17 +1238,30 @@ function createProgressUpdater(placeholder: Message, record: ThreadRecord, promp
   update: (progress: PromptProgress) => void;
   stop: () => void;
 } {
+  const startedAt = Date.now();
   let latest: PromptProgress | undefined;
   let timer: NodeJS.Timeout | undefined;
+  let heartbeat: NodeJS.Timeout | undefined;
   let lastEditAt = 0;
   let stopped = false;
+
+  const withElapsed = (progress: PromptProgress): PromptProgress => ({
+    ...progress,
+    elapsedMs: Date.now() - startedAt,
+  });
 
   const flush = async () => {
     if (stopped || !latest) return;
     timer = undefined;
     lastEditAt = Date.now();
-    await placeholder.edit(buildWorkingPayload(record, prompt, latest)).catch(() => undefined);
+    await placeholder.edit(buildWorkingPayload(record, prompt, withElapsed(latest))).catch(() => undefined);
   };
+
+  heartbeat = setInterval(() => {
+    if (!latest || stopped) return;
+    void flush();
+  }, 5_000);
+  heartbeat.unref();
 
   return {
     update(progress) {
@@ -1270,6 +1280,7 @@ function createProgressUpdater(placeholder: Message, record: ThreadRecord, promp
     stop() {
       stopped = true;
       if (timer) clearTimeout(timer);
+      if (heartbeat) clearInterval(heartbeat);
     },
   };
 }
@@ -1283,18 +1294,45 @@ function startTypingIndicator(thread: ThreadChannel): () => void {
   return () => clearInterval(interval);
 }
 
+async function maybeRenameThreadForPrompt(thread: ThreadChannel, record: ThreadRecord, prompt: string, registry: Registry): Promise<void> {
+  const desired = summarizeForThreadName(prompt);
+  if (!shouldRenameThread(thread.name, desired)) return;
+  const renamed = await thread.setName(desired, "Update Pi thread name from current task").then(() => true).catch(() => false);
+  if (renamed) await registry.patchThread(record.threadId, { sessionName: desired }).catch(() => undefined);
+}
+
+function shouldRenameThread(currentName: string, desiredName: string): boolean {
+  if (!desiredName || currentName === desiredName) return false;
+  const normalized = currentName.toLowerCase().trim();
+  return normalized === "pi session"
+    || normalized === "pi: pi session"
+    || normalized.startsWith("pi: workspace ")
+    || normalized.startsWith("pi: fork of ")
+    || normalized.startsWith("pi: resume ");
+}
+
+function formatElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rem = seconds % 60;
+  return rem > 0 ? `${minutes}m ${rem}s` : `${minutes}m`;
+}
+
+function formatWorkingTitle(progress: PromptProgress): string {
+  const elapsed = progress.elapsedMs !== undefined ? ` · ${formatElapsed(progress.elapsedMs)}` : "";
+  return `${statusIcon(progress.phase, progress.isError)} ${progress.title}${elapsed}`;
+}
+
 function formatWorkingDescription(prompt: string, progress: PromptProgress): string {
   if (progress.textPreview) {
-    return truncateForEmbed(progress.textPreview, 900);
+    return [`Writing response…`, "", truncateForEmbed(progress.textPreview, 800)].join("\n");
   }
 
-  const lines = [`Status: ${phaseLabel(progress.phase)}`];
-  if (progress.toolName) {
-    lines.push(`Tool: ${progress.toolName}`);
-  } else if (progress.detail && progress.phase !== "starting" && progress.phase !== "thinking") {
-    lines.push(truncateForEmbed(progress.detail, 260));
-  }
-  lines.push(`Request: ${truncateForEmbed(prompt.replace(/\s+/g, " "), 240)}`);
+  const lines: string[] = [];
+  if (progress.toolName) lines.push(`Tool: ${progress.toolName}`);
+  if (progress.detail) lines.push(truncateForEmbed(progress.detail, 260));
+  lines.push(`Request: ${truncateForEmbed(prompt.replace(/\s+/g, " "), 180)}`);
   return lines.join("\n");
 }
 

@@ -30,6 +30,7 @@ export interface PromptProgress {
   toolName?: string;
   isError?: boolean;
   sessionFile?: string;
+  elapsedMs?: number;
 }
 
 export type PromptProgressHandler = (progress: PromptProgress) => void | Promise<void>;
@@ -124,10 +125,11 @@ export class PiRuntimeManager {
       }
 
       if (event.type === "tool_execution_start") {
+        const activity = describeToolUse(event.toolName, event.args);
         this.publishProgress(onProgress, {
           phase: "tool",
-          title: `Using ${event.toolName}`,
-          detail: summarizeToolArgs(event.args),
+          title: activity.title,
+          detail: activity.detail,
           toolName: event.toolName,
           sessionFile: session.sessionFile,
         });
@@ -136,7 +138,7 @@ export class PiRuntimeManager {
       if (event.type === "tool_execution_end") {
         this.publishProgress(onProgress, {
           phase: "tool",
-          title: `${event.isError ? "Tool errored" : "Tool finished"}: ${event.toolName}`,
+          title: `${event.isError ? "Tool errored" : "Finished"}: ${event.toolName}`,
           toolName: event.toolName,
           isError: event.isError,
           sessionFile: session.sessionFile,
@@ -292,11 +294,45 @@ function tail(value: string, maxChars: number): string {
   return `…${value.slice(value.length - maxChars)}`;
 }
 
-function summarizeToolArgs(args: unknown): string | undefined {
-  if (!args || typeof args !== "object") return undefined;
+function describeToolUse(toolName: string, args: unknown): { title: string; detail?: string } {
+  if (!args || typeof args !== "object") return { title: `Using ${toolName}` };
   const input = args as Record<string, unknown>;
-  if (typeof input.path === "string") return input.path;
-  if (typeof input.command === "string") return tail(input.command.replace(/\s+/g, " ").trim(), 180);
-  if (Array.isArray(input.edits)) return `${input.edits.length} edit block(s)`;
-  return undefined;
+  const path = typeof input.path === "string" ? shortenPath(input.path) : undefined;
+
+  switch (toolName) {
+    case "read":
+      return { title: path ? `Reading ${path}` : "Reading file" };
+    case "edit":
+      return {
+        title: path ? `Editing ${path}` : "Editing file",
+        detail: Array.isArray(input.edits) ? `${input.edits.length} edit block(s)` : undefined,
+      };
+    case "write":
+      return { title: path ? `Writing ${path}` : "Writing file" };
+    case "bash": {
+      const command = typeof input.command === "string" ? input.command.replace(/\s+/g, " ").trim() : "";
+      const first = command.split(" ")[0] || "command";
+      return { title: `Running ${first}`, detail: command ? tail(command, 180) : undefined };
+    }
+    case "web_search":
+      return { title: "Searching web", detail: typeof input.query === "string" ? tail(input.query, 160) : undefined };
+    case "url_to_markdown":
+      return { title: "Reading web page", detail: typeof input.url === "string" ? tail(input.url, 160) : undefined };
+    case "mcq":
+      return { title: "Waiting for input" };
+    case "workflow":
+      return { title: "Running workflow" };
+    default:
+      if (path) return { title: `Using ${toolName}`, detail: path };
+      if (typeof input.command === "string") return { title: `Using ${toolName}`, detail: tail(input.command.replace(/\s+/g, " ").trim(), 180) };
+      return { title: `Using ${toolName}` };
+  }
+}
+
+function shortenPath(path: string): string {
+  const home = process.env.HOME || "";
+  const normalized = home && path.startsWith(home) ? `~${path.slice(home.length)}` : path;
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length <= 3) return normalized;
+  return `…/${parts.slice(-2).join("/")}`;
 }
