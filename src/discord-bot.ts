@@ -300,6 +300,11 @@ async function handlePiInteraction(
     return;
   }
 
+  if (subcommand === "reload") {
+    await reloadInteraction(interaction, options);
+    return;
+  }
+
   if (subcommand === "abort" || subcommand === "esc") {
     await abortInteraction(interaction, options.runtimeManager);
     return;
@@ -864,6 +869,11 @@ async function handleMessage(
     return;
   }
 
+  if (isCommand(content, "reload")) {
+    await reloadMessage(message, options);
+    return;
+  }
+
   const workspaceCommand = parseWorkspaceCommand(content);
   if (workspaceCommand) {
     await handleWorkspaceMessage(message, options, workspaceCommand.name, workspaceCommand.prompt);
@@ -1108,6 +1118,24 @@ async function runPromptInThread(
   await runPromptWithPlaceholder(thread, sourceDiscordId, placeholder, record, prompt, options);
 }
 
+async function queueIfActive(
+  record: ThreadRecord,
+  prompt: string,
+  options: RunBotOptions,
+): Promise<{ queued: boolean; mode?: "steer" | "followUp"; pendingMessageCount?: number }> {
+  const intent = parseQueueIntent(prompt);
+  return options.runtimeManager.queueMessageDuringActive(record.threadId, intent.text, intent.mode);
+}
+
+function parseQueueIntent(prompt: string): { text: string; mode: "steer" | "followUp" } {
+  const trimmed = prompt.trim();
+  const followUpMatch = trimmed.match(/^(?:follow[- ]?up|after|later)\s*[:：]?\s+([\s\S]*)$/i);
+  if (followUpMatch?.[1]?.trim()) {
+    return { mode: "followUp", text: followUpMatch[1].trim() };
+  }
+  return { mode: "steer", text: prompt };
+}
+
 async function runPromptWithPlaceholder(
   thread: ThreadChannel,
   sourceDiscordId: string,
@@ -1123,18 +1151,28 @@ async function runPromptWithPlaceholder(
     createdAt: new Date().toISOString(),
   });
 
-  const stopTyping = startTypingIndicator(thread);
-  await maybeRenameThreadForPrompt(thread, record, prompt, options.registry);
-  const progress = createProgressUpdater(placeholder, record, prompt);
-  await placeholder.edit(buildWorkingPayload(record, prompt, {
-    phase: "starting",
-    title: "Starting Pi session",
-    detail: record.sessionFile ? "Rehydrating existing session" : "Creating a durable session",
-  }));
+  let stopTyping: (() => void) | undefined;
+  let stopProgress: (() => void) | undefined;
 
   try {
+    const queued = await queueIfActive(record, prompt, options);
+    if (queued.queued) {
+      await placeholder.edit(buildQueuedPayload(queued.mode ?? "steer", queued.pendingMessageCount ?? 0));
+      return;
+    }
+
+    stopTyping = startTypingIndicator(thread);
+    await maybeRenameThreadForPrompt(thread, record, prompt, options.registry);
+    const progress = createProgressUpdater(placeholder, record, prompt);
+    stopProgress = progress.stop;
+    await placeholder.edit(buildWorkingPayload(record, prompt, {
+      phase: "starting",
+      title: "Starting Pi session",
+      detail: record.sessionFile ? "Rehydrating existing session" : "Creating a durable session",
+    }));
+
     const result = await options.runtimeManager.enqueuePrompt(record, prompt, progress.update);
-    progress.stop();
+    stopProgress();
     stopTyping();
     await options.registry.recordMessageEntry(sourceDiscordId, result.userEntryId);
     await options.registry.recordMessageEntry(placeholder.id, result.assistantEntryId);
@@ -1145,8 +1183,8 @@ async function runPromptWithPlaceholder(
       await thread.send({ content: chunk });
     }
   } catch (error) {
-    progress.stop();
-    stopTyping();
+    stopProgress?.();
+    stopTyping?.();
     const text = error instanceof Error ? error.message : String(error);
     await options.registry.patchThread(thread.id, { status: "error" });
     await placeholder.edit(buildErrorPayload(record, text));
@@ -1203,6 +1241,15 @@ function buildWorkspaceReadyPayload(record: ThreadRecord): RichPayload {
 function buildDonePayload(_record: ThreadRecord, _sessionFile: string | undefined, firstChunk: string | undefined): RichPayload {
   return {
     content: firstChunk ?? "(no assistant text produced)",
+    embeds: [],
+    components: [],
+  };
+}
+
+function buildQueuedPayload(mode: "steer" | "followUp", pendingCount: number): RichPayload {
+  const label = mode === "followUp" ? "follow-up" : "steering";
+  return {
+    content: `Queued as ${label}${pendingCount > 0 ? ` (${pendingCount} pending)` : ""}.`,
     embeds: [],
     components: [],
   };
@@ -1580,6 +1627,59 @@ async function sendDebugInteraction(interaction: ChatInputCommandInteraction, op
   await replyEphemeralJson(interaction, "Pi bridge debug", payload);
 }
 
+async function reloadInteraction(interaction: ChatInputCommandInteraction, options: RunBotOptions): Promise<void> {
+  const threadId = interaction.channel?.isThread() ? interaction.channel.id : undefined;
+  if (!threadId) {
+    await replyEphemeral(interaction, "Use `/pi reload` inside a registered Pi thread.");
+    return;
+  }
+
+  const record = options.registry.getThread(threadId);
+  if (!record) {
+    await replyEphemeral(interaction, "This Discord thread is not registered to a Pi session yet.");
+    return;
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  if (options.runtimeManager.isActive(threadId)) {
+    void options.runtimeManager.enqueueReload(record).catch((error) => {
+      const text = error instanceof Error ? error.message : String(error);
+      console.warn(`queued reload failed for ${threadId}: ${text}`);
+    });
+    await interaction.editReply("Reload queued. It will run after the current turn finishes.");
+    return;
+  }
+
+  await options.runtimeManager.enqueueReload(record);
+  await interaction.editReply("Reloaded Pi resources for this thread session.");
+}
+
+async function reloadMessage(message: Message, options: RunBotOptions): Promise<void> {
+  const threadId = message.channel.isThread() ? message.channel.id : undefined;
+  if (!threadId) {
+    await safeReply(message, "Use `reload` inside a registered Pi thread.");
+    return;
+  }
+
+  const record = options.registry.getThread(threadId);
+  if (!record) {
+    await safeReply(message, "This Discord thread is not registered to a Pi session yet.");
+    return;
+  }
+
+  if (options.runtimeManager.isActive(threadId)) {
+    void options.runtimeManager.enqueueReload(record).catch((error) => {
+      const text = error instanceof Error ? error.message : String(error);
+      console.warn(`queued reload failed for ${threadId}: ${text}`);
+    });
+    await safeReply(message, "Reload queued. It will run after the current turn finishes.");
+    return;
+  }
+
+  await options.runtimeManager.enqueueReload(record);
+  await safeReply(message, "Reloaded Pi resources for this thread session.");
+}
+
 async function abortInteraction(
   interaction: ChatInputCommandInteraction,
   runtimeManager: PiRuntimeManager,
@@ -1654,9 +1754,9 @@ function helpText(prefix: string): string {
     `- Slash: \`/pi ask prompt:<prompt>\` creates/continues a durable Pi session.`,
     `- Slash: \`/pi skill name:<skill> args:<optional>\` invokes a Pi skill as \`/skill:name\`.`,
     `- Slash: \`/pi workspace name:<workspace> prompt:<optional>\` creates a thread rooted in a configured workspace.`,
-    `- Slash: \`/pi status\`, \`/pi debug\`, \`/pi esc\`, \`/pi abort\`, \`/pi help\`.`,
-    `- Prefix fallback: \`${prefix} <prompt>\`, \`${prefix} workspace <name> [prompt]\`, \`${prefix} status\`, \`${prefix} abort\`, \`${prefix} help\`.`,
-    "- In a registered thread, normal messages continue the Pi session.",
+    `- Slash: \`/pi status\`, \`/pi debug\`, \`/pi reload\`, \`/pi esc\`, \`/pi abort\`, \`/pi help\`.`,
+    `- Prefix fallback: \`${prefix} <prompt>\`, \`${prefix} workspace <name> [prompt]\`, \`${prefix} status\`, \`${prefix} reload\`, \`${prefix} esc\`, \`${prefix} help\`.`,
+    "- In a registered thread, normal messages continue the Pi session; while active they queue as steering messages.",
     "- Pi skills work normally in messages; Discord slash equivalent is `/pi skill`.",
   ].join("\n");
 }

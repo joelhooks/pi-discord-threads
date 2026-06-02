@@ -80,6 +80,7 @@ Slash commands:
 /pi compose                                             open a multi-line prompt modal
 /pi status                                              show the current thread mapping
 /pi debug                                               show full ephemeral bridge/session debug details
+/pi reload                                              reload Pi resources for the current thread session
 /pi esc                                                 escape/stop the active Pi run in the current thread
 /pi abort                                               abort the active Pi run in the current thread
 /pi help                                                show help
@@ -100,12 +101,13 @@ Prefix fallback:
 !pi --cwd @Code/project <prompt>     create a session rooted in that cwd
 !pi workspace <workspace> [prompt]   create a workspace-rooted thread; without prompt it waits for the next message
 !pi status                           show the current thread mapping
+!pi reload                           reload Pi resources for the current thread session
 !pi esc                              escape/stop the active Pi run in the current thread
 !pi abort                            abort the active Pi run in the current thread
 !pi help                             show help
 ```
 
-In a registered thread, normal messages are sent to the Pi session. Text/image attachments on normal thread messages and context-menu-selected messages are downloaded into the bridge data directory and appended to the prompt as local file paths when they pass the configured size/type allowlist.
+In a registered thread, normal messages are sent to the Pi session. If a turn is already running, new messages are queued as steering messages for the active turn; prefix a message with `followup:` or `after:` to queue it as a follow-up after the current turn completes. Text/image attachments on normal thread messages and context-menu-selected messages are downloaded into the bridge data directory and appended to the prompt as local file paths when they pass the configured size/type allowlist.
 
 ## Discord thread mode system prompt
 

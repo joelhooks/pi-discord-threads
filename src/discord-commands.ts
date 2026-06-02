@@ -120,6 +120,11 @@ export const piCommand = new SlashCommandBuilder()
   )
   .addSubcommand((subcommand) =>
     subcommand
+      .setName("reload")
+      .setDescription("Reload Pi resources for this Discord thread session"),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
       .setName("esc")
       .setDescription("Escape/stop the active Pi run in this Discord thread"),
   )

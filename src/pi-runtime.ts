@@ -23,6 +23,12 @@ export interface PromptResult {
   assistantEntryId?: string;
 }
 
+export interface QueueMessageResult {
+  queued: boolean;
+  mode?: "steer" | "followUp";
+  pendingMessageCount?: number;
+}
+
 export interface PromptProgress {
   phase: "starting" | "thinking" | "streaming" | "tool" | "compaction" | "retry" | "done";
   title: string;
@@ -49,16 +55,34 @@ export class PiRuntimeManager {
   }
 
   async enqueuePrompt(thread: ThreadRecord, text: string, onProgress?: PromptProgressHandler): Promise<PromptResult> {
-    const previous = this.queues.get(thread.threadId) ?? Promise.resolve();
-    const next = previous
-      .catch(() => undefined)
-      .then(() => this.prompt(thread, text, onProgress));
-    this.queues.set(thread.threadId, next.finally(() => {
-      if (this.queues.get(thread.threadId) === next) {
-        this.queues.delete(thread.threadId);
-      }
-    }));
-    return next;
+    return this.enqueueOperation(thread.threadId, () => this.prompt(thread, text, onProgress));
+  }
+
+  async queueMessageDuringActive(threadId: string, text: string, mode: "steer" | "followUp" = "steer"): Promise<QueueMessageResult> {
+    const managed = this.runtimes.get(threadId);
+    const session = managed?.runtime.session;
+    if (!session?.isStreaming) return { queued: false };
+
+    if (mode === "followUp") {
+      await session.followUp(text);
+    } else {
+      await session.steer(text);
+    }
+
+    return {
+      queued: true,
+      mode,
+      pendingMessageCount: session.pendingMessageCount,
+    };
+  }
+
+  async enqueueReload(thread: ThreadRecord, onProgress?: PromptProgressHandler): Promise<void> {
+    await this.enqueueOperation(thread.threadId, () => this.reload(thread, onProgress));
+  }
+
+  isActive(threadId: string): boolean {
+    const managed = this.runtimes.get(threadId);
+    return Boolean(this.queues.has(threadId) || managed?.runtime.session.isStreaming);
   }
 
   async abort(threadId: string): Promise<void> {
@@ -74,6 +98,32 @@ export class PiRuntimeManager {
       if (managed.disposeTimer) clearTimeout(managed.disposeTimer);
       await managed.runtime.dispose();
     }
+  }
+
+  private async reload(thread: ThreadRecord, onProgress?: PromptProgressHandler): Promise<void> {
+    this.publishProgress(onProgress, {
+      phase: "tool",
+      title: "Reloading Pi resources",
+      detail: "Reloading settings, skills, prompts, extensions, and system prompt",
+    });
+
+    const managed = await this.getOrCreateRuntime(thread);
+    await this.registry.patchThread(thread.threadId, { status: "running" });
+    try {
+      await managed.runtime.session.reload();
+      await this.registry.patchThread(thread.threadId, {
+        status: "idle",
+        sessionFile: managed.runtime.session.sessionFile,
+        sessionName: managed.runtime.session.sessionManager.getSessionName() ?? thread.sessionName,
+      });
+    } finally {
+      this.scheduleDispose(thread.threadId, managed);
+    }
+
+    this.publishProgress(onProgress, {
+      phase: "done",
+      title: "Reloaded Pi resources",
+    });
   }
 
   private async prompt(thread: ThreadRecord, text: string, onProgress?: PromptProgressHandler): Promise<PromptResult> {
@@ -248,6 +298,19 @@ export class PiRuntimeManager {
     });
     this.scheduleDispose(thread.threadId, managed);
     return managed;
+  }
+
+  private enqueueOperation<T>(threadId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.queues.get(threadId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(operation);
+    this.queues.set(threadId, next.finally(() => {
+      if (this.queues.get(threadId) === next) {
+        this.queues.delete(threadId);
+      }
+    }));
+    return next;
   }
 
   private scheduleDispose(threadId: string, managed: ManagedRuntime): void {
