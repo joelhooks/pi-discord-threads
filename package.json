@@ -10,7 +10,9 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx src/index.ts",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "render-system-prompt": "npm run build && node scripts/render-system-prompt.mjs",
+    "publish-system-prompt": "npm run render-system-prompt && wzrrd publish --file docs/system-prompt-site --slug pi-discord-system-prompt"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.78.0",

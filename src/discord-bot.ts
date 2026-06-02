@@ -41,6 +41,7 @@ import {
   workspaceUsage,
 } from "./cwd.js";
 import { applicationCommands, askPiMessageCommandName } from "./discord-commands.js";
+import { DISCORD_SYSTEM_PROMPT_URL } from "./discord-system-prompt.js";
 import { chunkForDiscord, stripBotMention, stripCommandPrefix, summarizeForThreadName } from "./render.js";
 
 interface RunBotOptions {
@@ -1544,6 +1545,9 @@ async function sendDebugInteraction(interaction: ChatInputCommandInteraction, op
       node: process.version,
       pid: process.pid,
       cwd: process.cwd(),
+    },
+    discordThreadMode: {
+      systemPromptUrl: DISCORD_SYSTEM_PROMPT_URL,
     },
     config: {
       dataDir: options.config.dataDir,

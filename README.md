@@ -107,6 +107,20 @@ Prefix fallback:
 
 In a registered thread, normal messages are sent to the Pi session. Text/image attachments on normal thread messages and context-menu-selected messages are downloaded into the bridge data directory and appended to the prompt as local file paths when they pass the configured size/type allowlist.
 
+## Discord thread mode system prompt
+
+Pi sessions created by this bridge receive an appended Discord Thread Mode system prompt so the model understands the operator is using Discord, not the terminal TUI.
+
+- Source of truth: `src/discord-system-prompt.ts`
+- Generated Markdown: `docs/discord-thread-mode-system-prompt.md`
+- Review URL: https://pi-discord-system-prompt.wzrrd.sh/
+
+Update/publish it with:
+
+```bash
+npm run publish-system-prompt
+```
+
 ## Design invariants
 
 - Runs locally and is portable; no host-specific assumptions.

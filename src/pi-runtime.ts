@@ -8,6 +8,7 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import type { AppConfig } from "./config.js";
+import { DISCORD_SYSTEM_PROMPT } from "./discord-system-prompt.js";
 import type { Registry, ThreadRecord } from "./registry.js";
 
 interface ManagedRuntime {
@@ -211,6 +212,9 @@ export class PiRuntimeManager {
       const services = await createAgentSessionServices({
         cwd,
         agentDir: this.agentDir,
+        resourceLoaderOptions: {
+          appendSystemPromptOverride: (base) => [...base, DISCORD_SYSTEM_PROMPT],
+        },
       });
       return {
         ...(await createAgentSessionFromServices({
