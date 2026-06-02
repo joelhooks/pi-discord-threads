@@ -1306,9 +1306,13 @@ function shouldRenameThread(currentName: string, desiredName: string): boolean {
   const normalized = currentName.toLowerCase().trim();
   return normalized === "pi session"
     || normalized === "pi: pi session"
+    || normalized === "π pi session"
     || normalized.startsWith("pi: workspace ")
     || normalized.startsWith("pi: fork of ")
-    || normalized.startsWith("pi: resume ");
+    || normalized.startsWith("pi: resume ")
+    || normalized.startsWith("🗂️ ")
+    || normalized.startsWith("π fork of ")
+    || normalized.startsWith("π resume ");
 }
 
 function formatElapsed(ms: number): string {
@@ -1321,7 +1325,7 @@ function formatElapsed(ms: number): string {
 
 function formatWorkingTitle(progress: PromptProgress): string {
   const elapsed = progress.elapsedMs !== undefined ? ` · ${formatElapsed(progress.elapsedMs)}` : "";
-  return `${statusIcon(progress.phase, progress.isError)} ${progress.title}${elapsed}`;
+  return `${statusIcon(progress.phase, progress.isError, progress.toolName)} ${progress.title}${elapsed}`;
 }
 
 function formatWorkingDescription(prompt: string, progress: PromptProgress): string {
@@ -1355,8 +1359,9 @@ function phaseLabel(phase: PromptProgress["phase"]): string {
   }
 }
 
-function statusIcon(phase: PromptProgress["phase"], isError: boolean | undefined): string {
+function statusIcon(phase: PromptProgress["phase"], isError: boolean | undefined, toolName?: string): string {
   if (isError) return "⚠️";
+  if (phase === "tool" && toolName) return toolIcon(toolName);
   switch (phase) {
     case "starting":
       return "🚀";
@@ -1372,6 +1377,32 @@ function statusIcon(phase: PromptProgress["phase"], isError: boolean | undefined
       return "🔁";
     case "done":
       return "✅";
+  }
+}
+
+function toolIcon(toolName: string): string {
+  switch (toolName) {
+    case "read":
+      return "📖";
+    case "edit":
+      return "✏️";
+    case "write":
+      return "📝";
+    case "bash":
+      return "💻";
+    case "grep":
+    case "find":
+    case "web_search":
+    case "web_search_links":
+      return "🔎";
+    case "url_to_markdown":
+      return "🌐";
+    case "mcq":
+      return "🙋";
+    case "workflow":
+      return "🔀";
+    default:
+      return "🛠️";
   }
 }
 

@@ -26,11 +26,37 @@ export function chunkForDiscord(text: string, maxChars: number): string[] {
 export function summarizeForThreadName(prompt: string): string {
   const compact = prompt
     .replace(/<@!?\d+>/g, "")
+    .replace(/```[\s\S]*?```/g, "code block")
     .replace(/\s+/g, " ")
     .trim();
-  const base = compact.length > 0 ? compact : "pi session";
-  const cleaned = base.replace(/[\n\r]/g, " ").slice(0, 80).trim();
-  return cleaned.length > 0 ? `pi: ${cleaned}`.slice(0, 95) : "pi session";
+  const base = compact.length > 0 ? compact : "Pi session";
+  const cleaned = cleanThreadTitle(base).replace(/[\n\r]/g, " ").slice(0, 86).trim();
+  if (!cleaned) return "π Pi session";
+  return `${threadTitleIcon(cleaned)} ${cleaned}`.slice(0, 95);
+}
+
+function cleanThreadTitle(value: string): string {
+  return value
+    .replace(/^\/skill:([\w-]+)\s*/i, "$1: ")
+    .replace(/^workspace\s+/i, "")
+    .replace(/^ask pi about this discord message\.?\s*/i, "Discord message: ")
+    .replace(/^(please\s+)?(can you|could you|would you)\s+/i, "")
+    .replace(/^(please\s+)?/i, "")
+    .trim();
+}
+
+function threadTitleIcon(value: string): string {
+  const lower = value.toLowerCase();
+  if (/\b(workspace|aihero|cwd)\b/.test(lower)) return "🗂️";
+  if (/\b(debug|diagnose|investigate|error|bug|broken|failing|failure|fix)\b/.test(lower)) return "🐛";
+  if (/\b(research|review|audit|inspect|search|look into|how does|explain)\b/.test(lower)) return "🔎";
+  if (/\b(doc|docs|readme|write|copy|content|prd|plan)\b/.test(lower)) return "📚";
+  if (/\b(test|typecheck|lint|spec|coverage)\b/.test(lower)) return "🧪";
+  if (/\b(push|publish|deploy|release|github|wzrrd)\b/.test(lower)) return "🚀";
+  if (/\b(refactor|clean|rename|trim|simplify|polish)\b/.test(lower)) return "🧹";
+  if (/\b(add|implement|build|create|make|support)\b/.test(lower)) return "✨";
+  if (/\b(discord message|reply|thread)\b/.test(lower)) return "💬";
+  return "π";
 }
 
 export function stripBotMention(text: string, botUserId: string | null): string {
