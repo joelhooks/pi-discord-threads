@@ -1,0 +1,31 @@
+{
+  "dataDir": "~/.local/share/pi-discord-threads",
+  "discord": {
+    "tokenEnv": "DISCORD_BOT_TOKEN",
+    "tokenSecretName": "discord_bot_token",
+    "tokenLeaseTtl": "12h",
+    "allowedUserIds": [],
+    "allowedUserIdEnv": "DISCORD_ALLOWED_USER_ID",
+    "allowedUserIdSecretName": "discord_allowed_user_id",
+    "guildIds": [],
+    "channelIds": [],
+    "commandPrefix": "!pi",
+    "respondToMentions": true
+  },
+  "pi": {
+    "defaultCwd": "~",
+    "idleTtlMs": 1200000,
+    "workspaces": {
+      "aihero": "~/Code/badass-courses/aihero-support"
+    }
+  },
+  "render": {
+    "maxDiscordChars": 1900
+  },
+  "attachments": {
+    "enabled": true,
+    "maxBytes": 2097152,
+    "allowedContentTypePrefixes": ["text/", "image/", "application/json"],
+    "allowedExtensions": [".txt", ".md", ".json", ".log", ".csv", ".png", ".jpg", ".jpeg", ".gif", ".webp"]
+  }
+}
