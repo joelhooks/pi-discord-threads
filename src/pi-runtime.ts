@@ -7,6 +7,7 @@ import {
   getAgentDir,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
+import type { InlineImageContent } from "./attachments.js";
 import type { AppConfig } from "./config.js";
 import { DISCORD_SYSTEM_PROMPT } from "./discord-system-prompt.js";
 import type { Registry, ThreadRecord } from "./registry.js";
@@ -54,19 +55,19 @@ export class PiRuntimeManager {
     this.agentDir = config.pi.agentDir ?? getAgentDir();
   }
 
-  async enqueuePrompt(thread: ThreadRecord, text: string, onProgress?: PromptProgressHandler): Promise<PromptResult> {
-    return this.enqueueOperation(thread.threadId, () => this.prompt(thread, text, onProgress));
+  async enqueuePrompt(thread: ThreadRecord, text: string, images: InlineImageContent[] = [], onProgress?: PromptProgressHandler): Promise<PromptResult> {
+    return this.enqueueOperation(thread.threadId, () => this.prompt(thread, text, images, onProgress));
   }
 
-  async queueMessageDuringActive(threadId: string, text: string, mode: "steer" | "followUp" = "steer"): Promise<QueueMessageResult> {
+  async queueMessageDuringActive(threadId: string, text: string, mode: "steer" | "followUp" = "steer", images: InlineImageContent[] = []): Promise<QueueMessageResult> {
     const managed = this.runtimes.get(threadId);
     const session = managed?.runtime.session;
     if (!session?.isStreaming) return { queued: false };
 
     if (mode === "followUp") {
-      await session.followUp(text);
+      await session.followUp(text, images);
     } else {
-      await session.steer(text);
+      await session.steer(text, images);
     }
 
     return {
@@ -126,7 +127,7 @@ export class PiRuntimeManager {
     });
   }
 
-  private async prompt(thread: ThreadRecord, text: string, onProgress?: PromptProgressHandler): Promise<PromptResult> {
+  private async prompt(thread: ThreadRecord, text: string, images: InlineImageContent[], onProgress?: PromptProgressHandler): Promise<PromptResult> {
     this.publishProgress(onProgress, {
       phase: "starting",
       title: "Starting Pi session",
@@ -217,7 +218,7 @@ export class PiRuntimeManager {
 
     await this.registry.patchThread(thread.threadId, { status: "running" });
     try {
-      await session.prompt(text);
+      await session.prompt(text, images.length > 0 ? { images } : undefined);
     } finally {
       unsubscribe();
     }

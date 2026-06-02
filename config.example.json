@@ -24,8 +24,14 @@
   },
   "attachments": {
     "enabled": true,
-    "maxBytes": 2097152,
-    "allowedContentTypePrefixes": ["text/", "image/", "application/json"],
-    "allowedExtensions": [".txt", ".md", ".json", ".log", ".csv", ".png", ".jpg", ".jpeg", ".gif", ".webp"]
+    "maxBytes": 26214400,
+    "allowedContentTypePrefixes": ["text/", "image/", "audio/", "video/", "application/json", "application/pdf"],
+    "allowedExtensions": [
+      ".txt", ".md", ".json", ".log", ".csv", ".tsv", ".srt", ".vtt",
+      ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp", ".svg",
+      ".mp3", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac",
+      ".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".mpeg", ".mpg",
+      ".pdf"
+    ]
   }
 }

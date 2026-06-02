@@ -63,7 +63,7 @@ Workspace aliases are configured under `pi.workspaces`:
 }
 ```
 
-Attachment ingestion is controlled under `attachments` with an enabled flag, maximum byte size, content-type prefixes, and extension allowlist.
+Attachment ingestion is controlled under `attachments` with an enabled flag, maximum byte size, content-type prefixes, and extension allowlist. Defaults accept common text, image, audio, video, and PDF uploads up to 25 MB; use `"*"` in `allowedContentTypePrefixes` if you intentionally want to accept every file type.
 
 ## Discord usage
 
@@ -107,7 +107,7 @@ Prefix fallback:
 !pi help                             show help
 ```
 
-In a registered thread, normal messages are sent to the Pi session. If a turn is already running, new messages are queued as steering messages for the active turn; prefix a message with `followup:` or `after:` to queue it as a follow-up after the current turn completes. Text/image attachments on normal thread messages and context-menu-selected messages are downloaded into the bridge data directory and appended to the prompt as local file paths when they pass the configured size/type allowlist.
+In a registered thread, normal messages are sent to the Pi session. If a turn is already running, new messages are queued as steering messages for the active turn; prefix a message with `followup:` or `after:` to queue it as a follow-up after the current turn completes. Attachments on normal thread messages, workspace messages, and context-menu-selected messages are downloaded into the bridge data directory and appended to the prompt as local file paths when they pass the configured size/type allowlist. Supported images are also attached inline for model vision when small enough; audio/video/PDF uploads are saved and surfaced with guidance for Pi to inspect/extract/process them with local tools when needed.
 
 ## Discord thread mode system prompt
 

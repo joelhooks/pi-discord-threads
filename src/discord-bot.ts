@@ -28,7 +28,7 @@ import {
   type ThreadChannel,
 } from "discord.js";
 import { DefaultResourceLoader, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { appendAttachmentContext } from "./attachments.js";
+import { appendAttachmentContext, type InlineImageContent } from "./attachments.js";
 import type { AppConfig } from "./config.js";
 import { PiRuntimeManager, type PromptProgress } from "./pi-runtime.js";
 import { Registry, type ThreadRecord } from "./registry.js";
@@ -519,7 +519,7 @@ async function handleAskPiMessageContext(
 
   const existing = options.registry.getThread(thread.id);
   const record = existing ?? await ensureThreadRecord(thread, options, basePrompt, options.config.pi.defaultCwd);
-  const prompt = await appendAttachmentContext(basePrompt, targetMessage, options.config, thread.id);
+  const attachmentContext = await appendAttachmentContext(basePrompt, targetMessage, options.config, thread.id);
   await options.registry.recordMessage({
     discordMessageId: interaction.id,
     threadId: thread.id,
@@ -527,7 +527,7 @@ async function handleAskPiMessageContext(
     createdAt: new Date().toISOString(),
   });
   await interaction.editReply(`Asked Pi about the selected message in <#${thread.id}>.`);
-  await runPromptInThread(thread, interaction.id, record, prompt, options);
+  await runPromptInThread(thread, interaction.id, record, attachmentContext.prompt, options, attachmentContext.images);
 }
 
 async function resumeInteraction(
@@ -900,8 +900,8 @@ async function handleMessage(
     createdAt: new Date().toISOString(),
   });
 
-  const prompt = await appendAttachmentContext(parsed.prompt || "Please inspect the attached file(s).", message, options.config, thread.id);
-  await runPromptInThread(thread, message.id, record, prompt, options);
+  const attachmentContext = await appendAttachmentContext(parsed.prompt || "Please inspect the attached file(s).", message, options.config, thread.id);
+  await runPromptInThread(thread, message.id, record, attachmentContext.prompt, options, attachmentContext.images);
 }
 
 async function handleWorkspaceMessage(
@@ -930,8 +930,8 @@ async function handleWorkspaceMessage(
   });
 
   if (prompt || message.attachments.size > 0) {
-    const enrichedPrompt = await appendAttachmentContext(prompt || "Please inspect the attached file(s).", message, options.config, thread.id);
-    await runPromptInThread(thread, message.id, record, enrichedPrompt, options);
+    const attachmentContext = await appendAttachmentContext(prompt || "Please inspect the attached file(s).", message, options.config, thread.id);
+    await runPromptInThread(thread, message.id, record, attachmentContext.prompt, options, attachmentContext.images);
     return;
   }
 
@@ -1109,22 +1109,24 @@ async function runPromptInThread(
   record: ThreadRecord,
   prompt: string,
   options: RunBotOptions,
+  images: InlineImageContent[] = [],
 ): Promise<void> {
   const placeholder = await thread.send(buildWorkingPayload(record, prompt, {
     phase: "starting",
     title: "Starting Pi session",
     detail: "Queued from Discord message",
   }));
-  await runPromptWithPlaceholder(thread, sourceDiscordId, placeholder, record, prompt, options);
+  await runPromptWithPlaceholder(thread, sourceDiscordId, placeholder, record, prompt, options, images);
 }
 
 async function queueIfActive(
   record: ThreadRecord,
   prompt: string,
   options: RunBotOptions,
+  images: InlineImageContent[] = [],
 ): Promise<{ queued: boolean; mode?: "steer" | "followUp"; pendingMessageCount?: number }> {
   const intent = parseQueueIntent(prompt);
-  return options.runtimeManager.queueMessageDuringActive(record.threadId, intent.text, intent.mode);
+  return options.runtimeManager.queueMessageDuringActive(record.threadId, intent.text, intent.mode, images);
 }
 
 function parseQueueIntent(prompt: string): { text: string; mode: "steer" | "followUp" } {
@@ -1143,6 +1145,7 @@ async function runPromptWithPlaceholder(
   record: ThreadRecord,
   prompt: string,
   options: RunBotOptions,
+  images: InlineImageContent[] = [],
 ): Promise<void> {
   await options.registry.recordMessage({
     discordMessageId: placeholder.id,
@@ -1155,7 +1158,7 @@ async function runPromptWithPlaceholder(
   let stopProgress: (() => void) | undefined;
 
   try {
-    const queued = await queueIfActive(record, prompt, options);
+    const queued = await queueIfActive(record, prompt, options, images);
     if (queued.queued) {
       await placeholder.edit(buildQueuedPayload(queued.mode ?? "steer", queued.pendingMessageCount ?? 0));
       return;
@@ -1171,7 +1174,7 @@ async function runPromptWithPlaceholder(
       detail: record.sessionFile ? "Rehydrating existing session" : "Creating a durable session",
     }));
 
-    const result = await options.runtimeManager.enqueuePrompt(record, prompt, progress.update);
+    const result = await options.runtimeManager.enqueuePrompt(record, prompt, images, progress.update);
     stopProgress();
     stopTyping();
     await options.registry.recordMessageEntry(sourceDiscordId, result.userEntryId);

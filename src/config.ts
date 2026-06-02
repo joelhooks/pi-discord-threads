@@ -36,7 +36,7 @@ export interface AppConfig {
 }
 
 export interface CliOptions {
-  command: "start" | "init-config" | "doctor" | "help";
+  command: "start" | "init-config" | "doctor" | "status" | "help";
   configPath: string;
 }
 
@@ -78,9 +78,15 @@ export function defaultConfig(): AppConfig {
     },
     attachments: {
       enabled: true,
-      maxBytes: 2 * 1024 * 1024,
-      allowedContentTypePrefixes: ["text/", "image/", "application/json"],
-      allowedExtensions: [".txt", ".md", ".json", ".log", ".csv", ".png", ".jpg", ".jpeg", ".gif", ".webp"],
+      maxBytes: 25 * 1024 * 1024,
+      allowedContentTypePrefixes: ["text/", "image/", "audio/", "video/", "application/json", "application/pdf"],
+      allowedExtensions: [
+        ".txt", ".md", ".json", ".log", ".csv", ".tsv", ".srt", ".vtt",
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp", ".svg",
+        ".mp3", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac",
+        ".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".mpeg", ".mpg",
+        ".pdf",
+      ],
     },
   };
 }
@@ -153,7 +159,7 @@ export function normalizeConfig(config: AppConfig): AppConfig {
     },
     attachments: {
       enabled: config.attachments.enabled !== false,
-      maxBytes: Math.max(1_024, Math.min(25 * 1024 * 1024, config.attachments.maxBytes || 2 * 1024 * 1024)),
+      maxBytes: Math.max(1_024, Math.min(100 * 1024 * 1024, config.attachments.maxBytes || 25 * 1024 * 1024)),
       allowedContentTypePrefixes: [...new Set(config.attachments.allowedContentTypePrefixes.map((value) => value.trim()).filter(Boolean))],
       allowedExtensions: [...new Set(config.attachments.allowedExtensions.map((value) => value.trim().toLowerCase()).filter(Boolean))],
     },
@@ -197,7 +203,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     }
   }
 
-  if (!["start", "init-config", "doctor", "help"].includes(command)) {
+  if (!["start", "init-config", "doctor", "status", "help"].includes(command)) {
     throw new Error(`Unknown command: ${command}`);
   }
 
