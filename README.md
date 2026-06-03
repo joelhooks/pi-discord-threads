@@ -81,6 +81,7 @@ Slash commands:
 /pi status                                              show the current thread mapping
 /pi debug                                               show full ephemeral bridge/session debug details
 /pi reload                                              reload Pi resources for the current thread session
+/pi compact instructions:<optional>                    compact the current thread session context
 /pi esc                                                 escape/stop the active Pi run in the current thread
 /pi abort                                               abort the active Pi run in the current thread
 /pi help                                                show help
@@ -102,6 +103,7 @@ Prefix fallback:
 !pi workspace <workspace> [prompt]   create a workspace-rooted thread; without prompt it waits for the next message
 !pi status                           show the current thread mapping
 !pi reload                           reload Pi resources for the current thread session
+!pi compact [instructions]           compact the current thread session context
 !pi esc                              escape/stop the active Pi run in the current thread
 !pi abort                            abort the active Pi run in the current thread
 !pi help                             show help

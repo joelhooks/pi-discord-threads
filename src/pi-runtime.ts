@@ -30,6 +30,20 @@ export interface QueueMessageResult {
   pendingMessageCount?: number;
 }
 
+export interface CompactResult {
+  summary: string;
+  firstKeptEntryId: string;
+  tokensBefore: number;
+  sessionFile: string | undefined;
+}
+
+interface PiCompactionResult {
+  summary: string;
+  firstKeptEntryId: string;
+  tokensBefore: number;
+  details?: unknown;
+}
+
 export interface PromptProgress {
   phase: "starting" | "thinking" | "streaming" | "tool" | "compaction" | "retry" | "done";
   title: string;
@@ -81,6 +95,10 @@ export class PiRuntimeManager {
     await this.enqueueOperation(thread.threadId, () => this.reload(thread, onProgress));
   }
 
+  async enqueueCompact(thread: ThreadRecord, customInstructions?: string, onProgress?: PromptProgressHandler): Promise<CompactResult> {
+    return this.enqueueOperation(thread.threadId, () => this.compact(thread, customInstructions, onProgress));
+  }
+
   isActive(threadId: string): boolean {
     const managed = this.runtimes.get(threadId);
     return Boolean(this.queues.has(threadId) || managed?.runtime.session.isStreaming);
@@ -125,6 +143,49 @@ export class PiRuntimeManager {
       phase: "done",
       title: "Reloaded Pi resources",
     });
+  }
+
+  private async compact(thread: ThreadRecord, customInstructions?: string, onProgress?: PromptProgressHandler): Promise<CompactResult> {
+    const instructions = customInstructions?.trim() || undefined;
+    this.publishProgress(onProgress, {
+      phase: "compaction",
+      title: "Compacting context",
+      detail: instructions ? `Focus: ${instructions}` : "Creating a durable context checkpoint",
+      sessionFile: thread.sessionFile,
+    });
+
+    const managed = await this.getOrCreateRuntime(thread);
+    await this.registry.patchThread(thread.threadId, { status: "running" });
+    try {
+      const result = await managed.runtime.session.compact(instructions) as PiCompactionResult;
+      const sessionFile = managed.runtime.session.sessionFile;
+      await this.registry.patchThread(thread.threadId, {
+        status: "idle",
+        sessionFile,
+        sessionName: managed.runtime.session.sessionManager.getSessionName() ?? thread.sessionName,
+      });
+      this.publishProgress(onProgress, {
+        phase: "done",
+        title: "Compacted context",
+        detail: `${result.tokensBefore.toLocaleString()} tokens before compaction`,
+        sessionFile,
+      });
+      return {
+        summary: result.summary,
+        firstKeptEntryId: result.firstKeptEntryId,
+        tokensBefore: result.tokensBefore,
+        sessionFile,
+      };
+    } catch (error) {
+      await this.registry.patchThread(thread.threadId, {
+        status: "idle",
+        sessionFile: managed.runtime.session.sessionFile,
+        sessionName: managed.runtime.session.sessionManager.getSessionName() ?? thread.sessionName,
+      }).catch(() => undefined);
+      throw error;
+    } finally {
+      this.scheduleDispose(thread.threadId, managed);
+    }
   }
 
   private async prompt(thread: ThreadRecord, text: string, images: InlineImageContent[], onProgress?: PromptProgressHandler): Promise<PromptResult> {

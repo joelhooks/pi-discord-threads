@@ -125,6 +125,17 @@ export const piCommand = new SlashCommandBuilder()
   )
   .addSubcommand((subcommand) =>
     subcommand
+      .setName("compact")
+      .setDescription("Compact the current thread's Pi session context")
+      .addStringOption((option) =>
+        option
+          .setName("instructions")
+          .setDescription("Optional focus for the compaction summary")
+          .setRequired(false),
+      ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
       .setName("esc")
       .setDescription("Escape/stop the active Pi run in this Discord thread"),
   )

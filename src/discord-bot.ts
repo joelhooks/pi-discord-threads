@@ -305,6 +305,11 @@ async function handlePiInteraction(
     return;
   }
 
+  if (subcommand === "compact") {
+    await compactInteraction(interaction, options);
+    return;
+  }
+
   if (subcommand === "abort" || subcommand === "esc") {
     await abortInteraction(interaction, options.runtimeManager);
     return;
@@ -871,6 +876,11 @@ async function handleMessage(
 
   if (isCommand(content, "reload")) {
     await reloadMessage(message, options);
+    return;
+  }
+
+  if (isCommand(content, "compact")) {
+    await compactMessage(message, options, commandArgs(content, "compact"));
     return;
   }
 
@@ -1683,6 +1693,86 @@ async function reloadMessage(message: Message, options: RunBotOptions): Promise<
   await safeReply(message, "Reloaded Pi resources for this thread session.");
 }
 
+async function compactInteraction(interaction: ChatInputCommandInteraction, options: RunBotOptions): Promise<void> {
+  const threadId = interaction.channel?.isThread() ? interaction.channel.id : undefined;
+  if (!threadId) {
+    await replyEphemeral(interaction, "Use `/pi compact` inside a registered Pi thread.");
+    return;
+  }
+
+  const record = options.registry.getThread(threadId);
+  if (!record) {
+    await replyEphemeral(interaction, "This Discord thread is not registered to a Pi session yet.");
+    return;
+  }
+
+  const instructions = interaction.options.getString("instructions")?.trim() || undefined;
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  if (options.runtimeManager.isActive(threadId)) {
+    void options.runtimeManager.enqueueCompact(record, instructions)
+      .then((result) => interaction.followUp({ content: formatCompactReceipt(result), flags: MessageFlags.Ephemeral }))
+      .catch((error) => {
+        const text = error instanceof Error ? error.message : String(error);
+        console.warn(`queued compact failed for ${threadId}: ${text}`);
+        return interaction.followUp({ content: `Compact failed: ${text}`, flags: MessageFlags.Ephemeral }).catch(() => undefined);
+      });
+    await interaction.editReply("Compact queued. It will run after the current turn finishes.");
+    return;
+  }
+
+  try {
+    const result = await options.runtimeManager.enqueueCompact(record, instructions);
+    await interaction.editReply(formatCompactReceipt(result));
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    await interaction.editReply(`Compact failed: ${text}`);
+  }
+}
+
+async function compactMessage(message: Message, options: RunBotOptions, instructions?: string): Promise<void> {
+  const threadId = message.channel.isThread() ? message.channel.id : undefined;
+  if (!threadId) {
+    await safeReply(message, "Use `compact` inside a registered Pi thread.");
+    return;
+  }
+
+  const record = options.registry.getThread(threadId);
+  if (!record) {
+    await safeReply(message, "This Discord thread is not registered to a Pi session yet.");
+    return;
+  }
+
+  if (options.runtimeManager.isActive(threadId)) {
+    void options.runtimeManager.enqueueCompact(record, instructions)
+      .then((result) => safeReply(message, formatCompactReceipt(result)))
+      .catch((error) => {
+        const text = error instanceof Error ? error.message : String(error);
+        console.warn(`queued compact failed for ${threadId}: ${text}`);
+        return safeReply(message, `Compact failed: ${text}`).catch(() => undefined);
+      });
+    await safeReply(message, "Compact queued. It will run after the current turn finishes.");
+    return;
+  }
+
+  try {
+    const result = await options.runtimeManager.enqueueCompact(record, instructions);
+    await safeReply(message, formatCompactReceipt(result));
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    await safeReply(message, `Compact failed: ${text}`);
+  }
+}
+
+function formatCompactReceipt(result: { tokensBefore: number; firstKeptEntryId: string; summary: string }): string {
+  const preview = truncateForEmbed(result.summary.replace(/\s+/g, " "), 500);
+  return [
+    "Compacted Pi session context.",
+    `tokensBefore: ${result.tokensBefore.toLocaleString()}`,
+    `firstKeptEntry: ${result.firstKeptEntryId}`,
+    `summary: ${preview}`,
+  ].join("\n");
+}
+
 async function abortInteraction(
   interaction: ChatInputCommandInteraction,
   runtimeManager: PiRuntimeManager,
@@ -1709,6 +1799,13 @@ function formatStatus(record: ThreadRecord): string {
 function isCommand(content: string, command: string): boolean {
   const trimmed = content.trim().toLowerCase();
   return trimmed === command || trimmed.startsWith(`${command} `);
+}
+
+function commandArgs(content: string, command: string): string | undefined {
+  const trimmed = content.trim();
+  if (trimmed.toLowerCase() === command) return undefined;
+  if (!trimmed.toLowerCase().startsWith(`${command} `)) return undefined;
+  return trimmed.slice(command.length).trim() || undefined;
 }
 
 async function safeReply(message: Message, text: string): Promise<void> {
@@ -1757,8 +1854,8 @@ function helpText(prefix: string): string {
     `- Slash: \`/pi ask prompt:<prompt>\` creates/continues a durable Pi session.`,
     `- Slash: \`/pi skill name:<skill> args:<optional>\` invokes a Pi skill as \`/skill:name\`.`,
     `- Slash: \`/pi workspace name:<workspace> prompt:<optional>\` creates a thread rooted in a configured workspace.`,
-    `- Slash: \`/pi status\`, \`/pi debug\`, \`/pi reload\`, \`/pi esc\`, \`/pi abort\`, \`/pi help\`.`,
-    `- Prefix fallback: \`${prefix} <prompt>\`, \`${prefix} workspace <name> [prompt]\`, \`${prefix} status\`, \`${prefix} reload\`, \`${prefix} esc\`, \`${prefix} help\`.`,
+    `- Slash: \`/pi status\`, \`/pi debug\`, \`/pi reload\`, \`/pi compact\`, \`/pi esc\`, \`/pi abort\`, \`/pi help\`.`,
+    `- Prefix fallback: \`${prefix} <prompt>\`, \`${prefix} workspace <name> [prompt]\`, \`${prefix} status\`, \`${prefix} reload\`, \`${prefix} compact [instructions]\`, \`${prefix} esc\`, \`${prefix} help\`.`,
     "- In a registered thread, normal messages continue the Pi session; while active they queue as steering messages.",
     "- Pi skills work normally in messages; Discord slash equivalent is `/pi skill`.",
   ].join("\n");
