@@ -8,6 +8,12 @@ export interface WorkspaceResolution {
   cwd: string;
 }
 
+export interface ContextChannelResolution {
+  channelId: string;
+  cwd: string;
+  workspaceName?: string;
+}
+
 export async function resolveCwdInput(input: string | undefined, fallbackCwd: string): Promise<string> {
   const candidate = normalizeCwdInput(input, fallbackCwd);
   let info;
@@ -45,6 +51,29 @@ export function listWorkspaces(config: AppConfig): WorkspaceResolution[] {
   return Object.entries(config.pi.workspaces)
     .map(([name, cwd]) => ({ name, cwd }))
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function resolveContextChannelDefault(
+  channelId: string | undefined,
+  parentChannelId: string | undefined,
+  config: AppConfig,
+): Promise<ContextChannelResolution | undefined> {
+  for (const candidateChannelId of [channelId, parentChannelId]) {
+    if (!candidateChannelId) continue;
+    const context = config.discord.contextChannels[candidateChannelId];
+    if (!context) continue;
+    if (context.workspace) {
+      const workspace = await resolveWorkspaceInput(context.workspace, config);
+      return { channelId: candidateChannelId, cwd: workspace.cwd, workspaceName: workspace.name };
+    }
+    if (context.cwd) {
+      return {
+        channelId: candidateChannelId,
+        cwd: await resolveCwdInput(context.cwd, config.pi.defaultCwd),
+      };
+    }
+  }
+  return undefined;
 }
 
 export async function resolveWorkspaceInput(input: string, config: AppConfig): Promise<WorkspaceResolution> {

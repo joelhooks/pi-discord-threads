@@ -1,0 +1,111 @@
+---
+title: "Redis Run Control Plane"
+type: "project"
+status: "implemented-v1-disabled-default"
+created_at: "2026-06-03"
+tags:
+  - discord
+  - pi
+  - redis
+  - queue
+  - resilience
+---
+
+# Redis Run Control Plane
+
+## Goal
+
+Make the Pi Discord bridge resilient to daemon restarts, duplicate processes, mid-run interruption, and Discord placeholder/final-answer races by moving in-flight run coordination out of process memory and into Redis-backed durable run state.
+
+## Decisions
+
+- Redis is a core machine pillar and should own in-flight run coordination.
+- Pi session JSONL remains the durable source of truth for conversation/tool history.
+- Discord remains the visible rendering surface: queued/running HUD placeholder, then final answer.
+- Registry storage remains the stable Discord ↔ Pi session mapping for now, but should no longer be the only place to infer active run state.
+- Dkron should act as watchdog/reconciler, not the primary event queue.
+- V1 explicitly chooses **at-least-once run execution with idempotent finalization**, rather than trying to simulate exactly-once execution.
+- V1 should expose separate process roles (`bot`, `worker`, `reconcile`) while still allowing one binary/process to run multiple roles for simple deployment.
+- Redis v1 preserves **one active run per logical thread/workroom**. New Discord messages during an active run become `steer` or `followUp` input instead of starting independent parallel runs against the same Pi session.
+- The run-control model should also make Pi session trees/forks more coherent in Discord so long-running multi-agent work remains findable.
+- Discord graph projection mirrors Pi semantics: `/tree` branches stay inside the same Discord thread/workroom; `/fork` and `/clone` create child Discord threads linked to the parent work node.
+- Discord **Context Channels** should provide sensible default cwd/context: a configured Discord channel maps to a workspace/cwd, and threads created inside that channel inherit it unless the user explicitly overrides with `/pi workspace`, modal workspace, or `--cwd`.
+- The bridge daemon should run as a macOS **user LaunchAgent** in the `gui/$UID` domain, not as an orphaned shell/nohup process. Local reviewer CLIs such as Macroscope store auth in the login keychain; orphaned daemon processes can see `System.keychain` as the default and fail to read otherwise-valid auth.
+
+## Source-Grounded Patterns
+
+Relevant `joelclaw.com/api/docs` source pointers found during planning:
+
+- Sam Newman, *Building Microservices* - asynchronous nonblocking interaction through message brokers; workflow orchestration vs choreography; circuit breaker/degraded functionality patterns.
+- Adam Bellemare, *Building Event-Driven Microservices* - distinction between event brokers and message brokers.
+- Joe Reis & Matt Housley, *Fundamentals of Data Engineering* - message queue delivery modes including at-least-once/exactly-once tradeoffs.
+- Michael Nygard, *Release It!* - timeouts, circuit breakers, delayed retries, and stability patterns.
+- Google SRE, *Site Reliability Engineering* - reliable agreement questions including distributed queues and leases.
+- Martin Kleppmann, *Designing Data-Intensive Applications* - logs/streams, keeping systems in sync, event sourcing, stream fault tolerance.
+
+## Work Graph / Fork Findings
+
+- Pi sessions are already trees: JSONL entries have `id` / `parentId`; `/tree` branches inside one session file by moving the active leaf.
+- Pi `/fork` and `/clone` create new session files with `parentSession` lineage in the session header.
+- Pi session listing already has a threaded view based on `parentSessionPath`.
+- Pi exposes `SessionManager.forkFrom()`, `createBranchedSession()`, `branch()`, `branchWithSummary()`, `appendLabelChange()`, and tree inspection APIs that the bridge can use instead of inventing a separate fork model.
+- Current Discord `/pi fork` creates a new Discord thread and new thread record, but it does not yet create a true Pi fork from the source `sessionFile`.
+- Design direction: Discord should become a readable projection of Pi's work graph, not a second source of truth for branching.
+
+## Existing Behavior to Preserve or Replace
+
+- `PiRuntimeManager` currently serializes operations per `threadId` with an in-memory promise queue.
+- If a Pi session is actively streaming, new Discord input is not started as a second run; it is routed into the active session as `steer` or `followUp` input.
+- This behavior disappears across process boundaries/restarts unless Redis owns the active-run state.
+
+## Initial Shape
+
+- Redis Streams for run jobs and run events.
+- Redis hashes for current run state.
+- Redis leases for daemon leadership, worker claims, per-thread locks, and active Discord placeholder ownership.
+- Dkron scheduled reconciliation for stale leases, interrupted jobs, cleanup, and health reporting.
+
+## V1 Implementation Notes
+
+- `runControl.enabled` defaults to `false`; the bridge does not connect to Redis when disabled.
+- Config now exposes Redis URL/env, key prefix, roles, worker id, lease/heartbeat/stale/reconcile timing.
+- Redis modules live under `src/run-control/`: typed run/job/input records, client creation, store operations, worker loop, and reconciler.
+- Ingress creates the normal Discord placeholder, then enqueues Redis jobs instead of calling `PiRuntimeManager.enqueuePrompt()` directly when run control is enabled.
+- `thread:{logicalId}:active` preserves one active run per Discord thread/DM workroom across processes; new input appends to `thread:{logicalId}:inputs` as steer/followUp.
+- The worker owns Pi execution and Discord finalization. Final posting is guarded by `finalize:{runId}` and terminal Redis status transitions are monotonic.
+- `pi-discord-threads reconcile --dry-run|--apply` reports expired leases, stale active pointers, unretired placeholders, registry/Redis mismatches, and missing session files.
+- The daemon reconcile role applies safe local cleanup for stale Redis and registry pointers; terminal runs without a placeholder marker are marked retired so they do not spam the daemon log.
+- LaunchAgent start/restart refuses to run from inside the active bridge process tree, because kickstarting launchd from the Discord turn kills the daemon carrying that turn.
+- `/pi fork` now uses `SessionManager.forkFrom(source.sessionFile, source.cwd, config.pi.sessionDir)` when possible and stores work-graph parent metadata on the child thread.
+
+## Context Channels
+
+- Discord Context Channels provide sensible default cwd/context: a configured Discord channel maps to a workspace/cwd, and threads created inside that channel inherit it.
+- Explicit user overrides win: `/pi workspace`, modal workspace input, slash-command `cwd`, and prefix `--cwd` can override the channel default.
+- Once a thread record exists, the registry record remains durable truth so later channel config changes do not silently move an existing session.
+- Implemented config shape: `discord.contextChannels[<channelId>] = { workspace: <workspaceName> }` or `{ cwd: <path> }`. Workspace wins when both are present.
+- Live mappings:
+  - channel `1511863050058072225` defaults to workspace `aihero`, cwd `~/Code/badass-courses/aihero-support`.
+  - channel `1512114398313844936` defaults to workspace `pi-discord-threads`, cwd `~/Code/joelhooks/pi-discord-threads`.
+  - channel `1512114189634637864` defaults to workspace `dark-wizard`, cwd `~/Code/joelhooks/dark-wizard`.
+
+## LaunchAgent / Keychain Audit Notes
+
+- The pre-LaunchAgent daemon was observed as PID `74426` with parent PID `1`: `/Users/joel/.local/share/fnm/node-versions/v24.16.0/installation/bin/node /Users/joel/Code/joelhooks/pi-discord-threads/dist/index.js start --config /Users/joel/.config/pi-discord-threads/config.json`.
+- Macroscope was installed at `/Users/joel/.local/bin/macroscope` and its credential existed in `~/Library/Keychains/login.keychain-db` under `macroscope.com`.
+- The Pi subprocess saw plain `security default-keychain` as `/Library/Keychains/System.keychain`, while `security default-keychain -d user` showed the login keychain. Secret reads from the login keychain failed with exit `36` from that subprocess.
+- `install-launch-agent`, `launch-agent-status`, and `uninstall-launch-agent` now provide a first-class user LaunchAgent lifecycle for this bridge. The generated plist is `~/Library/LaunchAgents/com.joelhooks.pi-discord-threads.plist`.
+
+## Audit Notes Before Enabling Redis Live
+
+- Validation currently passes with run control disabled by default: typecheck, build, Brain check, disabled doctor, isolated Redis doctor/reconcile smoke test, and isolated Redis semantic smoke test.
+- Finalization crash suppression has been hardened: `finalize:{runId}` is now a TTL claim with `acquired | busy | done` states, successful finalization marks the key `done`, and a busy finalizer leaves the stream job reclaimable instead of marking terminal.
+- Finalizing retries now resume from persisted Redis result state (`resultText`, session file, entry IDs) instead of rerunning Pi after a crash between agent execution and Discord finalization.
+- Late input during finalization is handled: Redis queueing uses `getQueueableActiveRunId()`, which clears missing/terminal/finalizing active pointers so late Discord input starts a fresh run instead of being appended to a finished run.
+- Input count UX is improved for queued active-run input by counting stream entries for the active run instead of total stream length.
+- Remaining caveat: Discord finalization still cannot be perfectly atomic with Redis. A crash after posting a final Discord message but before marking `done` can still risk duplicate final output on retry; this is narrower than the previous suppression failure and should be considered before live enablement.
+
+## Deferred Questions
+
+- Should stable registry move to SQLite/libSQL after Redis run control is proven?
+- Should `/pi clone` and `/pi map` be added as V1.5 work graph projection commands?

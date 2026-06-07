@@ -1,0 +1,14 @@
+---
+title: "pi-discord-threads Brain"
+type: "index"
+status: "active"
+created_at: "2026-06-03"
+---
+
+# pi-discord-threads Brain
+
+## Projects
+
+- [Discord Run HUD](./projects/discord-run-hud.svx)
+- [Personal Workroom DM Prototype](./projects/personal-workroom-dm-prototype.svx)
+- [Redis Run Control Plane](./projects/redis-run-control-plane.svx)

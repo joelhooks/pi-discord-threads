@@ -11,6 +11,7 @@ import type { InlineImageContent } from "./attachments.js";
 import type { AppConfig } from "./config.js";
 import { DISCORD_SYSTEM_PROMPT } from "./discord-system-prompt.js";
 import type { Registry, ThreadRecord } from "./registry.js";
+import type { RunFeedEvent } from "./run-hud.js";
 
 interface ManagedRuntime {
   runtime: AgentSessionRuntime;
@@ -53,6 +54,7 @@ export interface PromptProgress {
   isError?: boolean;
   sessionFile?: string;
   elapsedMs?: number;
+  feedEvent?: RunFeedEvent;
 }
 
 export type PromptProgressHandler = (progress: PromptProgress) => void | Promise<void>;
@@ -194,6 +196,12 @@ export class PiRuntimeManager {
       title: "Starting Pi session",
       detail: thread.sessionFile ? "Rehydrating existing session" : "Creating a durable Pi session",
       sessionFile: thread.sessionFile,
+      feedEvent: {
+        type: "run_start",
+        title: "Starting Pi session",
+        detail: thread.sessionFile ? "Rehydrating existing session" : "Creating a durable Pi session",
+        phase: "starting",
+      },
     });
 
     const managed = await this.getOrCreateRuntime(thread);
@@ -206,6 +214,12 @@ export class PiRuntimeManager {
       title: "Prompt accepted",
       detail: "Pi is preparing context and choosing tools",
       sessionFile: session.sessionFile,
+      feedEvent: {
+        type: "prompt_accepted",
+        title: "Prompt accepted",
+        detail: "Pi is preparing context and choosing tools",
+        phase: "thinking",
+      },
     });
 
     const unsubscribe = session.subscribe((event) => {
@@ -215,6 +229,12 @@ export class PiRuntimeManager {
           title: "Agent running",
           detail: "Pi is reasoning over the prompt",
           sessionFile: session.sessionFile,
+          feedEvent: {
+            type: "agent_start",
+            title: "Agent running",
+            detail: "Pi is reasoning over the prompt",
+            phase: "thinking",
+          },
         });
       }
 
@@ -224,6 +244,13 @@ export class PiRuntimeManager {
           title: "Thinking",
           detail: "Reasoning stream is active",
           sessionFile: session.sessionFile,
+          feedEvent: {
+            type: "thinking_delta",
+            title: "Thinking",
+            detail: "Reasoning stream is active",
+            phase: "thinking",
+            delta: String((event.assistantMessageEvent as { delta?: unknown }).delta ?? ""),
+          },
         });
       }
 
@@ -234,6 +261,13 @@ export class PiRuntimeManager {
           title: "Writing response",
           textPreview: tail(assistantText, 700),
           sessionFile: session.sessionFile,
+          feedEvent: {
+            type: "text_delta",
+            title: "Writing response",
+            phase: "streaming",
+            delta: event.assistantMessageEvent.delta,
+            textPreview: tail(assistantText, 1_500),
+          },
         });
       }
 
@@ -245,6 +279,33 @@ export class PiRuntimeManager {
           detail: activity.detail,
           toolName: event.toolName,
           sessionFile: session.sessionFile,
+          feedEvent: {
+            type: "tool_start",
+            title: activity.title,
+            detail: activity.detail,
+            phase: "tool",
+            toolName: event.toolName,
+            toolCallId: event.toolCallId,
+            args: event.args,
+          },
+        });
+      }
+
+      if (event.type === "tool_execution_update") {
+        this.publishProgress(onProgress, {
+          phase: "tool",
+          title: `Updating: ${event.toolName}`,
+          toolName: event.toolName,
+          sessionFile: session.sessionFile,
+          feedEvent: {
+            type: "tool_update",
+            title: `Updating: ${event.toolName}`,
+            phase: "tool",
+            toolName: event.toolName,
+            toolCallId: event.toolCallId,
+            args: event.args,
+            partialResult: event.partialResult,
+          },
         });
       }
 
@@ -255,6 +316,15 @@ export class PiRuntimeManager {
           toolName: event.toolName,
           isError: event.isError,
           sessionFile: session.sessionFile,
+          feedEvent: {
+            type: "tool_end",
+            title: `${event.isError ? "Tool errored" : "Finished"}: ${event.toolName}`,
+            phase: "tool",
+            toolName: event.toolName,
+            toolCallId: event.toolCallId,
+            result: event.result,
+            isError: event.isError,
+          },
         });
       }
 
@@ -264,6 +334,12 @@ export class PiRuntimeManager {
           title: "Compacting context",
           detail: event.reason,
           sessionFile: session.sessionFile,
+          feedEvent: {
+            type: "compaction_start",
+            title: "Compacting context",
+            detail: event.reason,
+            phase: "compaction",
+          },
         });
       }
 
@@ -273,15 +349,100 @@ export class PiRuntimeManager {
           title: `Retrying provider request (${event.attempt}/${event.maxAttempts})`,
           detail: event.errorMessage,
           sessionFile: session.sessionFile,
+          feedEvent: {
+            type: "auto_retry_start",
+            title: `Retrying provider request (${event.attempt}/${event.maxAttempts})`,
+            detail: event.errorMessage,
+            phase: "retry",
+            data: { attempt: event.attempt, maxAttempts: event.maxAttempts, delayMs: event.delayMs },
+          },
+        });
+      }
+
+      if (event.type === "queue_update") {
+        this.publishProgress(onProgress, {
+          phase: "thinking",
+          title: "Queued thread input",
+          detail: `${event.steering.length} steering, ${event.followUp.length} follow-up`,
+          sessionFile: session.sessionFile,
+          feedEvent: {
+            type: "queue_update",
+            title: "Queued thread input",
+            detail: `${event.steering.length} steering, ${event.followUp.length} follow-up`,
+            data: { steering: event.steering, followUp: event.followUp },
+          },
+        });
+      }
+
+      if (event.type === "compaction_end") {
+        this.publishProgress(onProgress, {
+          phase: "compaction",
+          title: event.aborted ? "Compaction aborted" : "Compaction finished",
+          detail: event.errorMessage,
+          isError: Boolean(event.errorMessage),
+          sessionFile: session.sessionFile,
+          feedEvent: {
+            type: "compaction_end",
+            title: event.aborted ? "Compaction aborted" : "Compaction finished",
+            detail: event.errorMessage,
+            phase: "compaction",
+            isError: Boolean(event.errorMessage),
+            result: event.result,
+            data: { aborted: event.aborted, willRetry: event.willRetry, reason: event.reason },
+          },
+        });
+      }
+
+      if (event.type === "auto_retry_end") {
+        this.publishProgress(onProgress, {
+          phase: "retry",
+          title: event.success ? "Provider retry recovered" : "Provider retry failed",
+          detail: event.finalError,
+          isError: !event.success,
+          sessionFile: session.sessionFile,
+          feedEvent: {
+            type: "auto_retry_end",
+            title: event.success ? "Provider retry recovered" : "Provider retry failed",
+            detail: event.finalError,
+            phase: "retry",
+            isError: !event.success,
+            data: { attempt: event.attempt, success: event.success },
+          },
+        });
+      }
+
+      if (event.type === "agent_end") {
+        this.publishProgress(onProgress, {
+          phase: "thinking",
+          title: event.willRetry ? "Agent turn ended; retry pending" : "Agent turn ended",
+          sessionFile: session.sessionFile,
+          feedEvent: {
+            type: "agent_end",
+            title: event.willRetry ? "Agent turn ended; retry pending" : "Agent turn ended",
+            data: { willRetry: event.willRetry, messages: event.messages },
+          },
         });
       }
     });
 
-    await this.registry.patchThread(thread.threadId, { status: "running" });
+    const runPatch: Partial<Omit<ThreadRecord, "threadId" | "createdAt">> = {
+      status: "running",
+      sessionFile: session.sessionFile,
+    };
+    const currentRecord = this.registry.getThread(thread.threadId);
+    if (currentRecord?.activeRun) {
+      runPatch.activeRun = {
+        ...currentRecord.activeRun,
+        sessionFile: session.sessionFile,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+    await this.registry.patchThread(thread.threadId, runPatch);
     try {
       await session.prompt(text, images.length > 0 ? { images } : undefined);
     } finally {
       unsubscribe();
+      this.scheduleDispose(thread.threadId, managed);
     }
 
     const sessionFile = session.sessionFile;
@@ -289,9 +450,9 @@ export class PiRuntimeManager {
     await this.registry.patchThread(thread.threadId, {
       sessionFile,
       status: "idle",
+      activeRun: undefined,
       sessionName: session.sessionManager.getSessionName() ?? thread.sessionName,
     });
-    this.scheduleDispose(thread.threadId, managed);
 
     const finalText = assistantText.trim() || session.getLastAssistantText() || "";
     this.publishProgress(onProgress, {
@@ -299,6 +460,12 @@ export class PiRuntimeManager {
       title: "Done",
       textPreview: tail(finalText, 700),
       sessionFile,
+      feedEvent: {
+        type: "run_done",
+        title: "Done",
+        phase: "done",
+        textPreview: tail(finalText, 1_500),
+      },
     });
 
     return {
@@ -319,12 +486,18 @@ export class PiRuntimeManager {
     const sessionManager = thread.sessionFile
       ? SessionManager.open(thread.sessionFile)
       : SessionManager.create(thread.cwd, this.config.pi.sessionDir);
+    const additionalExtensionPaths = [...new Set(
+      (thread.extensionPaths ?? [])
+        .map((extensionPath) => extensionPath.trim())
+        .filter(Boolean),
+    )];
 
     const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
       const services = await createAgentSessionServices({
         cwd,
         agentDir: this.agentDir,
         resourceLoaderOptions: {
+          additionalExtensionPaths,
           appendSystemPromptOverride: (base) => [...base, DISCORD_SYSTEM_PROMPT],
         },
       });
@@ -367,11 +540,12 @@ export class PiRuntimeManager {
     const next = previous
       .catch(() => undefined)
       .then(operation);
-    this.queues.set(threadId, next.finally(() => {
-      if (this.queues.get(threadId) === next) {
+    const queued = next.finally(() => {
+      if (this.queues.get(threadId) === queued) {
         this.queues.delete(threadId);
       }
-    }));
+    });
+    this.queues.set(threadId, queued);
     return next;
   }
 

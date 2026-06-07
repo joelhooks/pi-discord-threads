@@ -6,6 +6,10 @@ import { runBot } from "./discord-bot.js";
 import { PiRuntimeManager } from "./pi-runtime.js";
 import { Registry } from "./registry.js";
 import { SecretResolver } from "./secrets.js";
+import { checkRunControlRedisHealth, createRunControlRedisClient, getRunControlWorkerId } from "./run-control/redis-client.js";
+import { formatReconcileReport, reconcileRunControl, startRunControlReconcileLoop } from "./run-control/reconcile.js";
+import { RunControlStore } from "./run-control/store.js";
+import { installLaunchAgent, printLaunchAgentStatus, uninstallLaunchAgent } from "./launch-agent.js";
 
 installProcessGuards();
 
@@ -62,6 +66,37 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cli.command === "reconcile") {
+    await reconcileCommand(config, cli.reconcileApply);
+    return;
+  }
+
+  if (cli.command === "install-launch-agent") {
+    await installLaunchAgent({
+      config,
+      configPath: cli.configPath,
+      roles: cli.roles ?? config.runControl.roles,
+      start: cli.launchAgentStart,
+      restart: cli.launchAgentRestart,
+      force: cli.force,
+    });
+    return;
+  }
+
+  if (cli.command === "uninstall-launch-agent") {
+    await uninstallLaunchAgent(config);
+    return;
+  }
+
+  if (cli.command === "launch-agent-status") {
+    await printLaunchAgentStatus(config);
+    return;
+  }
+
+  const roles = config.runControl.enabled ? (cli.roles ?? config.runControl.roles) : ["bot" as const];
+  const redisClient = config.runControl.enabled ? await createRunControlRedisClient(config) : undefined;
+  const runControlStore = redisClient ? new RunControlStore(redisClient, config) : undefined;
+
   const secrets = new SecretResolver();
   const token = await secrets.resolveRequired({
     envName: config.discord.tokenEnv,
@@ -79,9 +114,37 @@ async function main(): Promise<void> {
 
   const registry = new Registry(join(config.dataDir, "registry.json"));
   await registry.load();
+  if (!config.runControl.enabled) {
+    const interruptedCount = await registry.markRunningThreadsInterrupted();
+    if (interruptedCount > 0) {
+      console.log(`marked ${interruptedCount} stale running Pi session(s) as interrupted`);
+    }
+  }
+
+  const stopReconcileLoop = config.runControl.enabled && runControlStore && roles.includes("reconcile")
+    ? startRunControlReconcileLoop({ store: runControlStore, registry, config, apply: true })
+    : undefined;
+
+  if (config.runControl.enabled && runControlStore && !roles.includes("bot") && !roles.includes("worker") && roles.includes("reconcile")) {
+    console.log("run-control reconcile role running; press Ctrl-C to stop");
+    await new Promise<void>((resolve) => {
+      const shutdown = async () => {
+        stopReconcileLoop?.();
+        await runControlStore.close();
+        resolve();
+      };
+      process.once("SIGINT", () => void shutdown());
+      process.once("SIGTERM", () => void shutdown());
+    });
+    return;
+  }
 
   const runtimeManager = new PiRuntimeManager(config, registry);
   await runBot({
+    runControlStore,
+    runControlRoles: roles,
+    runControlWorkerId: getRunControlWorkerId(config),
+    runControlStopReconcileLoop: stopReconcileLoop,
     config,
     token,
     allowedUserIds,
@@ -107,16 +170,45 @@ async function doctor(configPath: string, config: AppConfig): Promise<void> {
   console.log(`registry: ${join(config.dataDir, "registry.json")}`);
   console.log(`workspaces: ${Object.keys(config.pi.workspaces).length}`);
   console.log(`attachments: ${config.attachments.enabled ? "enabled" : "disabled"}, maxBytes=${config.attachments.maxBytes}`);
+  console.log(`runControl: ${config.runControl.enabled ? "enabled" : "disabled"}, roles=${config.runControl.roles.join(",")}, keyPrefix=${config.runControl.keyPrefix}`);
+  const redisHealth = await checkRunControlRedisHealth(config);
+  console.log(redisHealth.message);
   console.log(`node: ${process.version}`);
   console.log("secrets: will use local `secrets lease` unless env vars are set");
   console.log("discord: requires Message Content Intent and permission to create/send in threads");
+}
+
+async function reconcileCommand(config: AppConfig, apply: boolean): Promise<void> {
+  if (!config.runControl.enabled) {
+    console.log("runControl is disabled; no Redis reconciliation to perform.");
+    return;
+  }
+  const registry = new Registry(join(config.dataDir, "registry.json"));
+  await registry.load();
+  const redisClient = await createRunControlRedisClient(config);
+  const store = new RunControlStore(redisClient, config);
+  try {
+    const report = await reconcileRunControl({ store, registry, config, apply });
+    console.log(formatReconcileReport(report));
+  } finally {
+    await store.close();
+  }
 }
 
 function printHelp(): void {
   console.log(`pi-discord-threads
 
 Commands:
-  start [--config path]        Start the Discord ↔ Pi bridge daemon
+  start [--config path] [--roles bot,worker,reconcile]
+                              Start the Discord ↔ Pi bridge daemon
+  install-launch-agent [--config path] [--roles bot,worker,reconcile] [--start|--restart] [--force]
+                              Write the macOS user LaunchAgent; optionally bootstrap it in gui/$UID
+  launch-agent-status [--config path]
+                              Show LaunchAgent label/plist/load state and matching daemon PIDs
+  uninstall-launch-agent [--config path]
+                              Boot out and remove the LaunchAgent plist
+  reconcile [--config path] [--dry-run|--apply]
+                              Inspect/apply Redis run-control reconciliation
   init-config [--config path]  Write a default JSON config
   doctor [--config path]       Print non-secret runtime diagnostics
 

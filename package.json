@@ -15,8 +15,10 @@
     "publish-system-prompt": "npm run render-system-prompt && wzrrd publish --file docs/system-prompt-site --slug pi-discord-system-prompt"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.78.0",
-    "discord.js": "^14.18.0"
+    "@earendil-works/pi-coding-agent": "^0.78.1",
+    "discord.js": "^14.18.0",
+    "redis": "^5.12.1",
+    "typebox": "^1.1.38"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

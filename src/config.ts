@@ -3,6 +3,35 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
 
+export const runControlRoles = ["bot", "worker", "reconcile"] as const;
+export type RunControlRole = typeof runControlRoles[number];
+
+export interface RunControlConfig {
+  enabled: boolean;
+  redisUrlEnv: string;
+  redisUrl?: string;
+  keyPrefix: string;
+  roles: RunControlRole[];
+  workerId?: string;
+  leaseTtlMs: number;
+  heartbeatMs: number;
+  staleRunMs: number;
+  reconcileIntervalMs: number;
+}
+
+export interface DiscordContextChannelConfig {
+  workspace?: string;
+  cwd?: string;
+}
+
+export interface PersonalWorkroomConfig {
+  enabled: boolean;
+  workspace?: string;
+  cwd?: string;
+  sessionName: string;
+  extensionPaths: string[];
+}
+
 export interface AppConfig {
   dataDir: string;
   discord: {
@@ -14,6 +43,8 @@ export interface AppConfig {
     allowedUserIdSecretName?: string;
     guildIds: string[];
     channelIds: string[];
+    contextChannels: Record<string, DiscordContextChannelConfig>;
+    personalWorkroom: PersonalWorkroomConfig;
     commandPrefix: string;
     respondToMentions: boolean;
   };
@@ -26,6 +57,11 @@ export interface AppConfig {
   };
   render: {
     maxDiscordChars: number;
+    hud: {
+      enabled: boolean;
+      model: string;
+      updateIntervalMs: number;
+    };
   };
   attachments: {
     enabled: boolean;
@@ -33,11 +69,17 @@ export interface AppConfig {
     allowedContentTypePrefixes: string[];
     allowedExtensions: string[];
   };
+  runControl: RunControlConfig;
 }
 
 export interface CliOptions {
-  command: "start" | "init-config" | "doctor" | "status" | "help";
+  command: "start" | "init-config" | "doctor" | "status" | "reconcile" | "install-launch-agent" | "uninstall-launch-agent" | "launch-agent-status" | "help";
   configPath: string;
+  roles?: RunControlRole[];
+  reconcileApply: boolean;
+  launchAgentStart: boolean;
+  launchAgentRestart: boolean;
+  force: boolean;
 }
 
 export function expandPath(path: string): string {
@@ -65,6 +107,12 @@ export function defaultConfig(): AppConfig {
       allowedUserIdSecretName: "discord_allowed_user_id",
       guildIds: [],
       channelIds: [],
+      contextChannels: {},
+      personalWorkroom: {
+        enabled: false,
+        sessionName: "Personal Workroom",
+        extensionPaths: [],
+      },
       commandPrefix: "!pi",
       respondToMentions: true,
     },
@@ -75,6 +123,11 @@ export function defaultConfig(): AppConfig {
     },
     render: {
       maxDiscordChars: 1900,
+      hud: {
+        enabled: true,
+        model: "openai-codex/gpt-5.5",
+        updateIntervalMs: 5_000,
+      },
     },
     attachments: {
       enabled: true,
@@ -87,6 +140,16 @@ export function defaultConfig(): AppConfig {
         ".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".mpeg", ".mpg",
         ".pdf",
       ],
+    },
+    runControl: {
+      enabled: false,
+      redisUrlEnv: "REDIS_URL",
+      keyPrefix: "pi-discord-threads",
+      roles: ["bot", "worker", "reconcile"],
+      leaseTtlMs: 60_000,
+      heartbeatMs: 10_000,
+      staleRunMs: 10 * 60_000,
+      reconcileIntervalMs: 60_000,
     },
   };
 }
@@ -106,10 +169,18 @@ function mergeConfig(base: AppConfig, partial: Partial<AppConfig>): AppConfig {
     render: {
       ...base.render,
       ...(partial.render ?? {}),
+      hud: {
+        ...base.render.hud,
+        ...(partial.render?.hud ?? {}),
+      },
     },
     attachments: {
       ...base.attachments,
       ...(partial.attachments ?? {}),
+    },
+    runControl: {
+      ...base.runControl,
+      ...(partial.runControl ?? {}),
     },
   };
 }
@@ -143,6 +214,8 @@ export function normalizeConfig(config: AppConfig): AppConfig {
       allowedUserIds: [...new Set(config.discord.allowedUserIds.map((id) => id.trim()).filter(Boolean))],
       guildIds: [...new Set(config.discord.guildIds.map((id) => id.trim()).filter(Boolean))],
       channelIds: [...new Set(config.discord.channelIds.map((id) => id.trim()).filter(Boolean))],
+      contextChannels: normalizeContextChannels(config.discord.contextChannels),
+      personalWorkroom: normalizePersonalWorkroom(config.discord.personalWorkroom),
       commandPrefix: config.discord.commandPrefix || "!pi",
       tokenLeaseTtl: config.discord.tokenLeaseTtl || "12h",
     },
@@ -156,6 +229,11 @@ export function normalizeConfig(config: AppConfig): AppConfig {
     },
     render: {
       maxDiscordChars: Math.max(500, Math.min(1900, config.render.maxDiscordChars || 1900)),
+      hud: {
+        enabled: config.render.hud?.enabled !== false,
+        model: config.render.hud?.model?.trim() || "openai-codex/gpt-5.5",
+        updateIntervalMs: Math.max(2_500, Math.min(30_000, config.render.hud?.updateIntervalMs || 5_000)),
+      },
     },
     attachments: {
       enabled: config.attachments.enabled !== false,
@@ -163,6 +241,32 @@ export function normalizeConfig(config: AppConfig): AppConfig {
       allowedContentTypePrefixes: [...new Set(config.attachments.allowedContentTypePrefixes.map((value) => value.trim()).filter(Boolean))],
       allowedExtensions: [...new Set(config.attachments.allowedExtensions.map((value) => value.trim().toLowerCase()).filter(Boolean))],
     },
+    runControl: normalizeRunControl(config.runControl),
+  };
+}
+
+function normalizeContextChannels(channels: Record<string, DiscordContextChannelConfig> | undefined): Record<string, DiscordContextChannelConfig> {
+  const normalized: Record<string, DiscordContextChannelConfig> = {};
+  for (const [rawChannelId, value] of Object.entries(channels ?? {})) {
+    const channelId = rawChannelId.trim();
+    const workspace = value.workspace?.trim().toLowerCase();
+    const cwd = value.cwd?.trim();
+    if (!channelId || (!workspace && !cwd)) continue;
+    normalized[channelId] = {
+      ...(workspace ? { workspace } : {}),
+      ...(cwd ? { cwd } : {}),
+    };
+  }
+  return normalized;
+}
+
+function normalizePersonalWorkroom(workroom: PersonalWorkroomConfig | undefined): PersonalWorkroomConfig {
+  return {
+    enabled: workroom?.enabled === true,
+    workspace: workroom?.workspace?.trim().toLowerCase() || undefined,
+    cwd: workroom?.cwd?.trim() ? expandPath(workroom.cwd) : undefined,
+    sessionName: workroom?.sessionName?.trim() || "Personal Workroom",
+    extensionPaths: [...new Set((workroom?.extensionPaths ?? []).map((value) => value.trim()).filter(Boolean).map(expandPath))],
   };
 }
 
@@ -177,6 +281,56 @@ function normalizeWorkspaces(workspaces: Record<string, string> | undefined): Re
   return normalized;
 }
 
+function normalizeRunControl(runControl: RunControlConfig | undefined): RunControlConfig {
+  const defaults = defaultConfig().runControl;
+  const merged = { ...defaults, ...(runControl ?? {}) };
+  const roles = normalizeRunControlRoles(merged.roles);
+  const leaseTtlMs = clampNumber(merged.leaseTtlMs, 5_000, 10 * 60_000, defaults.leaseTtlMs);
+  const heartbeatMs = clampNumber(merged.heartbeatMs, 1_000, Math.max(1_000, Math.floor(leaseTtlMs / 2)), defaults.heartbeatMs);
+  const staleRunMs = clampNumber(merged.staleRunMs, leaseTtlMs, 24 * 60 * 60_000, defaults.staleRunMs);
+  return {
+    enabled: merged.enabled === true,
+    redisUrlEnv: merged.redisUrlEnv?.trim() || defaults.redisUrlEnv,
+    redisUrl: merged.redisUrl?.trim() || undefined,
+    keyPrefix: merged.keyPrefix?.trim() || defaults.keyPrefix,
+    roles,
+    workerId: merged.workerId?.trim() || undefined,
+    leaseTtlMs,
+    heartbeatMs,
+    staleRunMs,
+    reconcileIntervalMs: clampNumber(merged.reconcileIntervalMs, 5_000, 60 * 60_000, defaults.reconcileIntervalMs),
+  };
+}
+
+function clampNumber(value: number | undefined, min: number, max: number, fallback: number): number {
+  const numeric = Number.isFinite(value) ? Number(value) : fallback;
+  return Math.max(min, Math.min(max, numeric));
+}
+
+function normalizeRunControlRoles(values: RunControlRole[] | undefined): RunControlRole[] {
+  const roles: RunControlRole[] = [];
+  for (const value of values ?? []) {
+    try {
+      roles.push(parseRunControlRole(value));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`Ignoring invalid run-control role in config: ${message}`);
+    }
+  }
+  const unique = [...new Set(roles)];
+  return unique.length > 0 ? unique : ["bot", "worker", "reconcile"];
+}
+
+function parseRunControlRoles(value: string): RunControlRole[] {
+  return [...new Set(value.split(/[,\s]+/).filter(Boolean).map((role) => parseRunControlRole(role)))];
+}
+
+function parseRunControlRole(value: string): RunControlRole {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "bot" || normalized === "worker" || normalized === "reconcile") return normalized;
+  throw new Error(`Unknown run-control role: ${value}`);
+}
+
 export function parseCliArgs(argv: string[]): CliOptions {
   const [maybeCommand, ...rest] = argv;
   const command = maybeCommand && !maybeCommand.startsWith("-")
@@ -185,6 +339,11 @@ export function parseCliArgs(argv: string[]): CliOptions {
   const args = command === maybeCommand ? rest : argv;
 
   let configPath = defaultConfigPath;
+  let reconcileApply = false;
+  let launchAgentStart = false;
+  let launchAgentRestart = false;
+  let force = false;
+  let roles: RunControlRole[] | undefined;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--config" || arg === "-c") {
@@ -199,13 +358,56 @@ export function parseCliArgs(argv: string[]): CliOptions {
       continue;
     }
     if (arg === "--help" || arg === "-h") {
-      return { command: "help", configPath };
+      return { command: "help", configPath, reconcileApply, launchAgentStart, launchAgentRestart, force };
+    }
+    if (arg === "--dry-run") {
+      reconcileApply = false;
+      continue;
+    }
+    if (arg === "--apply") {
+      reconcileApply = true;
+      continue;
+    }
+    if (arg === "--start") {
+      launchAgentStart = true;
+      continue;
+    }
+    if (arg === "--restart") {
+      launchAgentStart = true;
+      launchAgentRestart = true;
+      continue;
+    }
+    if (arg === "--force") {
+      force = true;
+      continue;
+    }
+    if (arg === "--role") {
+      const next = args[i + 1];
+      if (!next) throw new Error("--role requires bot, worker, or reconcile");
+      roles = [...(roles ?? []), parseRunControlRole(next)];
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--role=")) {
+      roles = [...(roles ?? []), parseRunControlRole(arg.slice("--role=".length))];
+      continue;
+    }
+    if (arg === "--roles") {
+      const next = args[i + 1];
+      if (!next) throw new Error("--roles requires a comma-separated role list");
+      roles = parseRunControlRoles(next);
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--roles=")) {
+      roles = parseRunControlRoles(arg.slice("--roles=".length));
+      continue;
     }
   }
 
-  if (!["start", "init-config", "doctor", "status", "help"].includes(command)) {
+  if (!["start", "init-config", "doctor", "status", "reconcile", "install-launch-agent", "uninstall-launch-agent", "launch-agent-status", "help"].includes(command)) {
     throw new Error(`Unknown command: ${command}`);
   }
 
-  return { command: command as CliOptions["command"], configPath };
+  return { command: command as CliOptions["command"], configPath, roles, reconcileApply, launchAgentStart, launchAgentRestart, force };
 }

@@ -1,0 +1,42 @@
+---
+title: "Personal Workroom DM Prototype"
+type: "project"
+status: "implemented-config-gated"
+created_at: "2026-06-03"
+tags:
+  - discord
+  - pi
+  - personal-workroom
+---
+
+# Personal Workroom DM Prototype
+
+## Goal
+
+Let Joel DM the JoelClaw Discord bot and continue one durable local Pi-backed Personal Workroom, instead of requiring a server thread for every turn.
+
+## Decisions
+
+- Keep v1 small: Discord DM + local Pi session only.
+- Use `dm:<discordUserId>` as the stable registry key.
+- Keep the workroom disabled by default in portable config.
+- Enable it per deployment with `discord.personalWorkroom.enabled`.
+- Configure `workspace` or `cwd`, `sessionName`, and optional `extensionPaths` instead of hardcoding Joel-local paths.
+- Preserve existing server thread/workspace behavior.
+- Treat daemon restarts as interruption boundaries: records left `running` on process start are marked `interrupted`.
+
+## Implementation
+
+- `src/discord-bot.ts` handles normal bot DMs before guild/thread routing and sends them through the shared prompt runner.
+- `src/registry.ts` stores DM-specific record metadata (`kind`, `discordUserId`, `extensionPaths`) and supports startup interruption cleanup.
+- `src/pi-runtime.ts` passes per-record `extensionPaths` into Pi's `additionalExtensionPaths` resource-loader option.
+- `src/index.ts` marks stale `running` records as `interrupted` when the daemon starts.
+
+## Validation
+
+- `npm run typecheck`
+- `npm run build`
+
+## Manual Test
+
+Enable `discord.personalWorkroom`, send two normal Discord DMs to JoelClaw, and verify both use the same `dm:<discordUserId>` registry record/session file.

@@ -1,0 +1,59 @@
+---
+title: "Discord Run HUD"
+type: "project"
+status: "implemented"
+created_at: "2026-06-03"
+tags:
+  - discord
+  - pi
+  - run-hud
+---
+
+# Discord Run HUD
+
+## Goal
+
+Replace the current low-fidelity Discord run status embed with an active native Discord HUD that gives Joel useful awareness while Pi works in a Discord thread.
+
+## Decisions
+
+- The HUD is **active-placeholder only**. It is replaced by the final assistant answer when the run completes.
+- The HUD should be visually stable and avoid growing/jumping while still showing rich live progress.
+- Do **not** recap the user prompt in the HUD; the prompt is already visible in Discord above the placeholder.
+- The header should describe the **broad current run status**, not merely the raw current tool.
+- Use an **LLM-authored status narrator**, not a deterministic phase switch as the product experience.
+- The narrator may ingest the full live run feed the bridge can observe.
+- Default narrator model: `openai-codex/gpt-5.5`.
+- The narrator runs as a separate in-process Pi `AgentSession` with an in-memory session.
+- The narrator has one job: turn the live run feed into the next HUD frame.
+- The narrator has exactly one scoped tool: `set_run_hud`.
+- `set_run_hud` can only update the active placeholder message for the current Discord thread/run. It cannot send arbitrary Discord messages, touch other threads, rename threads, steer/abort the main Pi session, or affect the final assistant answer.
+- `set_run_hud` accepts semantic HUD fields rather than raw Discord text, e.g. `header`, `now`, `progress`, `signals`, and `risk`.
+- The narrator owns the useful language inside those fields; the bridge owns native Discord embed rendering, truncation, Discord safety, throttled Discord edits, and final placeholder replacement.
+- The narrator can produce HUD updates whenever useful, but the bridge edits Discord at a stable cadence: roughly every 5 seconds, plus immediate edits for major transitions, errors, and waiting-for-input states.
+
+## Desired Shape
+
+```txt
+π Designing the Discord Run HUD · 02:14
+
+Now      comparing Pi event flow with the Discord placeholder renderer
+Progress ✓ traced current status update path
+         ✓ identified why tool-only status loses context
+         → shaping an LLM-authored compact journal
+Signals  files: discord-bot.ts, pi-runtime.ts · checks: not run
+Risk     keep narrator read-only; don’t let it mutate the active Pi session
+ESC stops the run
+```
+
+## Implementation
+
+- `src/run-hud.ts` implements the in-process narrator, `set_run_hud` scoped tool, semantic frame schema, and fallback frame renderer.
+- `src/pi-runtime.ts` attaches full live run feed events to `PromptProgress` so the narrator can see tool starts/updates/ends, text deltas, compaction, retry, queue, and run lifecycle events.
+- `src/discord-bot.ts` renders narrator frames as native Discord embeds and throttles actual Discord edits.
+- `src/config.ts` and `config.example.json` expose `render.hud.enabled`, `render.hud.model`, and `render.hud.updateIntervalMs`.
+
+## Validation
+
+- `npm run typecheck`
+- `npm run build`

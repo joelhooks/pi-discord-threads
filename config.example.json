@@ -9,6 +9,15 @@
     "allowedUserIdSecretName": "discord_allowed_user_id",
     "guildIds": [],
     "channelIds": [],
+    "contextChannels": {
+      "1234567890123456789": { "workspace": "aihero" }
+    },
+    "personalWorkroom": {
+      "enabled": false,
+      "workspace": "personal-workroom",
+      "sessionName": "Personal Workroom",
+      "extensionPaths": []
+    },
     "commandPrefix": "!pi",
     "respondToMentions": true
   },
@@ -20,7 +29,12 @@
     }
   },
   "render": {
-    "maxDiscordChars": 1900
+    "maxDiscordChars": 1900,
+    "hud": {
+      "enabled": true,
+      "model": "openai-codex/gpt-5.5",
+      "updateIntervalMs": 5000
+    }
   },
   "attachments": {
     "enabled": true,
@@ -33,5 +47,15 @@
       ".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".mpeg", ".mpg",
       ".pdf"
     ]
+  },
+  "runControl": {
+    "enabled": false,
+    "redisUrlEnv": "REDIS_URL",
+    "keyPrefix": "pi-discord-threads",
+    "roles": ["bot", "worker", "reconcile"],
+    "leaseTtlMs": 60000,
+    "heartbeatMs": 10000,
+    "staleRunMs": 600000,
+    "reconcileIntervalMs": 60000
   }
 }
