@@ -7,6 +7,35 @@ import { PiRuntimeManager } from "./pi-runtime.js";
 import { Registry } from "./registry.js";
 import { SecretResolver } from "./secrets.js";
 
+installProcessGuards();
+
+function installProcessGuards(): void {
+  const isBenignLateAgentListener = (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.includes("Agent listener invoked outside active run");
+  };
+
+  process.on("uncaughtException", (error) => {
+    if (isBenignLateAgentListener(error)) {
+      console.warn("Ignored late Pi agent listener event after active run ended.");
+      return;
+    }
+    console.error(error);
+    process.exitCode = 1;
+    process.exit(1);
+  });
+
+  process.on("unhandledRejection", (reason) => {
+    if (isBenignLateAgentListener(reason)) {
+      console.warn("Ignored late Pi agent listener rejection after active run ended.");
+      return;
+    }
+    console.error(reason);
+    process.exitCode = 1;
+    process.exit(1);
+  });
+}
+
 async function main(): Promise<void> {
   const cli = parseCliArgs(process.argv.slice(2));
 
