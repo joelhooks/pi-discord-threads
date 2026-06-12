@@ -2,6 +2,16 @@ import { ApplicationCommandType, ContextMenuCommandBuilder, SlashCommandBuilder,
 
 export const askPiMessageCommandName = "Ask Pi about message";
 
+export const aihTriageCommand = new SlashCommandBuilder()
+  .setName("aih-triage")
+  .setDescription("Run the standard AI Hero fresh support triage workflow")
+  .addStringOption((option) =>
+    option
+      .setName("note")
+      .setDescription("Optional extra instruction for this triage run")
+      .setRequired(false),
+  );
+
 export const piCommand = new SlashCommandBuilder()
   .setName("pi")
   .setDescription("Run and manage local Pi coding-agent sessions")
@@ -155,5 +165,5 @@ export const askPiMessageCommand = new ContextMenuCommandBuilder()
   .setType(ApplicationCommandType.Message);
 
 export function applicationCommands(): ApplicationCommandData[] {
-  return [piCommand.toJSON(), askPiMessageCommand.toJSON()] as ApplicationCommandData[];
+  return [piCommand.toJSON(), aihTriageCommand.toJSON(), askPiMessageCommand.toJSON()] as ApplicationCommandData[];
 }

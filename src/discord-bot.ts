@@ -132,7 +132,12 @@ export async function runBot(options: RunBotOptions): Promise<void> {
         return;
       }
 
-      if (!interaction.isChatInputCommand() || interaction.commandName !== "pi") return;
+      if (!interaction.isChatInputCommand()) return;
+      if (interaction.commandName === "aih-triage") {
+        await handleAihTriageInteraction(interaction, options, allowedUsers);
+        return;
+      }
+      if (interaction.commandName !== "pi") return;
       await handlePiInteraction(interaction, options, allowedUsers);
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
@@ -390,6 +395,46 @@ async function handlePiInteraction(
   }
 
   await runInteractionPrompt(interaction, prompt, options, interaction.options.getString("cwd") ?? undefined);
+}
+
+async function handleAihTriageInteraction(
+  interaction: ChatInputCommandInteraction,
+  options: RunBotOptions,
+  allowedUsers: Set<string>,
+): Promise<void> {
+  if (!isAllowedInteraction(interaction, options.config, allowedUsers)) {
+    await replyEphemeral(interaction, "You are not allowed to use this Pi bridge here.");
+    return;
+  }
+
+  const note = interaction.options.getString("note")?.trim();
+  const prompt = buildAihTriagePrompt(note);
+  try {
+    const workspace = await resolveWorkspaceInput("aihero", options.config);
+    await runInteractionPrompt(interaction, prompt, options, workspace.cwd, workspace.name);
+    return;
+  } catch {
+    await runInteractionPrompt(
+      interaction,
+      prompt,
+      options,
+      "/Users/joel/Code/badass-courses/aihero-support",
+      "aihero",
+    );
+  }
+}
+
+function buildAihTriagePrompt(note?: string): string {
+  const parts = [
+    "Run the standard AI Hero fresh support triage workflow.",
+    "Fresh Front run, full current thread research, prior Front/contact history for every thread, and purchase/access/Kit/CRM/source checks where relevant.",
+    "Routine high-confidence replies and archives are pre-approved after full-thread review, source checks, stale guard, and duplicate-send guard. If a thread is sensitive or you feel nervous, stop for review.",
+    "Do full public and Brain research for sponsor, vendor, partnership, and Matt-time threads, assign an S-F sponsor tier, and archive by default unless it is a current AI Coding team-sale lead or a clear blocker.",
+    "Publish a noindex wzrrd review or summary page that expires in 6 hours. Include concise instructions on that page for invoking this workflow with /aih-triage from Discord.",
+    "The final Discord summary must include an Automated actions summary with conversation IDs, action types, reasons, send message IDs, archive verification, receipt paths, sponsor tiers, and kept-open blockers.",
+  ];
+  if (note) parts.push(`Extra operator note: ${note}`);
+  return parts.join("\n\n");
 }
 
 async function handlePiButton(
@@ -2474,6 +2519,7 @@ function helpText(prefix: string): string {
     `- Slash: \`/pi ask prompt:<prompt>\` creates/continues a durable Pi session.`,
     `- Slash: \`/pi skill name:<skill> args:<optional>\` invokes a Pi skill as \`/skill:name\`.`,
     `- Slash: \`/pi workspace name:<workspace> prompt:<optional>\` creates a thread rooted in a configured workspace.`,
+    `- Slash: \`/aih-triage\` starts the standard AI Hero fresh support triage run in the aihero workspace.`,
     `- Slash: \`/pi status\`, \`/pi debug\`, \`/pi reload\`, \`/pi compact\`, \`/pi esc\`, \`/pi abort\`, \`/pi help\`.`,
     `- Prefix fallback: \`${prefix} <prompt>\`, \`${prefix} workspace <name> [prompt]\`, \`${prefix} status\`, \`${prefix} reload\`, \`${prefix} compact [instructions]\`, \`${prefix} esc\`, \`${prefix} help\`.`,
     "- In a registered thread, normal messages continue the Pi session; while active they queue as steering messages.",
