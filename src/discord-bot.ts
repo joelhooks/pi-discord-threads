@@ -91,7 +91,6 @@ export async function runBot(options: RunBotOptions): Promise<void> {
     }
     if (botIngressEnabled) {
       await registerSlashCommands(client, options.config);
-      await reconcileInterruptedThreads(client, options.registry);
     }
     if (options.config.runControl.enabled && options.runControlStore && roles.includes("worker")) {
       runControlWorker = new RunControlWorker(
@@ -101,6 +100,9 @@ export async function runBot(options: RunBotOptions): Promise<void> {
         options.runControlWorkerId ?? `${process.pid}`,
       );
       runControlWorker.start();
+    }
+    if (botIngressEnabled) {
+      await autoResumeInterruptedThreads(client, options);
     }
   });
 
@@ -210,29 +212,51 @@ async function registerSlashCommands(client: Client, config: AppConfig): Promise
   }
 }
 
-async function reconcileInterruptedThreads(client: Client, registry: Registry): Promise<void> {
-  const interrupted = registry.listThreads()
+async function autoResumeInterruptedThreads(client: Client, options: RunBotOptions): Promise<void> {
+  const interrupted = options.registry.listThreads()
     .filter((record) => record.status === "interrupted" && record.activeRun?.placeholderDiscordMessageId && record.kind !== "discord-dm-workroom");
   if (interrupted.length === 0) return;
 
-  let edited = 0;
+  let resumed = 0;
+  let reconciled = 0;
   for (const record of interrupted) {
     try {
       const channel = await client.channels.fetch(record.threadId);
       if (!channel || typeof (channel as { isThread?: unknown }).isThread !== "function" || !(channel as { isThread: () => boolean }).isThread()) {
         continue;
       }
-      const placeholder = await (channel as ThreadChannel).messages.fetch(record.activeRun?.placeholderDiscordMessageId ?? "");
-      await placeholder.edit(buildInterruptedRunPayload(record));
-      edited++;
+      const thread = channel as ThreadChannel;
+      const placeholder = await thread.messages.fetch(record.activeRun?.placeholderDiscordMessageId ?? "");
+      if (!record.activeRun?.prompt?.trim()) {
+        await placeholder.edit(buildInterruptedRunPayload(record));
+        reconciled++;
+        continue;
+      }
+
+      const prompt = buildRecoveryPrompt(record, "continue");
+      await placeholder.edit(buildWorkingPayload(record, prompt, {
+        phase: "starting",
+        title: "Auto-resuming interrupted Pi session",
+        detail: "Bridge restarted before the final Discord answer",
+      })).catch(() => undefined);
+      void runPromptWithPlaceholder(thread, record.activeRun.sourceDiscordMessageId, placeholder, record, prompt, options)
+        .catch(async (error) => {
+          const text = error instanceof Error ? error.message : String(error);
+          console.warn(`auto-resume failed for interrupted thread ${record.threadId}: ${text}`);
+          await placeholder.edit(buildErrorPayload(record, `Auto-resume failed: ${text}`)).catch(() => undefined);
+        });
+      resumed++;
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
-      console.warn(`failed to reconcile interrupted thread ${record.threadId}: ${text}`);
+      console.warn(`failed to auto-resume interrupted thread ${record.threadId}: ${text}`);
     }
   }
 
-  if (edited > 0) {
-    console.log(`reconciled ${edited} interrupted Pi thread placeholder(s)`);
+  if (resumed > 0) {
+    console.log(`auto-resumed ${resumed} interrupted Pi thread(s)`);
+  }
+  if (reconciled > 0) {
+    console.log(`reconciled ${reconciled} interrupted Pi thread placeholder(s) without resumable prompts`);
   }
 }
 
@@ -1937,7 +1961,7 @@ function buildInterruptedRunPayload(record: ThreadRecord): RichPayload {
       new EmbedBuilder()
         .setColor(0xf0b232)
         .setTitle("⚠️ Pi run interrupted by bridge restart")
-        .setDescription("The local Pi session file is preserved. Send `continue` in this thread to recover the interrupted request, or send a new prompt to continue from the durable session history.")
+        .setDescription("The local Pi session file is preserved, but this interrupted run had no resumable prompt metadata. Send `continue` in this thread to recover from the durable session history, or send a new prompt to continue from there.")
         .addFields(
           { name: "Interrupted request", value: truncateForEmbed(activeRun?.promptPreview || "not recorded", 700), inline: false },
           { name: "Session", value: truncateForEmbed(record.sessionFile ?? activeRun?.sessionFile ?? "not created yet", 700), inline: false },
