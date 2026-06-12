@@ -233,6 +233,13 @@ async function autoResumeInterruptedThreads(client: Client, options: RunBotOptio
         continue;
       }
 
+      if (options.config.runControl.enabled && options.runControlStore && record.activeRun.runId) {
+        await options.runControlStore.markTerminal(record.activeRun.runId, "interrupted", {
+          error: "bridge startup auto-resume superseded interrupted registry run",
+        }).catch(() => undefined);
+        await options.runControlStore.clearActiveIfMatches(record.threadId, record.activeRun.runId).catch(() => undefined);
+      }
+
       const prompt = buildRecoveryPrompt(record, "continue");
       await placeholder.edit(buildWorkingPayload(record, prompt, {
         phase: "starting",
