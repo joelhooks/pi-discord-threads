@@ -1,0 +1,182 @@
+---
+title: "Pi Discord Threads: Request Spine"
+type: "resource"
+status: "active"
+created_at: "2026-06-14"
+tags:
+  - learning
+  - tutorial
+  - pi-discord-threads
+  - discord
+  - pi
+---
+
+# Pi Discord Threads: Request Spine
+
+## Anchor
+
+This first lesson answers one question: **what actually happens when Joel sends a prompt from Discord and expects Pi to answer back in the same thread?**
+
+The bridge is not magic. It is a projection layer:
+
+```txt
+Discord action
+  → durable thread record
+  → Pi AgentSession runtime
+  → Pi session JSONL
+  → Discord placeholder/HUD
+  → final Discord message(s)
+```
+
+If you can trace that spine, most bugs become less spooky.
+
+## Sources used
+
+- [[../pi-discord-threads-sources]]
+- `README.md`: Discord commands, run HUD, registry, run-control design invariants.
+- `src/index.ts`: startup and daemon command flow.
+- `src/discord-bot.ts`: Discord ingress, thread records, placeholders, auto-resume, final rendering.
+- `src/pi-runtime.ts`: Pi runtime/session creation, progress feed, prompt execution, repair/recovery guards.
+- `src/registry.ts`: durable Discord thread ↔ Pi session mapping.
+- `src/run-control/*`: optional Redis process-boundary run coordination.
+
+## The useful mental model
+
+There are two truths:
+
+1. **Pi session JSONL is the conversation truth.** It stores the actual Pi messages/tool calls/assistant result.
+2. **The registry is the Discord projection truth.** It remembers which Discord thread maps to which Pi session file, what placeholder is active, and what state Discord should show.
+
+That split matters. After a daemon restart, the bridge can inspect the Pi session file and decide whether Discord merely missed the final answer. That is exactly the kind of recovery this Discord thread just exercised.
+
+## Startup: how the daemon becomes alive
+
+`src/index.ts` is the command router and startup seam.
+
+At `start`, it:
+
+1. loads config
+2. leases Discord secrets
+3. loads the JSON registry
+4. optionally creates Redis run-control wiring
+5. creates `PiRuntimeManager`
+6. calls `runBot(...)`
+
+Practical debugging rule: if Discord never connects or commands never register, start in `src/index.ts` and config/secrets. If Discord receives messages but Pi does not answer, move to `src/discord-bot.ts` and `src/pi-runtime.ts`.
+
+## Ingress: Discord becomes a Pi prompt
+
+`src/discord-bot.ts` is the front door. It handles:
+
+- slash commands like `/pi ask`, `/pi workspace`, `/pi resume`, `/pi fork`, `/pi compact`, `/pi esc`
+- prefix fallback like `!pi`
+- normal messages inside a registered Discord thread
+- message context menu prompts
+- attachments
+- buttons and modals
+
+The important move is `ensureThreadRecord(...)`: every useful Discord run gets or creates a `ThreadRecord` in `src/registry.ts`.
+
+A `ThreadRecord` stores the durable mapping:
+
+```txt
+Discord thread id
+  cwd / workspace
+  Pi session file
+  active placeholder message id
+  active run prompt preview
+  status
+  title state
+  work graph metadata
+```
+
+After that, the bot either:
+
+- queues the message as steering/follow-up input if that thread already has an active run, or
+- posts a working placeholder/HUD and calls the Pi runtime.
+
+## Runtime: the bridge asks Pi to work
+
+`src/pi-runtime.ts` owns the Pi side.
+
+The class to remember is `PiRuntimeManager`.
+
+It gives each Discord thread:
+
+- one managed Pi runtime
+- one in-memory operation queue
+- a reused or newly-created Pi `SessionManager`
+- the Discord Thread Mode system prompt appended to Pi's normal prompt
+- progress events translated into bridge-friendly status frames
+
+The key safety detail: before prompting, it calls `repairDanglingAssistantLeaf(...)`. That branches away from an unfinished assistant leaf so recovery prompts do not try to continue from an invalid assistant state. That is a very specific fix for interrupted-session weirdness.
+
+## Rendering: Discord sees progress and final answers
+
+While Pi runs, progress events feed the Discord placeholder.
+
+There are two layers:
+
+- deterministic bridge rendering in `src/discord-bot.ts` and `src/render.ts`
+- optional LLM-authored HUD narration in `src/run-hud.ts`
+
+`RunHudNarrator` is deliberately boxed in. It is a separate in-process Pi session with one tool: `set_run_hud`. It cannot steer the main agent or send arbitrary Discord messages. It just turns live run-feed events into a compact status card.
+
+When Pi finishes, the bridge chunks the assistant text for Discord, sends final message(s), records message entry IDs, and retires the placeholder.
+
+## Restart recovery: the part this thread hit
+
+The bridge has two recovery paths:
+
+### Run control disabled
+
+On startup, `src/index.ts` calls `registry.markRunningThreadsInterrupted()` for stale in-process runs.
+
+Then `src/discord-bot.ts` runs `autoResumeInterruptedThreads(...)`.
+
+That recovery checks:
+
+1. Is there a registered interrupted thread with a working placeholder?
+2. Does the Pi session file already have a final assistant message?
+3. If yes, post that persisted final answer to Discord and retire the placeholder.
+4. If not, build a recovery prompt and ask Pi to continue.
+
+That is why **Pi JSONL stays canonical**: Discord may have missed the answer, but the session file can still prove the model finished.
+
+### Run control enabled
+
+Redis run control is optional and disabled by default.
+
+When enabled, `src/run-control/*` moves active-run coordination out of one Node process:
+
+- run jobs go into Redis streams
+- active thread pointers prevent parallel runs per logical thread
+- worker leases/heartbeats claim execution
+- queued input streams hold steering/follow-up messages
+- finalization keys reduce duplicate final Discord posts
+
+This is for daemon restarts and multi-process behavior. It does not replace Pi JSONL as the conversation truth.
+
+## Thread titles are a sidecar, not the spine
+
+`src/thread-title-evaluator.ts` is like the HUD narrator: a boxed-in model actor with one tool, `propose_thread_title`.
+
+It sees compact turn evidence and proposes whether a Discord thread title is stale. The bridge applies deterministic rename gates. It should not chase tiny substeps.
+
+## Exercise
+
+Trace this scenario without opening every file:
+
+> Joel sends a prompt. Pi finishes the model turn and writes the assistant answer to the session file. The daemon restarts before Discord receives the final answer. Joel says “continue”.
+
+Answer in this shape:
+
+1. Which file notices stale running threads on startup?
+2. Which file inspects whether a final assistant message already exists?
+3. Which file owns the durable Discord thread ↔ Pi session mapping?
+4. Why is re-prompting Pi not always the right recovery move?
+5. If the bridge tried to continue from an unfinished assistant leaf, which file has the guard for that?
+
+## Next edge
+
+After this, the next useful lesson is **state ownership**: what belongs in Discord, registry JSON, Pi JSONL, and Redis run control. That is where most “why did this restart/duplicate/queue?” bugs live.

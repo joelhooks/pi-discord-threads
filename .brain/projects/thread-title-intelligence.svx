@@ -1,0 +1,76 @@
+---
+title: "Thread Title Intelligence"
+type: "project"
+status: "implemented-v1"
+created_at: "2026-06-15"
+tags:
+  - discord
+  - pi
+  - thread-title
+  - operator-ux
+---
+
+# Thread Title Intelligence
+
+## Goal
+
+Keep Discord thread titles useful after the initial prompt is stale. A title should describe the durable workstream or current theme, not the first fragment Joel typed to start the session.
+
+## Current Behavior Receipts
+
+- `src/render.ts` derives the initial Discord thread name from the opening prompt with `summarizeForThreadName()`.
+- `src/discord-bot.ts` calls `maybeRenameThreadForPrompt()` when a prompt starts, but that only re-summarizes the current prompt and only renames from a narrow set of placeholder-ish names.
+- `src/pi-runtime.ts` updates registry `sessionName` from Pi's session manager after a run. Treat this as a useful ephemeral signal for HUD/session display, not durable title truth.
+- `docs/discord-thread-mode-system-prompt.md` already says thread titles are durable labels and should update when the work focus changes, but this is only guidance to the assistant, not an automated bridge behavior.
+
+## Working Language
+
+- **Thread title evaluator**: a scoped model actor that decides whether the Discord thread title should change.
+- **Thread theme**: the durable workstream/purpose a thread is serving, usually 3-7 words plus optional category emoji.
+- **Rename gate**: deterministic rules that prevent noisy title churn, user-title overwrites, and Discord rate-limit bullshit.
+
+## Proposed Shape
+
+- Add a bridge-side thread title evaluator, modeled after the existing HUD narrator pattern: separate in-process Pi `AgentSession`, scoped tool, and deterministic renderer/guardrails.
+- Implementation should be an online post-turn hook inside the bridge, not a shellout to the `pi` CLI.
+- Evaluate Discord thread titles independently from Pi session names after the thread has enough signal, not at creation time:
+  - first evaluation after the second completed user/agent turn in a thread
+  - periodic evaluation every 5-10 completed turns
+  - opportunistic evaluation when a new user prompt materially changes the theme
+- The evaluator sees compact thread evidence: current Discord title, recent user messages, final assistant summaries, cwd/workspace, and maybe HUD/title category hints. Registry `sessionName` can be weak evidence only; it must not drive renames by itself.
+- The evaluator can only propose a title. The bridge decides whether to call Discord `thread.setName()`.
+
+## Guardrails
+
+- Do not rename during active streaming unless the title came from a placeholder or the evaluator has high confidence.
+- Do not overwrite a human-specified title unless the current title still looks bridge-generated or Joel explicitly asks for retitling.
+- Avoid title churn: require material theme change, minimum turn spacing, and max rename cadence.
+- Keep titles mobile-readable: 3-7 words, under Discord limits, no raw file paths, no transient tool/status words.
+- Model lookup receipt from `pi --list-models gpt`: `openai-codex/gpt-5.4-mini` is available with 272K context, 128K max output, thinking, and image input. It is a good candidate for low-stakes title evaluation if project policy allows it.
+- Keep model selection explicit in config. If a future local model is configured, it must be an explicit config value, not a silent fallback.
+
+## Decisions
+
+- `sessionName` is ephemeral and must not be the source of truth for Discord thread titles.
+- Default evaluator model: `openai-codex/gpt-5.4-mini`, based on `pi --list-models gpt` showing it is available with 272K context, 128K max output, thinking, and image input.
+- The evaluator should run as an online Pi hook in the bridge, using an in-process `AgentSession` like the HUD narrator, not by invoking the `pi` CLI.
+- V1 cadence: first evaluation after turn 2, then every 8 completed turns. This is configurable under `render.threadTitles`.
+- The hook is non-critical and fire-and-forget after the final Discord reply/placeholder retirement, so a title model failure should not block normal run finalization.
+
+## V1 Implementation Notes
+
+- `src/thread-title-evaluator.ts` implements the scoped online Pi evaluator with a single `propose_thread_title` tool.
+- `src/discord-bot.ts` records compact recent turn evidence, invokes the evaluator after completed turns, and applies deterministic rename gates before calling Discord `thread.setName()`.
+- `src/registry.ts` stores `titleState` with turn count, last evaluation/rename metadata, and recent compact turn evidence.
+- `src/config.ts` and `config.example.json` expose `render.threadTitles.enabled`, `model`, `firstEvaluationTurn`, `evaluationIntervalTurns`, and `minRenameIntervalMs`.
+- `README.md` documents the post-turn hook behavior.
+
+## Validation
+
+- `npm run typecheck`
+- `npm run build`
+- `pi-notes brain check .`
+
+## Open Follow-up
+
+After live use, tune whether cadence should stay every 8 turns or become adaptive based on detected theme drift.

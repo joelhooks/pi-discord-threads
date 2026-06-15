@@ -1,0 +1,18 @@
+---
+title: "Pi Discord Threads Glossary"
+type: "resource"
+status: "active"
+created_at: "2026-06-14"
+tags:
+  - learning
+  - glossary
+  - pi-discord-threads
+---
+
+# Pi Discord Threads Glossary
+
+Compressed language for the Discord bridge. Terms get added only after Joel demonstrates understanding in an exercise or debugging pass.
+
+## Terms
+
+_No captured terms yet._

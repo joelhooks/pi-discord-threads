@@ -1,0 +1,226 @@
+---
+title: "Pi Discord Threads: State Ownership"
+type: "resource"
+status: "active"
+created_at: "2026-06-14"
+tags:
+  - learning
+  - tutorial
+  - pi-discord-threads
+  - state
+  - d2
+---
+
+# Pi Discord Threads: State Ownership
+
+## Anchor
+
+The next useful edge is **state ownership**: when something gets weird, where is the truth?
+
+This plugin has several state surfaces. They overlap on purpose, but they should not be confused.
+
+<D2Flow
+  src=".brain/data/diagrams/pi-discord-state-ownership.svg"
+  source=".brain/data/diagrams/pi-discord-state-ownership.d2"
+  title="State ownership spine"
+  caption="Discord is the surface, registry is the projection, Pi JSONL is the conversation, Redis is optional process-boundary coordination."
+/>
+
+## The four state owners
+
+### 1. Discord owns visible operator state
+
+Discord owns the thread, messages, placeholder card, buttons, and final visible answer.
+
+It does **not** own the canonical conversation. If Discord misses a final message because the daemon restarts, the answer may already exist in Pi's session file.
+
+### 2. Registry JSON owns the Discord projection
+
+`src/registry.ts` is the durable map between Discord and Pi.
+
+Most interesting bit:
+
+```ts
+export interface ActiveRunRecord {
+  runId?: string;
+  sourceDiscordMessageId: string;
+  placeholderDiscordMessageId: string;
+  prompt: string;
+  promptPreview: string;
+  startedAt: string;
+  updatedAt: string;
+  sessionFile?: string;
+  interruptedAt?: string;
+}
+
+export interface ThreadRecord {
+  threadId: string;
+  kind?: "discord-thread" | "discord-dm-workroom";
+  sessionFile?: string;
+  cwd: string;
+  workspaceName?: string;
+  sessionName?: string;
+  status: "idle" | "running" | "error" | "locked" | "interrupted";
+  activeRun?: ActiveRunRecord;
+  titleState?: ThreadTitleState;
+  workGraph?: WorkGraphMetadata;
+  createdAt: string;
+  updatedAt: string;
+}
+```
+
+That shape tells you what the bridge cares about after restart: **which Discord thread, which Pi session file, which placeholder, and what run was active.**
+
+### 3. Pi JSONL owns the conversation
+
+`src/pi-runtime.ts` creates or reopens the Pi session. The session file is the actual transcript and tool history.
+
+This is why recovery can be smart instead of blindly saying “continue.”
+
+### 4. Redis run control owns cross-process coordination, when enabled
+
+Redis is disabled by default. When enabled, it owns active-run coordination across processes: run jobs, leases, queued input, active pointers, and finalization guards.
+
+It still does not replace Pi JSONL. Redis says “who is executing/finalizing?” Pi JSONL says “what happened in the conversation?”
+
+## Restart recovery flow
+
+<D2Flow
+  src=".brain/data/diagrams/pi-discord-restart-recovery.svg"
+  source=".brain/data/diagrams/pi-discord-restart-recovery.d2"
+  title="Restart recovery decision flow"
+  caption="The sharp move is checking for a persisted final assistant before re-prompting Pi."
+/>
+
+## The most interesting source code
+
+### `autoResumeInterruptedThreads`: recovery is a decision tree
+
+Source: `src/discord-bot.ts`
+
+```ts
+async function autoResumeInterruptedThreads(client: Client, options: RunBotOptions): Promise<void> {
+  const interrupted = options.registry.listThreads()
+    .filter((record) => record.status === "interrupted" && record.activeRun?.placeholderDiscordMessageId && record.kind !== "discord-dm-workroom");
+  if (interrupted.length === 0) return;
+
+  for (const record of interrupted) {
+    const channel = await client.channels.fetch(record.threadId);
+    const thread = channel as ThreadChannel;
+    const placeholder = await thread.messages.fetch(record.activeRun?.placeholderDiscordMessageId ?? "");
+
+    const persistedFinal = getPersistedFinalAssistant(record);
+    if (persistedFinal) {
+      const chunks = chunkForDiscord(persistedFinal.text, options.config.render.maxDiscordChars);
+      await sendFinalResponseMessages(thread, record, options.registry, chunks, persistedFinal.entryId);
+      await retireWorkingPlaceholder(placeholder, record);
+      await options.registry.patchThread(record.threadId, { status: "idle", activeRun: undefined }).catch(() => undefined);
+      continue;
+    }
+
+    const prompt = buildRecoveryPrompt(record, "continue");
+    void runPromptWithPlaceholder(thread, record.activeRun.sourceDiscordMessageId, placeholder, record, prompt, options);
+  }
+}
+```
+
+This is the spine of the restart story. The interesting part is the order: **inspect persisted final first, re-prompt second.**
+
+### `getPersistedFinalAssistant`: Pi JSONL is the receipt
+
+Source: `src/discord-bot.ts`
+
+```ts
+function getPersistedFinalAssistant(record: ThreadRecord): { entryId: string; text: string } | undefined {
+  const sessionFile = record.sessionFile ?? record.activeRun?.sessionFile;
+  if (!sessionFile) return undefined;
+  try {
+    const manager = SessionManager.open(sessionFile, undefined, record.cwd);
+    const leaf = manager.getLeafEntry();
+    if (!leaf || leaf.type !== "message" || leaf.message.role !== "assistant") return undefined;
+    if (leaf.message.stopReason !== "stop") return undefined;
+    const text = assistantTextContent(leaf.message.content).trim();
+    if (!text) return undefined;
+    return { entryId: leaf.id, text };
+  } catch {
+    return undefined;
+  }
+}
+```
+
+This function is tiny, but it carries the doctrine: **a final assistant leaf with `stopReason === "stop"` is stronger evidence than the Discord placeholder state.**
+
+### `repairDanglingAssistantLeaf`: avoid continuing from a broken leaf
+
+Source: `src/pi-runtime.ts`
+
+```ts
+function repairDanglingAssistantLeaf(sessionManager: SessionManager): boolean {
+  const leaf = sessionManager.getLeafEntry();
+  if (!leaf || leaf.type !== "message" || leaf.message.role !== "assistant") return false;
+  if (leaf.message.stopReason === "stop") return false;
+  if (leaf.parentId) {
+    sessionManager.branch(leaf.parentId);
+  } else {
+    sessionManager.resetLeaf();
+  }
+  return true;
+}
+```
+
+This is defensive weirdness in the best way. If the last assistant message was unfinished, the runtime backs up to a stable parent before adding a new recovery prompt.
+
+### Redis finalization: fewer duplicate Discord finals
+
+Source: `src/run-control/worker.ts`
+
+```ts
+private async finalizeSuccessfulRun(run: RunRecord, result: RunControlExecutionResult): Promise<void> {
+  const finalizeToken = randomUUID();
+  const claim = await this.store.acquireFinalize(run.runId, finalizeToken).catch(() => "busy" as const);
+  if (claim === "busy") {
+    throw new RetryRunLaterError(`finalization already in progress for ${run.runId}`);
+  }
+
+  const finalizedAt = new Date().toISOString();
+  if (claim === "acquired") {
+    await this.adapter.finalizeRun(run, result);
+    await this.store.completeFinalize(run.runId, finalizeToken);
+  }
+
+  await this.store.markTerminal(run.runId, "succeeded", {
+    sessionFile: result.sessionFile,
+    userEntryId: result.userEntryId,
+    assistantEntryId: result.assistantEntryId,
+    resultText: result.text,
+    placeholderRetiredAt: finalizedAt,
+  });
+  await this.store.clearActiveIfMatches(run.logicalThreadId, run.runId);
+}
+```
+
+This is not perfect distributed systems magic. It is a pragmatic guard: claim finalization, post once-ish, mark terminal, clear active pointer. The Brain note already calls out the remaining duplicate-post caveat.
+
+## Debugging rule of thumb
+
+When a bug report says “Discord/Pi did the wrong thing,” ask which state owner lied:
+
+- **Discord looked wrong?** Check placeholder/final render path in `src/discord-bot.ts`.
+- **Thread mapped to the wrong session/cwd?** Check `src/registry.ts` and workspace/context-channel resolution.
+- **Pi continued weirdly or lost context?** Check `src/pi-runtime.ts` and the session file.
+- **Queued input or duplicate execution is weird?** Check `src/run-control/*`, but only if run control is enabled.
+- **Title/HUD language is weird?** Check the boxed sidecar actors: `src/run-hud.ts` and `src/thread-title-evaluator.ts`.
+
+## Exercise
+
+For each symptom, name the first source file you would inspect and why:
+
+1. Final Discord answer appears twice after a restart.
+2. Discord thread says “working,” but the Pi session file already has a final assistant answer.
+3. A follow-up message during a run gets treated as a new independent prompt.
+4. `/pi fork` creates a new Discord thread but does not behave like a real Pi fork.
+5. The HUD says something plausible but useless while tools are running.
+
+## Next edge
+
+Next lesson should be **sidecar model actors**: why the HUD narrator and thread-title evaluator are scoped Pi sessions with one tool each, and how that pattern keeps model creativity boxed in instead of letting it mutate the actual run.

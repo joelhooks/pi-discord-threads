@@ -1,0 +1,48 @@
+direction: down
+
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    theme-id: 0
+  }
+}
+
+start: "Daemon starts" {
+  shape: oval
+}
+
+mark: "src/index.ts\nmarkRunningThreadsInterrupted()"
+scan: "src/discord-bot.ts\nautoResumeInterruptedThreads()"
+fetch: "Fetch Discord thread + placeholder"
+prompt_check: "activeRun has prompt?" {
+  shape: diamond
+}
+final_check: "Pi JSONL has final assistant leaf?" {
+  shape: diamond
+}
+post_final: "Post persisted final answer\nretire placeholder"
+recover_prompt: "Build recovery prompt\ncontinue"
+run_again: "runPromptWithPlaceholder(...)"
+repair: "src/pi-runtime.ts\nrepairDanglingAssistantLeaf()"
+execute: "Prompt Pi safely"
+idle: "Registry status idle\nactiveRun cleared" {
+  shape: oval
+}
+needs_human: "Show interrupted payload\nneeds human/context"
+redis_terminal: "If Redis enabled:\nmark old run interrupted\nclear active pointer"
+
+start -> mark: "run control disabled path"
+mark -> scan
+scan -> fetch
+fetch -> prompt_check
+prompt_check -> needs_human: "no"
+needs_human -> idle: "placeholder updated"
+prompt_check -> final_check: "yes"
+final_check -> post_final: "yes"
+post_final -> idle
+final_check -> redis_terminal: "no"
+redis_terminal -> recover_prompt
+recover_prompt -> run_again
+run_again -> repair: "before prompt"
+repair -> execute
+execute -> idle: "new final answer"

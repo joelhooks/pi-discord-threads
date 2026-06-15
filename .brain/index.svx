@@ -11,4 +11,14 @@ created_at: "2026-06-03"
 
 - [Discord Run HUD](./projects/discord-run-hud.svx)
 - [Personal Workroom DM Prototype](./projects/personal-workroom-dm-prototype.svx)
+- [Pi Discord Threads Learning Path](./projects/pi-discord-threads-learning-path.svx)
 - [Redis Run Control Plane](./projects/redis-run-control-plane.svx)
+- [Thread Title Intelligence](./projects/thread-title-intelligence.svx)
+
+## Resources
+
+- [OpenAI OAuth Cycle Handling](./resources/openai-oauth-cycle-handling.svx)
+- [Pi Discord Threads Sources](./resources/pi-discord-threads-sources.svx)
+- [Pi Discord Threads Glossary](./resources/pi-discord-threads-glossary.svx)
+- [Pi Discord Threads: Request Spine](./resources/tutorials/pi-discord-threads-request-spine.svx)
+- [Pi Discord Threads: State Ownership](./resources/tutorials/pi-discord-threads-state-ownership.svx)

@@ -1,0 +1,51 @@
+---
+title: "Pi Discord Threads Learning Path"
+type: "project"
+status: "active"
+created_at: "2026-06-14"
+tags:
+  - learning
+  - pi-discord-threads
+  - discord
+  - pi
+---
+
+# Pi Discord Threads Learning Path
+
+## Mission
+
+Learn how `pi-discord-threads` works well enough to debug live Discord/Pi runs, recover interrupted turns, and make small extension changes without spelunking the whole repo every time.
+
+## Success looks like
+
+- Joel can trace a Discord message from ingress through the Pi session runtime to the final Discord answer.
+- Joel can name which file owns thread mapping, run execution, HUD/status, restart recovery, and optional Redis run control.
+- Joel can decide whether a bug belongs in Discord ingress, Pi runtime/session handling, registry state, run rendering, or Redis run control.
+
+## Constraints
+
+- Source-grounded: lessons cite this repo's docs and source files before making claims.
+- Keep lessons short and practical; one useful edge per pass.
+- Lesson pages should be viewable through pi-notes, preferably via a Tailscale URL when the current repo Brain host is reachable.
+- Do not turn learning into a new platform; edit the living `.brain/` notes.
+
+## Out of scope
+
+- Deep Discord.js API study beyond what this bridge uses.
+- Full Pi SDK internals unless a bug requires it.
+- Enabling Redis run control in production; this path starts with understanding the disabled-by-default shape.
+
+## Current edge
+
+The active edge is state ownership: Discord-visible state, registry projection state, Pi JSONL conversation truth, and optional Redis coordination state. The next lesson adds D2 diagrams and source-code receipts for that boundary.
+
+## Next lesson
+
+Read and answer the exercise in [[../resources/tutorials/pi-discord-threads-state-ownership]]. After that, move to sidecar model actors: the HUD narrator and thread-title evaluator.
+
+## Links
+
+- Sources: [[../resources/pi-discord-threads-sources]]
+- Glossary: [[../resources/pi-discord-threads-glossary]]
+- First tutorial: [[../resources/tutorials/pi-discord-threads-request-spine]]
+- Learning records: [[../resources/learning-records/pi-discord-threads/index]]

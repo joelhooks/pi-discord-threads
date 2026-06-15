@@ -1,0 +1,36 @@
+---
+title: "OpenAI OAuth Cycle Handling"
+type: "resource"
+status: "active"
+created_at: "2026-06-08"
+---
+
+# OpenAI OAuth Cycle Handling
+
+## Symptom
+
+Discord bridge runs can post `(no assistant text produced)` when Pi's OpenAI Codex OAuth token has been globally invalidated.
+
+Session receipt from `~/.pi/agent/sessions/.../2026-06-04T14-45-51-055Z_019e9319-054f-7c1c-bd11-4dbeeaa32f01.jsonl` showed assistant entries with:
+
+```text
+stopReason: error
+errorMessage: Your authentication token has been invalidated. Please try signing in again.
+```
+
+The daemon itself stayed healthy: `doctor` showed Redis `PONG`, Discord token auth succeeded, and LaunchAgent was running.
+
+## Root cause
+
+`PiRuntimeManager` keeps warm SDK runtimes per Discord thread. Those runtimes have an `AuthStorage` instance that loads `~/.pi/agent/auth.json` when the runtime is created. If OpenAI invalidates all sessions and Joel logs back in elsewhere, the existing Discord runtime can keep using stale in-memory OAuth credentials until the daemon restarts or the runtime is disposed.
+
+Pi SDK provider failures after prompt acceptance are persisted as assistant messages with `stopReason: "error"`; `session.prompt()` can resolve, so the bridge must inspect the new assistant message instead of treating empty text as success.
+
+## Fix pattern
+
+- Reload runtime auth from disk before every Discord prompt.
+- Detect new assistant messages with `stopReason: "error"` after `session.prompt()` returns.
+- If the error is OpenAI OAuth invalidation and `auth.json` changed during the run, reload auth and retry the prompt once.
+- Otherwise throw a clear bridge error so Discord shows a failure embed instead of `(no assistant text produced)`.
+
+Implemented in `src/pi-runtime.ts` on 2026-06-08.

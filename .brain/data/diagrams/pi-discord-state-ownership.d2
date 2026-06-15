@@ -1,0 +1,72 @@
+direction: down
+
+vars: {
+  d2-config: {
+    layout-engine: dagre
+    theme-id: 0
+  }
+}
+
+start: "Joel prompt in Discord" {
+  shape: oval
+}
+
+discord: "Discord surface" {
+  shape: rectangle
+  style.fill: "#F8FAFC"
+  thread: "thread / DM workroom"
+  placeholder: "working placeholder + HUD"
+  final: "final answer messages"
+}
+
+registry: "Registry JSON\nDiscord projection truth" {
+  shape: rectangle
+  style.fill: "#FFF7ED"
+  thread_record: "ThreadRecord\nthread ↔ session mapping"
+  active_run: "activeRun\nplaceholder + prompt + session file"
+  title_state: "titleState / workGraph"
+}
+
+runtime: "PiRuntimeManager\nexecution seam" {
+  shape: rectangle
+  style.fill: "#EEF2FF"
+  queue: "per-thread operation queue"
+  session: "AgentSession + SessionManager"
+  progress: "progress feed → HUD"
+  repair: "dangling assistant leaf repair"
+}
+
+jsonl: "Pi session JSONL\nconversation truth" {
+  shape: rectangle
+  style.fill: "#ECFDF5"
+  entries: "messages + tool calls"
+  final_leaf: "final assistant leaf"
+}
+
+redis: "Redis run control\noptional process-boundary truth" {
+  shape: rectangle
+  style.fill: "#FEF2F2"
+  jobs: "run jobs"
+  active: "active thread pointer"
+  inputs: "steer/follow-up input stream"
+  leases: "worker leases + finalize key"
+}
+
+start -> discord.thread: "message / slash / modal"
+discord.thread -> registry.thread_record: "ensureThreadRecord"
+registry.thread_record -> registry.active_run: "mark running"
+registry.active_run -> runtime.queue: "runPromptWithPlaceholder"
+runtime.queue -> runtime.session: "prompt"
+runtime.repair -> runtime.session: "safe recovery branch"
+runtime.session -> jsonl.entries: "append turn"
+jsonl.entries -> jsonl.final_leaf: "assistant stop=stop"
+runtime.progress -> discord.placeholder: "live frame"
+jsonl.final_leaf -> discord.final: "chunk + send"
+discord.final -> registry.thread_record: "record message entry IDs"
+registry.active_run -> registry.thread_record: "clear activeRun"
+
+registry.active_run -> redis.active: "when enabled"
+redis.jobs -> runtime.queue: "worker executes"
+redis.inputs -> runtime.session: "steer/follow-up"
+redis.leases -> redis.jobs: "claim + heartbeat"
+jsonl.final_leaf -> redis.leases: "finalize once-ish"

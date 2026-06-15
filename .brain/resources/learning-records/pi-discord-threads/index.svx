@@ -1,0 +1,17 @@
+---
+title: "Pi Discord Threads Learning Records"
+type: "resource"
+status: "active"
+created_at: "2026-06-14"
+tags:
+  - learning-record
+  - pi-discord-threads
+---
+
+# Pi Discord Threads Learning Records
+
+This index stays sparse. Add records only when Joel demonstrates understanding, corrects a misconception, or shifts the learning mission.
+
+## Records
+
+_No records captured yet._

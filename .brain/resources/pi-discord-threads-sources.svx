@@ -1,0 +1,65 @@
+---
+title: "Pi Discord Threads Sources"
+type: "resource"
+status: "active"
+created_at: "2026-06-14"
+tags:
+  - learning
+  - sources
+  - pi-discord-threads
+  - discord
+  - pi
+---
+
+# Pi Discord Threads Sources
+
+## Knowledge
+
+- [Project README](../../README.md)
+  Covers: product shape, setup, Discord commands, attachment behavior, run HUD, thread titles, run-control intent, and design invariants. Use when: orienting or checking operator-facing behavior.
+
+- [Project Brain](../../BRAIN.md)
+  Covers: Brain usage rules for this repo. Use when: deciding where to capture learning, decisions, and receipts.
+
+- [`src/index.ts`](../../src/index.ts)
+  Covers: CLI commands, startup flow, config/secrets loading, registry setup, optional Redis wiring, LaunchAgent/reconcile commands, and process guards. Use when: debugging daemon startup or command behavior.
+
+- [`src/discord-bot.ts`](../../src/discord-bot.ts)
+  Covers: Discord client setup, slash/prefix/message ingress, thread creation/resume/fork, status/debug/compact/abort controls, placeholder/final response behavior, auto-resume after restarts, async subagent result publishing, HUD integration, and thread-title evaluation hooks. Use when: debugging what Discord users see or how incoming Discord actions become Pi prompts.
+
+- [`src/pi-runtime.ts`](../../src/pi-runtime.ts)
+  Covers: Pi `AgentSession` creation/reuse, per-thread in-memory queueing, appended Discord Thread Mode system prompt, progress event translation, auth reload, dangling assistant leaf repair, prompt execution, compaction, and abort. Use when: debugging Pi session execution or transcript/session recovery.
+
+- [`src/registry.ts`](../../src/registry.ts)
+  Covers: durable JSON registry shape for Discord thread ↔ Pi session mapping, active run metadata, message IDs, title state, work graph metadata, and stale running-thread interruption marking. Use when: debugging bridge memory across restarts.
+
+- [`src/run-hud.ts`](../../src/run-hud.ts)
+  Covers: scoped in-process HUD narrator agent, `set_run_hud` tool, live run feed, fallback frame, and safety boundaries. Use when: changing live status cards.
+
+- [`src/thread-title-evaluator.ts`](../../src/thread-title-evaluator.ts)
+  Covers: scoped in-process title evaluator agent, `propose_thread_title` tool, conservative rename prompt, normalization, and evidence shape. Use when: changing Discord thread renaming behavior.
+
+- [`src/run-control/types.ts`](../../src/run-control/types.ts) and [`src/run-control/worker.ts`](../../src/run-control/worker.ts)
+  Covers: optional Redis run-control state model, worker lease/heartbeat loop, input pump, finalization guard, and terminal run status. Use when: understanding restart/process-boundary resilience.
+
+- [`src/work-graph.ts`](../../src/work-graph.ts)
+  Covers: Discord projection of Pi session forks/work graph. Use when: debugging `/pi fork` or future tree/clone behavior.
+
+- [State ownership D2 source](../data/diagrams/pi-discord-state-ownership.d2) and [restart recovery D2 source](../data/diagrams/pi-discord-restart-recovery.d2)
+  Covers: lesson diagrams rendered into SVGs for pi-notes. Use when: teaching or revising the state/recovery mental models.
+
+- [`D2Flow` Brain component](../components/D2Flow.svelte)
+  Covers: local pi-notes rendering for generated D2 SVGs. Use when: adding visual flow charts to lesson pages.
+
+## Wisdom / Practitioners / Communities
+
+- [Discord.js documentation](https://discord.js.org/docs/packages/discord.js/main)
+  Use when: checking Discord interaction/thread/message API behavior before changing Discord ingress or rendering.
+
+- [Pi coding-agent docs](../../node_modules/@earendil-works/pi-coding-agent/README.md)
+  Use when: checking local installed Pi SDK/session behavior. Prefer the mirrored Pi source when available for design work.
+
+## Gaps
+
+- Need a stable project-local pi-notes Document Host Tailscale route before promising phone-safe lesson URLs for every repo Brain page.
+- Need Pi SDK source inspection before teaching deeper `AgentSession`, `SessionManager`, or extension binding internals.

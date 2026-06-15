@@ -104,6 +104,21 @@ Relevant `joelclaw.com/api/docs` source pointers found during planning:
 - Late input during finalization is handled: Redis queueing uses `getQueueableActiveRunId()`, which clears missing/terminal/finalizing active pointers so late Discord input starts a fresh run instead of being appended to a finished run.
 - Input count UX is improved for queued active-run input by counting stream entries for the active run instead of total stream length.
 - Remaining caveat: Discord finalization still cannot be perfectly atomic with Redis. A crash after posting a final Discord message but before marking `done` can still risk duplicate final output on retry; this is narrower than the previous suppression failure and should be considered before live enablement.
+- Auto-resume recovery fix — 2026-06-15: startup now checks whether an interrupted run already persisted a final assistant answer and posts that answer instead of asking the model to recover. Runtime prompt startup also repairs dangling assistant/tool-call leaves by branching back to the last stable parent before adding a new recovery prompt. This prevents `Cannot continue from message role: assistant` loops after daemon restarts.
+
+## Live Redis instability note — 2026-06-09
+
+Flagg Central Redis is currently not a safe dependency for Discord run control without command timeouts/fallback.
+
+Receipts:
+
+- `127.0.0.1:6379` on Flagg is a `joelclaw` service-account Lima/SSH forward (`ssh: /Users/joelclaw/.colima/_lima/colima-joelclaw-central/ssh.sock [mux]`), not a Redis process owned by Joel's login session.
+- `nc -vz 127.0.0.1 6379` can succeed while Redis `PING` hangs. That means the TCP forward accepts connections even when the backing service path does not answer.
+- `/Users/Shared/joelclaw/logs/central/health.out.log` shows the whole Flagg Central shadow stack flapping, not just Redis: Redis, Typesense, Inngest, and MinIO probes time out intermittently while Restate TCP checks often stay open.
+- `com.joelclaw.central.health` is check-only. The LaunchDaemon logs failures every minute but does not restart Colima, Compose, or Redis.
+- `com.joelclaw.central.colima` and `com.joelclaw.central.compose` are one-shot successful boot services (`last exit code = 0`); after success, they do not supervise runtime degradation.
+
+Operational rule until fixed: keep `runControl.enabled` disabled or add Redis command timeouts/fail-fast behavior before using Flagg Central Redis as a live Discord run dependency.
 
 ## Deferred Questions
 
