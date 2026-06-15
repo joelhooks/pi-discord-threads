@@ -205,8 +205,6 @@ ${Object.entries(env).map(([key, value]) => `    <key>${escapeXml(key)}</key>\n 
   <true/>
   <key>KeepAlive</key>
   <true/>
-  <key>ProcessType</key>
-  <string>Background</string>
   <key>LimitLoadToSessionType</key>
   <string>Aqua</string>
   <key>StandardOutPath</key>

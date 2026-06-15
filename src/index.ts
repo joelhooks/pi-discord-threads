@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { type AppConfig, expandPath, loadConfig, parseCliArgs, writeDefaultConfig } from "./config.js";
 import { runBot } from "./discord-bot.js";
+import { postDailyMessage } from "./daily-post.js";
 import { PiRuntimeManager } from "./pi-runtime.js";
 import { Registry } from "./registry.js";
 import { SecretResolver } from "./secrets.js";
@@ -68,6 +69,11 @@ async function main(): Promise<void> {
 
   if (cli.command === "reconcile") {
     await reconcileCommand(config, cli.reconcileApply);
+    return;
+  }
+
+  if (cli.command === "daily-post") {
+    await dailyPostCommand(config, cli.dailyPostRequestPath);
     return;
   }
 
@@ -195,6 +201,26 @@ async function reconcileCommand(config: AppConfig, apply: boolean): Promise<void
   }
 }
 
+async function dailyPostCommand(
+  config: AppConfig,
+  requestPath: string | undefined
+): Promise<void> {
+  if (!requestPath) throw new Error("daily-post requires --request <path>");
+  const secrets = new SecretResolver();
+  const token = await secrets.resolveRequired({
+    envName: config.discord.tokenEnv,
+    secretName: config.discord.tokenSecretName,
+    ttl: config.discord.tokenLeaseTtl,
+    label: "Discord bot token",
+  });
+  const result = await postDailyMessage({
+    config,
+    token,
+    requestPath,
+  });
+  console.log(JSON.stringify(result, null, 2));
+}
+
 function printHelp(): void {
   console.log(`pi-discord-threads
 
@@ -209,6 +235,8 @@ Commands:
                               Boot out and remove the LaunchAgent plist
   reconcile [--config path] [--dry-run|--apply]
                               Inspect/apply Redis run-control reconciliation
+  daily-post [--config path] --request path
+                              Post a deterministic daily Brain Dump receipt into a Discord date thread
   init-config [--config path]  Write a default JSON config
   doctor [--config path]       Print non-secret runtime diagnostics
 

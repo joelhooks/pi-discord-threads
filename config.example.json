@@ -34,6 +34,13 @@
       "enabled": true,
       "model": "openai-codex/gpt-5.5",
       "updateIntervalMs": 5000
+    },
+    "threadTitles": {
+      "enabled": true,
+      "model": "openai-codex/gpt-5.4-mini",
+      "firstEvaluationTurn": 2,
+      "evaluationIntervalTurns": 8,
+      "minRenameIntervalMs": 1800000
     }
   },
   "attachments": {
@@ -56,6 +63,7 @@
     "leaseTtlMs": 60000,
     "heartbeatMs": 10000,
     "staleRunMs": 600000,
-    "reconcileIntervalMs": 60000
+    "reconcileIntervalMs": 60000,
+    "commandTimeoutMs": 5000
   }
 }

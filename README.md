@@ -93,7 +93,9 @@ Attachment ingestion is controlled under `attachments` with an enabled flag, max
 
 Live run HUD narration is controlled under `render.hud`. It defaults to `openai-codex/gpt-5.5` and updates only the active placeholder message. When the run completes, the bridge posts the final answer as a fresh Discord message and retires the placeholder.
 
-Redis run control is configured under `runControl` and is **disabled by default**. When enabled, ingress writes jobs, active-thread pointers, leases, queued steer/follow-up input, and finalization guards to Redis. The process can run `bot`, `worker`, and `reconcile` roles together or separately:
+Thread title evaluation is controlled under `render.threadTitles`. It defaults to `openai-codex/gpt-5.4-mini` and runs as a post-turn online Pi hook after turn 2, then every 8 completed turns. The evaluator proposes titles only; deterministic bridge guardrails decide whether to call Discord `thread.setName()`.
+
+Redis run control is configured under `runControl` and is **disabled by default**. When enabled, ingress writes jobs, active-thread pointers, leases, queued steer/follow-up input, and finalization guards to Redis. Redis commands are bounded by `runControl.commandTimeoutMs` so a blackholed TCP forward fails fast instead of wedging the bridge. The process can run `bot`, `worker`, and `reconcile` roles together or separately:
 
 ```bash
 pi-discord-threads start --roles bot,worker,reconcile

@@ -1,3 +1,5 @@
+import { stat } from "node:fs/promises";
+import { join } from "node:path";
 import {
   type AgentSessionRuntime,
   type CreateAgentSessionRuntimeFactory,
@@ -53,6 +55,7 @@ export interface PromptProgress {
   toolName?: string;
   isError?: boolean;
   sessionFile?: string;
+  sessionName?: string;
   elapsedMs?: number;
   feedEvent?: RunFeedEvent;
 }
@@ -205,8 +208,14 @@ export class PiRuntimeManager {
     });
 
     const managed = await this.getOrCreateRuntime(thread);
+    await this.reloadRuntimeAuth(managed);
+    const authSnapshot = await this.getAuthFileSnapshot();
     const session = managed.runtime.session;
+    if (repairDanglingAssistantLeaf(session.sessionManager)) {
+      session.agent.state.messages = session.sessionManager.buildSessionContext().messages;
+    }
     const beforeCount = session.sessionManager.getEntries().length;
+    const beforeAssistantCount = countAssistantMessages(session.messages);
     let assistantText = "";
 
     this.publishProgress(onProgress, {
@@ -223,6 +232,26 @@ export class PiRuntimeManager {
     });
 
     const unsubscribe = session.subscribe((event) => {
+      if (event.type === "session_info_changed") {
+        void this.registry.patchThread(thread.threadId, {
+          sessionName: event.name ?? thread.sessionName,
+        }).catch(() => undefined);
+        this.publishProgress(onProgress, {
+          phase: "thinking",
+          title: event.name ? `Session: ${event.name}` : "Session renamed",
+          detail: "Pi session name updated",
+          sessionFile: session.sessionFile,
+          sessionName: event.name,
+          feedEvent: {
+            type: "session_info_changed",
+            title: event.name ? `Session: ${event.name}` : "Session renamed",
+            detail: "Pi session name updated",
+            phase: "thinking",
+            data: { name: event.name },
+          },
+        });
+      }
+
       if (event.type === "agent_start") {
         this.publishProgress(onProgress, {
           phase: "thinking",
@@ -445,6 +474,29 @@ export class PiRuntimeManager {
       this.scheduleDispose(thread.threadId, managed);
     }
 
+    const assistantError = getNewAssistantError(session.messages, beforeAssistantCount);
+    if (assistantError) {
+      const authSnapshotAfterError = await this.getAuthFileSnapshot();
+      if (isOpenAiOAuthInvalidation(assistantError) && authSnapshot && authSnapshotAfterError && authSnapshotAfterError !== authSnapshot) {
+        this.publishProgress(onProgress, {
+          phase: "retry",
+          title: "OpenAI auth changed; retrying",
+          detail: "Reloading Pi auth from disk after OAuth refresh",
+          sessionFile: session.sessionFile,
+          feedEvent: {
+            type: "auto_retry_start",
+            title: "OpenAI auth changed; retrying",
+            detail: "Reloading Pi auth from disk after OAuth refresh",
+            phase: "retry",
+            data: { reason: "openai_oauth_refreshed" },
+          },
+        });
+        await this.reloadRuntimeAuth(managed);
+        return this.prompt(thread, text, images, onProgress);
+      }
+      throw new Error(formatAssistantRunError(assistantError));
+    }
+
     const sessionFile = session.sessionFile;
     const entryIds = this.getNewMessageEntryIds(session.sessionManager.getEntries(), beforeCount);
     await this.registry.patchThread(thread.threadId, {
@@ -565,6 +617,19 @@ export class PiRuntimeManager {
     await managed.runtime.dispose();
   }
 
+  private async reloadRuntimeAuth(managed: ManagedRuntime): Promise<void> {
+    managed.runtime.services.authStorage.reload();
+  }
+
+  private async getAuthFileSnapshot(): Promise<string | undefined> {
+    try {
+      const stats = await stat(join(this.agentDir, "auth.json"));
+      return `${stats.mtimeMs}:${stats.size}`;
+    } catch {
+      return undefined;
+    }
+  }
+
   private publishProgress(handler: PromptProgressHandler | undefined, progress: PromptProgress): void {
     if (!handler) return;
     void Promise.resolve(handler(progress)).catch((error) => {
@@ -590,6 +655,57 @@ export class PiRuntimeManager {
       assistantEntryId: assistantEntry?.id,
     };
   }
+}
+
+type AssistantMessageLike = {
+  role?: string;
+  stopReason?: string;
+  errorMessage?: string;
+  content?: Array<{ type?: string; text?: string }>;
+};
+
+function countAssistantMessages(messages: unknown[]): number {
+  return messages.filter((message) => (message as AssistantMessageLike).role === "assistant").length;
+}
+
+function repairDanglingAssistantLeaf(sessionManager: SessionManager): boolean {
+  const leaf = sessionManager.getLeafEntry();
+  if (!leaf || leaf.type !== "message" || leaf.message.role !== "assistant") return false;
+  if (leaf.message.stopReason === "stop") return false;
+  if (leaf.parentId) {
+    sessionManager.branch(leaf.parentId);
+  } else {
+    sessionManager.resetLeaf();
+  }
+  return true;
+}
+
+function getNewAssistantError(messages: unknown[], beforeAssistantCount: number): string | undefined {
+  const assistants = messages.filter((message) => (message as AssistantMessageLike).role === "assistant") as AssistantMessageLike[];
+  const newAssistants = assistants.slice(beforeAssistantCount);
+  const error = [...newAssistants].reverse().find((message) => message.stopReason === "error");
+  if (!error) return undefined;
+  const contentText = (error.content ?? [])
+    .filter((item) => item.type === "text" && item.text)
+    .map((item) => item.text)
+    .join("\n")
+    .trim();
+  return error.errorMessage?.trim() || contentText || "Pi provider returned an error without details.";
+}
+
+function isOpenAiOAuthInvalidation(message: string): boolean {
+  return /authentication token has been invalidated|try signing in again|invalidated.*token/i.test(message);
+}
+
+function formatAssistantRunError(message: string): string {
+  if (isOpenAiOAuthInvalidation(message)) {
+    return [
+      "OpenAI OAuth rejected this Pi run: the token was invalidated by a global logout.",
+      "The Discord bridge reloads `~/.pi/agent/auth.json` before every run, so after logging in with Pi you can retry from Discord without restarting the daemon.",
+      `Provider error: ${message}`,
+    ].join("\n\n");
+  }
+  return `Pi provider error: ${message}`;
 }
 
 function tail(value: string, maxChars: number): string {

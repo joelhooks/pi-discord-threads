@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
+import { readdir, readFile, unlink } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -23,16 +25,15 @@ import {
   type Message,
   type MessageContextMenuCommandInteraction,
   type MessageCreateOptions,
-  type MessageEditOptions,
   type ModalSubmitInteraction,
   type StringSelectMenuInteraction,
   type ThreadChannel,
 } from "discord.js";
-import { DefaultResourceLoader, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { DefaultResourceLoader, getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { appendAttachmentContext, type InlineImageContent } from "./attachments.js";
 import type { AppConfig, RunControlRole } from "./config.js";
 import { PiRuntimeManager, type PromptProgress } from "./pi-runtime.js";
-import { Registry, type ActiveRunRecord, type ThreadRecord } from "./registry.js";
+import { Registry, type ActiveRunRecord, type ThreadRecord, type ThreadTitleState } from "./registry.js";
 import {
   listWorkspaces,
   parseLeadingCwdFlag,
@@ -46,6 +47,7 @@ import { applicationCommands, askPiMessageCommandName } from "./discord-commands
 import { DISCORD_SYSTEM_PROMPT_URL } from "./discord-system-prompt.js";
 import { chunkForDiscord, stripBotMention, stripCommandPrefix, summarizeForThreadName } from "./render.js";
 import { fallbackHudFrame, RunHudNarrator, type RunHudFrame } from "./run-hud.js";
+import { evaluateThreadTitle, normalizeTitle } from "./thread-title-evaluator.js";
 import type { RunControlStore } from "./run-control/store.js";
 import type { QueuedRunInput, RunControlExecutionResult, RunRecord } from "./run-control/types.js";
 import { RunControlWorker, type RunControlWorkerAdapter } from "./run-control/worker.js";
@@ -74,6 +76,7 @@ export async function runBot(options: RunBotOptions): Promise<void> {
   const roles = options.runControlRoles ?? ["bot"];
   const botIngressEnabled = roles.includes("bot");
   let runControlWorker: RunControlWorker | undefined;
+  let stopAsyncSubagentBridge: (() => void) | undefined;
   const client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
@@ -102,6 +105,7 @@ export async function runBot(options: RunBotOptions): Promise<void> {
       runControlWorker.start();
     }
     if (botIngressEnabled) {
+      stopAsyncSubagentBridge = startAsyncSubagentResultBridge(client, options);
       await autoResumeInterruptedThreads(client, options);
     }
   });
@@ -168,6 +172,7 @@ export async function runBot(options: RunBotOptions): Promise<void> {
   const shutdown = async (signal: string) => {
     console.log(`received ${signal}, shutting down...`);
     options.runControlStopReconcileLoop?.();
+    stopAsyncSubagentBridge?.();
     await runControlWorker?.stop();
     await options.runControlStore?.close();
     await options.runtimeManager.disposeAll();
@@ -233,6 +238,16 @@ async function autoResumeInterruptedThreads(client: Client, options: RunBotOptio
         continue;
       }
 
+      const persistedFinal = getPersistedFinalAssistant(record);
+      if (persistedFinal) {
+        const chunks = chunkForDiscord(persistedFinal.text, options.config.render.maxDiscordChars);
+        await sendFinalResponseMessages(thread, record, options.registry, chunks, persistedFinal.entryId);
+        await retireWorkingPlaceholder(placeholder, record);
+        await options.registry.patchThread(record.threadId, { status: "idle", activeRun: undefined }).catch(() => undefined);
+        reconciled++;
+        continue;
+      }
+
       if (options.config.runControl.enabled && options.runControlStore && record.activeRun.runId) {
         await options.runControlStore.markTerminal(record.activeRun.runId, "interrupted", {
           error: "bridge startup auto-resume superseded interrupted registry run",
@@ -265,6 +280,211 @@ async function autoResumeInterruptedThreads(client: Client, options: RunBotOptio
   if (reconciled > 0) {
     console.log(`reconciled ${reconciled} interrupted Pi thread placeholder(s) without resumable prompts`);
   }
+}
+
+function getPersistedFinalAssistant(record: ThreadRecord): { entryId: string; text: string } | undefined {
+  const sessionFile = record.sessionFile ?? record.activeRun?.sessionFile;
+  if (!sessionFile) return undefined;
+  try {
+    const manager = SessionManager.open(sessionFile, undefined, record.cwd);
+    const leaf = manager.getLeafEntry();
+    if (!leaf || leaf.type !== "message" || leaf.message.role !== "assistant") return undefined;
+    if (leaf.message.stopReason !== "stop") return undefined;
+    const text = assistantTextContent(leaf.message.content).trim();
+    if (!text) return undefined;
+    return { entryId: leaf.id, text };
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    console.warn(`failed to inspect persisted assistant for ${record.threadId}: ${text}`);
+    return undefined;
+  }
+}
+
+function assistantTextContent(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((item) => {
+      if (!item || typeof item !== "object") return "";
+      const typed = item as { type?: string; text?: unknown };
+      return typed.type === "text" && typeof typed.text === "string" ? typed.text : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function startAsyncSubagentResultBridge(client: Client, options: RunBotOptions): () => void {
+  const resultsDir = resolveSubagentResultsDir();
+  const seen = new Set<string>();
+  let scanning = false;
+
+  const scan = async () => {
+    if (scanning) return;
+    scanning = true;
+    try {
+      const files = await readdir(resultsDir).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      });
+      await Promise.all(files
+        .filter((file) => file.endsWith(".json"))
+        .map((file) => processAsyncSubagentResultFile(client, options, resultsDir, file, seen)));
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      console.warn(`async subagent Discord bridge scan failed: ${text}`);
+    } finally {
+      scanning = false;
+    }
+  };
+
+  void scan();
+  const interval = setInterval(() => void scan(), 3_000);
+  interval.unref();
+  return () => clearInterval(interval);
+}
+
+interface AsyncSubagentResultFile {
+  id?: string;
+  runId?: string;
+  agent?: string;
+  mode?: string;
+  success?: boolean;
+  state?: string;
+  summary?: string;
+  timestamp?: number;
+  durationMs?: number;
+  sessionId?: string;
+  sessionFile?: string;
+  cwd?: string;
+  asyncDir?: string;
+  results?: Array<{
+    agent?: string;
+    output?: string;
+    error?: string;
+    success?: boolean;
+    sessionFile?: string;
+  }>;
+}
+
+async function processAsyncSubagentResultFile(
+  client: Client,
+  options: RunBotOptions,
+  resultsDir: string,
+  file: string,
+  seen: Set<string>,
+): Promise<void> {
+  const resultPath = join(resultsDir, file);
+  let parsed: AsyncSubagentResultFile;
+  try {
+    parsed = JSON.parse(await readFile(resultPath, "utf8")) as AsyncSubagentResultFile;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return;
+    console.warn(`failed to read async subagent result ${resultPath}: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  const runId = parsed.runId ?? parsed.id ?? basename(file, ".json");
+  const seenKey = `${runId}:${parsed.timestamp ?? "unknown"}:${parsed.sessionId ?? parsed.cwd ?? "unknown"}`;
+  if (seen.has(seenKey)) return;
+
+  const record = findThreadForAsyncSubagentResult(options.registry, parsed);
+  if (!record) return;
+  seen.add(seenKey);
+
+  try {
+    const channel = await resolvePromptChannel(client, record);
+    const content = formatAsyncSubagentResultMessage(parsed, runId);
+    const chunks = chunkForDiscord(content, options.config.render.maxDiscordChars);
+    await sendFinalResponseMessages(channel, record, options.registry, chunks, undefined);
+    await unlink(resultPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+  } catch (error) {
+    seen.delete(seenKey);
+    const text = error instanceof Error ? error.message : String(error);
+    console.warn(`failed to publish async subagent result ${runId} to Discord: ${text}`);
+  }
+}
+
+function findThreadForAsyncSubagentResult(registry: Registry, result: AsyncSubagentResultFile): ThreadRecord | undefined {
+  const sessionId = result.sessionId?.trim();
+  const sessionFile = result.sessionFile?.trim();
+  const candidates = registry.listThreads().filter((record) => {
+    const knownSessionFiles = [record.sessionFile, record.activeRun?.sessionFile].filter(Boolean);
+    if (sessionId && knownSessionFiles.includes(sessionId)) return true;
+    if (sessionFile && knownSessionFiles.includes(sessionFile)) return true;
+    return false;
+  });
+
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length > 1) {
+    return candidates.find((record) => record.status === "running") ?? candidates[0];
+  }
+  return undefined;
+}
+
+function formatAsyncSubagentResultMessage(result: AsyncSubagentResultFile, runId: string): string {
+  const status = result.state === "paused"
+    ? "paused"
+    : result.success === false || result.state === "failed"
+      ? "failed"
+      : "completed";
+  const icon = status === "completed" ? "✅" : status === "paused" ? "⏸️" : "❌";
+  const agent = result.agent ?? inferAsyncSubagentAgent(result) ?? "subagent";
+  const summary = formatAsyncSubagentSummary(result);
+  const duration = typeof result.durationMs === "number" ? ` · ${formatElapsed(result.durationMs)}` : "";
+  return [
+    `${icon} Background subagent ${status}: **${truncateForDiscordLine(agent, 120)}**`,
+    `-# run ${runId}${duration}`,
+    "",
+    summary,
+  ].join("\n").trim();
+}
+
+function inferAsyncSubagentAgent(result: AsyncSubagentResultFile): string | undefined {
+  if (!result.results?.length) return undefined;
+  if (result.results.length === 1) return result.results[0]?.agent;
+  return result.mode === "parallel"
+    ? `parallel:${result.results.map((item) => item.agent ?? "subagent").join("+")}`
+    : `chain:${result.results.map((item) => item.agent ?? "subagent").join("->")}`;
+}
+
+function formatAsyncSubagentSummary(result: AsyncSubagentResultFile): string {
+  const summary = result.summary?.trim();
+  if (summary) return summary;
+  const children = result.results ?? [];
+  if (children.length === 0) return "(no output)";
+  return children.map((child, index) => {
+    const label = child.agent ?? `step-${index + 1}`;
+    const body = child.success === false && child.error
+      ? `${child.error}${child.output ? `\n\n${child.output}` : ""}`
+      : child.output ?? child.error ?? "(no output)";
+    return `**${label}**\n${body}`;
+  }).join("\n\n");
+}
+
+function resolveSubagentResultsDir(): string {
+  return join(tmpdir(), `pi-subagents-${resolveTempScopeId()}`, "async-subagent-results");
+}
+
+function resolveTempScopeId(): string {
+  if (typeof process.getuid === "function") return `uid-${process.getuid()}`;
+  for (const key of ["USERNAME", "USER", "LOGNAME"] as const) {
+    const value = process.env[key];
+    if (value) return `user-${sanitizeTempScopeSegment(value)}`;
+  }
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? homedir();
+  return home ? `home-${sanitizeTempScopeSegment(home)}` : "shared";
+}
+
+function sanitizeTempScopeSegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
+}
+
+function truncateForDiscordLine(value: string, maxChars: number): string {
+  const clean = value.replace(/\s+/g, " ").trim();
+  if (clean.length <= maxChars) return clean;
+  return `${clean.slice(0, Math.max(0, maxChars - 1))}…`;
 }
 
 async function handlePiAutocomplete(interaction: AutocompleteInteraction, config: AppConfig, registry: Registry): Promise<void> {
@@ -479,7 +699,8 @@ async function handlePiButton(
   }
 
   const [, action, ...threadIdParts] = interaction.customId.split(":");
-  const threadId = threadIdParts.join(":");
+  const rawTarget = threadIdParts.join(":");
+  const [threadId, expectedMessageId] = splitControlTarget(rawTarget);
   if (!action) {
     await replyEphemeral(interaction, "Malformed Pi control button.");
     return;
@@ -512,6 +733,10 @@ async function handlePiButton(
   }
 
   if (action === "abort") {
+    if (!isCurrentAbortControl(interaction, record, expectedMessageId)) {
+      await replyEphemeral(interaction, "Stale ESC ignored. Use the ESC button on the active Pi card.");
+      return;
+    }
     await options.runtimeManager.abort(threadId);
     await replyEphemeral(interaction, "ESC requested for this Pi session.");
     return;
@@ -523,6 +748,18 @@ async function handlePiButton(
   }
 
   await replyEphemeral(interaction, `Unknown Pi action: ${action}`);
+}
+
+function splitControlTarget(rawTarget: string): [threadId: string, expectedMessageId: string | undefined] {
+  const delimiterIndex = rawTarget.lastIndexOf("|");
+  if (delimiterIndex === -1) return [rawTarget, undefined];
+  return [rawTarget.slice(0, delimiterIndex), rawTarget.slice(delimiterIndex + 1) || undefined];
+}
+
+function isCurrentAbortControl(interaction: ButtonInteraction, record: ThreadRecord, expectedMessageId: string | undefined): boolean {
+  if (!expectedMessageId) return false;
+  if (interaction.message.id !== expectedMessageId) return false;
+  return record.activeRun?.placeholderDiscordMessageId === expectedMessageId;
 }
 
 async function handlePiSelectMenu(
@@ -1618,17 +1855,19 @@ async function runPromptWithPlaceholder(
       return;
     }
 
+    const activeRun = buildActiveRunRecord(sourceDiscordId, placeholder.id, prompt, record.sessionFile);
+    const runningRecord: ThreadRecord = { ...record, status: "running", activeRun };
     await options.registry.patchThread(record.threadId, {
       status: "running",
-      activeRun: buildActiveRunRecord(sourceDiscordId, placeholder.id, prompt, record.sessionFile),
+      activeRun,
     });
 
     stopTyping = startTypingIndicator(channel);
     const thread = getThreadChannel(channel);
     if (thread) await maybeRenameThreadForPrompt(thread, record, prompt, options.registry);
-    const progress = createProgressUpdater(placeholder, record, prompt, options.config);
+    const progress = createProgressUpdater(placeholder, runningRecord, prompt, options.config);
     stopProgress = progress.stop;
-    await placeholder.edit(buildWorkingPayload(record, prompt, {
+    await placeholder.edit(buildWorkingPayload(runningRecord, prompt, {
       phase: "starting",
       title: "Starting Pi session",
       detail: record.sessionFile ? "Rehydrating existing session" : "Creating a durable session",
@@ -1642,6 +1881,11 @@ async function runPromptWithPlaceholder(
     const chunks = chunkForDiscord(result.text, options.config.render.maxDiscordChars);
     await sendFinalResponseMessages(channel, record, options.registry, chunks, result.assistantEntryId);
     await retireWorkingPlaceholder(placeholder, record);
+    const titleRecord = await recordCompletedTitleTurn(options.registry, record, prompt, result.text);
+    void maybeEvaluateThreadTitle(channel, titleRecord, options).catch((error) => {
+      const text = error instanceof Error ? error.message : String(error);
+      console.warn(`thread title hook failed for ${record.threadId}: ${text}`);
+    });
   } catch (error) {
     await stopProgress?.();
     stopTyping?.();
@@ -1681,11 +1925,13 @@ async function enqueueRunControlPrompt(
     return;
   }
 
+  const activeRun = buildActiveRunRecord(sourceDiscordId, placeholder.id, prompt, record.sessionFile, run.runId);
+  const runningRecord: ThreadRecord = { ...record, status: "running", activeRun };
   await options.registry.patchThread(record.threadId, {
     status: "running",
-    activeRun: buildActiveRunRecord(sourceDiscordId, placeholder.id, prompt, record.sessionFile, run.runId),
+    activeRun,
   });
-  await placeholder.edit(buildWorkingPayload(record, prompt, {
+  await placeholder.edit(buildWorkingPayload(runningRecord, prompt, {
     phase: "starting",
     title: "Queued in Redis run control",
     detail: record.sessionFile ? "Worker will rehydrate existing session" : "Worker will create a durable session",
@@ -1733,13 +1979,18 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
         stopTyping = startTypingIndicator(channel);
         const thread = getThreadChannel(channel);
         if (thread) await maybeRenameThreadForPrompt(thread, record, run.prompt, options.registry);
-        const progress = createProgressUpdater(placeholder, record, run.prompt, options.config);
+        const runningRecord: ThreadRecord = {
+          ...record,
+          status: "running",
+          activeRun: record.activeRun ?? buildActiveRunRecord(run.sourceDiscordMessageId, run.placeholderDiscordMessageId, run.prompt, run.sessionFile, run.runId),
+        };
+        const progress = createProgressUpdater(placeholder, runningRecord, run.prompt, options.config);
         stopProgress = progress.stop;
         const combinedProgress = (update: PromptProgress) => {
           progress.update(update);
           void Promise.resolve(onProgress(update)).catch(() => undefined);
         };
-        await placeholder.edit(buildWorkingPayload(record, run.prompt, {
+        await placeholder.edit(buildWorkingPayload(runningRecord, run.prompt, {
           phase: "starting",
           title: "Worker claimed Redis run",
           detail: run.sessionFile ? "Rehydrating existing session" : "Creating a durable session",
@@ -1763,11 +2014,16 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
       await sendFinalResponseMessages(channel, record, options.registry, chunks, result.assistantEntryId);
       const placeholder = await fetchPlaceholderMessage(channel, run.placeholderDiscordMessageId);
       await retireWorkingPlaceholder(placeholder, record);
-      await options.registry.patchThread(record.threadId, {
+      const idleRecord = await options.registry.patchThread(record.threadId, {
         status: "idle",
         activeRun: undefined,
         sessionFile: result.sessionFile ?? record.sessionFile,
-      }).catch(() => undefined);
+      }).catch(() => record);
+      const titleRecord = await recordCompletedTitleTurn(options.registry, idleRecord, run.prompt, result.text);
+      void maybeEvaluateThreadTitle(channel, titleRecord, options).catch((error) => {
+        const text = error instanceof Error ? error.message : String(error);
+        console.warn(`thread title hook failed for ${record.threadId}: ${text}`);
+      });
     },
     async failRun(run, error) {
       const record = options.registry.getThread(run.threadId);
@@ -1838,14 +2094,47 @@ async function retireWorkingPlaceholder(placeholder: Message, record: ThreadReco
 }
 
 function buildFinalPostedPayload(record: ThreadRecord): RichPayload {
-  return {
-    content: "✅ Final answer posted below.",
-    embeds: [],
-    components: buildRunControls(record.threadId, { abortDisabled: true }),
-  };
+  return buildHudCardPayload(record, {
+    tone: "done",
+    stateLabel: "done",
+    now: "Final answer posted below.",
+    progress: ["✓ Pi turn finished", "✓ Discord reply sent", "· placeholder retired"],
+    next: "Send the next message in this thread when you want to continue.",
+    footer: "ready for the next turn",
+    abortDisabled: true,
+  });
 }
 
-type RichPayload = Pick<MessageCreateOptions & MessageEditOptions, "content" | "embeds" | "components">;
+type RichPayload = {
+  content?: string;
+  embeds?: MessageCreateOptions["embeds"];
+  components?: MessageCreateOptions["components"];
+  flags?: MessageFlags.IsComponentsV2;
+};
+type DiscordTopLevelComponent = NonNullable<MessageCreateOptions["components"]>[number];
+
+type HudTone = "running" | "done" | "warning" | "error" | "interrupted";
+
+const DiscordComponentType = {
+  Button: 2,
+  Section: 9,
+  TextDisplay: 10,
+  Separator: 14,
+  Container: 17,
+} as const;
+
+const DiscordSeparatorSpacing = {
+  Small: 1,
+  Large: 2,
+} as const;
+
+const HUD_ACCENT: Record<HudTone, number> = {
+  running: 0x5865f2,
+  done: 0x57f287,
+  warning: 0xf0b232,
+  error: 0xed4245,
+  interrupted: 0xf0b232,
+};
 
 function buildThreadCreatedPayload(prompt: string): MessageCreateOptions {
   return {
@@ -1864,32 +2153,136 @@ function buildWorkingPayload(record: ThreadRecord, _prompt: string, progress: Pr
   return buildHudPayload(record, fallbackHudFrame(progress), progress.elapsedMs ?? 0, progress.isError);
 }
 
-function buildHudPayload(record: ThreadRecord, frame: RunHudFrame, elapsedMs: number, isError = false): RichPayload {
+function buildHudPayload(record: ThreadRecord, frame: RunHudFrame, _elapsedMs: number, isError = false): RichPayload {
   const normalized = normalizeHudFrame(frame);
-  const progress = normalized.progress.slice(0, 3);
-  while (progress.length < 3) progress.push("·");
+  return buildHudCardPayload(record, {
+    tone: isError ? "error" : normalized.risk ? "warning" : "running",
+    stateLabel: isError ? "attention" : "active turn",
+    header: normalized.header,
+    now: normalized.now,
+    progress: normalized.progress,
+    signals: normalized.signals,
+    risk: normalized.risk,
+    next: normalized.next,
+    footer: "final answer posts as a fresh reply below",
+    expectedMessageId: record.activeRun?.placeholderDiscordMessageId,
+  });
+}
 
-  const statusField = normalized.risk
-    ? { name: "Risk", value: truncateForEmbed(normalized.risk, 500), inline: false }
-    : { name: "Next", value: truncateForEmbed(normalized.next ?? "continuing", 500), inline: false };
-
-  const embed = new EmbedBuilder()
-    .setColor(isError || normalized.risk ? 0xf0b232 : 0x5865f2)
-    .setTitle(`π ${truncateForEmbed(normalized.header, 220)} · ${formatElapsed(elapsedMs)}`)
-    .addFields(
-      { name: "Now", value: truncateForEmbed(normalized.now, 700), inline: false },
-      { name: "Progress", value: progress.map((item) => truncateForEmbed(item, 220)).join("\n"), inline: false },
-      { name: "Signals", value: truncateForEmbed(normalized.signals ?? "-", 500), inline: false },
-      statusField,
-    )
-    .setFooter({ text: record.workspaceName ? `ESC stops the run · workspace: ${record.workspaceName}` : "ESC stops the run" })
-    .setTimestamp(new Date());
+function buildHudCardPayload(record: ThreadRecord, options: {
+  tone: HudTone;
+  stateLabel: string;
+  header?: string;
+  now: string;
+  progress: string[];
+  signals?: string;
+  risk?: string;
+  next?: string;
+  footer: string;
+  abortDisabled?: boolean;
+  expectedMessageId?: string;
+}): RichPayload {
+  const progress = fixedProgressRows(options.progress);
+  const title = truncateForComponent(hudTitle(record), 90);
+  const startedAt = hudStartedTimestamp(record);
+  const subtitle = [`${options.stateLabel}${startedAt ? ` · started <t:${startedAt}:R>` : ""}`];
+  if (record.workspaceName) subtitle.push(`workspace: ${record.workspaceName}`);
+  const nowLines = [
+    "**Now**",
+    truncateForComponent(options.now, 650),
+    options.signals ? `-# ${truncateForComponent(options.signals, 360)}` : "-# waiting on live Pi events",
+  ];
+  const statusBlock = options.risk
+    ? `**Watch**\n${truncateForComponent(options.risk, 650)}`
+    : `**Next**\n${truncateForComponent(options.next ?? "continuing", 650)}`;
 
   return {
     content: "",
-    embeds: [embed],
-    components: buildRunControls(record.threadId),
+    embeds: [],
+    flags: MessageFlags.IsComponentsV2,
+    components: [containerComponent(options.tone, [
+      sectionComponent(
+        [`### ${title}`, `-# ${subtitle.join(" · ")}`].join("\n"),
+        escButtonComponent(record.threadId, {
+          abortDisabled: options.abortDisabled,
+          expectedMessageId: options.expectedMessageId,
+        }),
+      ),
+      separatorComponent(),
+      textDisplayComponent(nowLines.join("\n")),
+      textDisplayComponent(["**Progress**", ...progress.map((item) => truncateForComponent(item, 260))].join("\n")),
+      textDisplayComponent(statusBlock),
+      textDisplayComponent("**Input**\nSend a message to steer this turn.\nFollow-up queue requires ESC first, then send it."),
+      textDisplayComponent(`-# ${truncateForComponent(options.footer, 280)}`),
+    ])],
   };
+}
+
+function hudTitle(record: ThreadRecord): string {
+  const sessionName = record.sessionName?.trim();
+  if (sessionName && !/^Discord \d+$/i.test(sessionName)) return sessionName;
+  return record.workspaceName?.trim() || "Pi turn";
+}
+
+function hudStartedTimestamp(record: ThreadRecord): number | undefined {
+  const startedAt = record.activeRun?.startedAt ?? record.updatedAt;
+  const millis = Date.parse(startedAt);
+  if (!Number.isFinite(millis)) return undefined;
+  return Math.floor(millis / 1000);
+}
+
+function fixedProgressRows(progress: string[]): string[] {
+  const rows = progress.slice(0, 3).map((item) => item.trim()).filter(Boolean);
+  while (rows.length < 3) rows.push("·");
+  return rows;
+}
+
+function containerComponent(tone: HudTone, components: DiscordTopLevelComponent[]): DiscordTopLevelComponent {
+  return {
+    type: DiscordComponentType.Container,
+    accent_color: HUD_ACCENT[tone],
+    components,
+  } as DiscordTopLevelComponent;
+}
+
+function sectionComponent(content: string, accessory: ReturnType<typeof escButtonComponent>): DiscordTopLevelComponent {
+  return {
+    type: DiscordComponentType.Section,
+    components: [textDisplayComponent(content)],
+    accessory,
+  } as DiscordTopLevelComponent;
+}
+
+function textDisplayComponent(content: string): DiscordTopLevelComponent {
+  return {
+    type: DiscordComponentType.TextDisplay,
+    content: truncateForComponent(content, 3_800),
+  } as DiscordTopLevelComponent;
+}
+
+function separatorComponent(): DiscordTopLevelComponent {
+  return {
+    type: DiscordComponentType.Separator,
+    divider: true,
+    spacing: DiscordSeparatorSpacing.Small,
+  } as DiscordTopLevelComponent;
+}
+
+function escButtonComponent(threadId: string, options: { abortDisabled?: boolean; expectedMessageId?: string } = {}) {
+  const disabled = options.abortDisabled === true || !options.expectedMessageId;
+  return {
+    type: DiscordComponentType.Button,
+    custom_id: options.expectedMessageId ? `pi:abort:${threadId}|${options.expectedMessageId}` : `pi:abort:${threadId}`,
+    label: "ESC",
+    style: ButtonStyle.Danger,
+    disabled,
+  };
+}
+
+function truncateForComponent(value: string, maxChars: number): string {
+  const clean = value.trim() || "-";
+  if (clean.length <= maxChars) return clean;
+  return `${clean.slice(0, Math.max(0, maxChars - 1))}…`;
 }
 
 function normalizeHudFrame(frame: RunHudFrame): RunHudFrame {
@@ -1946,48 +2339,43 @@ function buildQueuedPayload(mode: "steer" | "followUp", pendingCount: number): R
 }
 
 function buildErrorPayload(record: ThreadRecord, error: string): RichPayload {
-  return {
-    content: "",
-    embeds: [
-      new EmbedBuilder()
-        .setColor(0xed4245)
-        .setTitle("❌ Pi run failed")
-        .setDescription(truncateForEmbed(error, 1800))
-        .setTimestamp(new Date())
-        .setFooter(record.workspaceName ? { text: `workspace: ${record.workspaceName}` } : null),
-    ],
-    components: buildRunControls(record.threadId, { abortDisabled: true }),
-  };
+  return buildHudCardPayload(record, {
+    tone: "error",
+    stateLabel: "failed",
+    now: "Pi run failed before Discord received a final answer.",
+    progress: ["✗ run failed", "· session state preserved", "· send a new message to retry or continue"],
+    risk: error,
+    footer: "ESC disabled because this run is already terminal",
+    abortDisabled: true,
+  });
 }
 
 function buildInterruptedRunPayload(record: ThreadRecord): RichPayload {
   const activeRun = record.activeRun;
-  return {
-    content: "",
-    embeds: [
-      new EmbedBuilder()
-        .setColor(0xf0b232)
-        .setTitle("⚠️ Pi run interrupted by bridge restart")
-        .setDescription("The local Pi session file is preserved, but this interrupted run had no resumable prompt metadata. Send `continue` in this thread to recover from the durable session history, or send a new prompt to continue from there.")
-        .addFields(
-          { name: "Interrupted request", value: truncateForEmbed(activeRun?.promptPreview || "not recorded", 700), inline: false },
-          { name: "Session", value: truncateForEmbed(record.sessionFile ?? activeRun?.sessionFile ?? "not created yet", 700), inline: false },
-        )
-        .setTimestamp(new Date()),
+  return buildHudCardPayload(record, {
+    tone: "interrupted",
+    stateLabel: "interrupted",
+    now: "Bridge restarted before Discord received a final answer.",
+    progress: [
+      "⚠ run interrupted by bridge restart",
+      `· request: ${activeRun?.promptPreview || "not recorded"}`,
+      `· session: ${record.sessionFile ?? activeRun?.sessionFile ?? "not created yet"}`,
     ],
-    components: buildRunControls(record.threadId, { abortDisabled: true }),
-  };
+    risk: "Send `continue` in this thread to recover from durable session history, or send a new prompt to continue from there.",
+    footer: "ESC disabled because this run is already terminal",
+    abortDisabled: true,
+  });
 }
 
-function buildRunControls(threadId: string, options: { abortDisabled?: boolean } = {}): ActionRowBuilder<ButtonBuilder>[] {
+function buildRunControls(threadId: string, options: { abortDisabled?: boolean; expectedMessageId?: string } = {}): ActionRowBuilder<ButtonBuilder>[] {
   if (options.abortDisabled) return [];
+  const button = new ButtonBuilder()
+    .setCustomId(options.expectedMessageId ? `pi:abort:${threadId}|${options.expectedMessageId}` : `pi:abort:${threadId}`)
+    .setLabel("ESC")
+    .setStyle(ButtonStyle.Danger)
+    .setDisabled(!options.expectedMessageId);
   return [
-    new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`pi:abort:${threadId}`)
-        .setLabel("ESC")
-        .setStyle(ButtonStyle.Danger),
-    ),
+    new ActionRowBuilder<ButtonBuilder>().addComponents(button),
   ];
 }
 
@@ -1998,6 +2386,7 @@ function createProgressUpdater(placeholder: Message, record: ThreadRecord, promp
   const startedAt = Date.now();
   let latestProgress: PromptProgress | undefined;
   let latestFrame: RunHudFrame | undefined;
+  let hudRecord = record;
   let timer: NodeJS.Timeout | undefined;
   let heartbeat: NodeJS.Timeout | undefined;
   let lastEditAt = 0;
@@ -2034,8 +2423,8 @@ function createProgressUpdater(placeholder: Message, record: ThreadRecord, promp
     lastEditAt = Date.now();
     const elapsedMs = Date.now() - startedAt;
     const payload = latestFrame
-      ? buildHudPayload(record, latestFrame, elapsedMs)
-      : buildWorkingPayload(record, prompt, withElapsed(latestProgress));
+      ? buildHudPayload(hudRecord, latestFrame, elapsedMs)
+      : buildWorkingPayload(hudRecord, prompt, withElapsed(latestProgress));
     editQueue = editQueue
       .catch(() => undefined)
       .then(async () => {
@@ -2071,6 +2460,7 @@ function createProgressUpdater(placeholder: Message, record: ThreadRecord, promp
   return {
     update(progress) {
       if (stopped) return;
+      if (progress.sessionName) hudRecord = { ...hudRecord, sessionName: progress.sessionName };
       latestProgress = progress;
       if (progress.feedEvent) narrator?.record(progress.feedEvent);
       scheduleFlush(progress.isError || progress.phase === "compaction" || progress.phase === "retry" ? 0 : config.render.hud.updateIntervalMs);
@@ -2110,9 +2500,120 @@ function shouldRenameThread(currentName: string, desiredName: string): boolean {
     || normalized.startsWith("pi: workspace ")
     || normalized.startsWith("pi: fork of ")
     || normalized.startsWith("pi: resume ")
-    || normalized.startsWith("🗂️ ")
+    || normalized.startsWith("🗂️ workspace ")
     || normalized.startsWith("π fork of ")
     || normalized.startsWith("π resume ");
+}
+
+const MAX_TITLE_EVIDENCE_TURNS = 12;
+const TITLE_RENAME_CONFIDENCE_FLOOR = 0.72;
+
+async function recordCompletedTitleTurn(registry: Registry, record: ThreadRecord, userText: string, assistantText: string): Promise<ThreadRecord> {
+  const latest = registry.getThread(record.threadId) ?? record;
+  const previous: ThreadTitleState = latest.titleState ?? { turnCount: 0, recentTurns: [] };
+  const nextState: ThreadTitleState = {
+    ...previous,
+    turnCount: previous.turnCount + 1,
+    recentTurns: [
+      ...previous.recentTurns,
+      {
+        user: clipTitleEvidence(userText),
+        assistant: clipTitleEvidence(assistantText),
+        createdAt: new Date().toISOString(),
+      },
+    ].slice(-MAX_TITLE_EVIDENCE_TURNS),
+  };
+  return registry.patchThread(record.threadId, { titleState: nextState }).catch(() => ({ ...latest, titleState: nextState }));
+}
+
+async function maybeEvaluateThreadTitle(channel: PromptChannel, record: ThreadRecord, options: RunBotOptions): Promise<void> {
+  const config = options.config.render.threadTitles;
+  if (!config.enabled) return;
+  const thread = getThreadChannel(channel);
+  if (!thread) return;
+  const state = record.titleState;
+  if (!state || !shouldEvaluateThreadTitle(state, config)) return;
+
+  const evaluatedState: ThreadTitleState = {
+    ...state,
+    lastEvaluatedTurn: state.turnCount,
+  };
+
+  let proposal;
+  try {
+    proposal = await evaluateThreadTitle({
+      cwd: record.cwd,
+      agentDir: options.config.pi.agentDir,
+      model: config.model,
+      currentTitle: thread.name,
+      workspaceName: record.workspaceName,
+      turnCount: state.turnCount,
+      recentTurns: state.recentTurns,
+    });
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    console.warn(`thread title evaluator failed for ${record.threadId}: ${text}`);
+    await options.registry.patchThread(record.threadId, { titleState: evaluatedState }).catch(() => undefined);
+    return;
+  }
+
+  const desired = proposal?.title ? normalizeTitle(proposal.title) : undefined;
+  if (!proposal?.shouldRename || !desired || !shouldApplyThreadTitleProposal(thread.name, desired, state, config, proposal.confidence)) {
+    await options.registry.patchThread(record.threadId, { titleState: evaluatedState }).catch(() => undefined);
+    return;
+  }
+
+  const renamed = await thread.setName(desired, `Pi thread title evaluator: ${proposal.reason ?? "theme update"}`).then(() => true).catch((error) => {
+    const text = error instanceof Error ? error.message : String(error);
+    console.warn(`failed to rename Discord thread ${record.threadId}: ${text}`);
+    return false;
+  });
+  const nextState: ThreadTitleState = renamed
+    ? {
+      ...evaluatedState,
+      lastRenamedTurn: state.turnCount,
+      lastRenamedAt: new Date().toISOString(),
+      lastSuggestedTitle: desired,
+    }
+    : evaluatedState;
+  await options.registry.patchThread(record.threadId, {
+    titleState: nextState,
+    ...(renamed ? { sessionName: desired } : {}),
+  }).catch(() => undefined);
+}
+
+function shouldEvaluateThreadTitle(state: ThreadTitleState, config: RunBotOptions["config"]["render"]["threadTitles"]): boolean {
+  if (state.turnCount < config.firstEvaluationTurn) return false;
+  if (!state.lastEvaluatedTurn) return true;
+  return state.turnCount - state.lastEvaluatedTurn >= config.evaluationIntervalTurns;
+}
+
+function shouldApplyThreadTitleProposal(
+  currentName: string,
+  desiredName: string,
+  state: ThreadTitleState,
+  config: RunBotOptions["config"]["render"]["threadTitles"],
+  confidence: number | undefined,
+): boolean {
+  if (!desiredName || currentName.trim() === desiredName.trim()) return false;
+  if ((confidence ?? 1) < TITLE_RENAME_CONFIDENCE_FLOOR) return false;
+  if (!isBridgeManagedThreadTitle(currentName, state)) return false;
+  if (state.lastRenamedAt && Date.now() - Date.parse(state.lastRenamedAt) < config.minRenameIntervalMs) return false;
+  return true;
+}
+
+function isBridgeManagedThreadTitle(currentName: string, state: ThreadTitleState): boolean {
+  const normalized = currentName.trim();
+  if (!normalized) return true;
+  if (state.lastSuggestedTitle && normalized === state.lastSuggestedTitle) return true;
+  return /^(🗂️|✨|🐛|🔎|📚|🧪|🚀|🧹|💬|π)\s/.test(normalized)
+    || /^(pi|π)( session|:)/i.test(normalized);
+}
+
+function clipTitleEvidence(value: string): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (compact.length <= 1_500) return compact;
+  return `${compact.slice(0, 1_480)} …[truncated ${compact.length - 1_480} chars]`;
 }
 
 function formatElapsed(ms: number): string {

@@ -9,6 +9,13 @@ export interface RedisCommandClient {
   on?(event: "error", listener: (error: Error) => void): unknown;
 }
 
+export class RedisCommandTimeoutError extends Error {
+  constructor(commandName: string, timeoutMs: number) {
+    super(`Redis command ${commandName} timed out after ${timeoutMs}ms`);
+    this.name = "RedisCommandTimeoutError";
+  }
+}
+
 export function resolveRunControlRedisUrl(config: AppConfig): string | undefined {
   const explicit = config.runControl.redisUrl?.trim();
   if (explicit) return explicit;
@@ -23,12 +30,36 @@ export async function createRunControlRedisClient(config: AppConfig): Promise<Re
     throw new Error(`runControl is enabled but no Redis URL was configured. Set runControl.redisUrl or ${envName}.`);
   }
 
-  const client = createClient({ url });
+  const timeoutMs = config.runControl.commandTimeoutMs;
+  const client = createClient({
+    url,
+    socket: {
+      connectTimeout: timeoutMs,
+    },
+  });
   client.on("error", (error) => {
     console.warn(`Redis run-control client error: ${error.message}`);
   });
-  await client.connect();
-  return client as unknown as RedisCommandClient;
+  await withRedisTimeout(client.connect(), "CONNECT", timeoutMs, () => client.destroy());
+  return {
+    sendCommand(command: string[]) {
+      return withRedisTimeout(
+        client.sendCommand(command),
+        command[0]?.toUpperCase() || "UNKNOWN",
+        timeoutMs,
+        () => client.destroy(),
+      );
+    },
+    close() {
+      return withRedisTimeout(client.close(), "CLOSE", timeoutMs, () => client.destroy());
+    },
+    destroy() {
+      return client.destroy();
+    },
+    on(event: "error", listener: (error: Error) => void) {
+      return client.on(event, listener);
+    },
+  };
 }
 
 export async function checkRunControlRedisHealth(config: AppConfig): Promise<{ ok: boolean; message: string }> {
@@ -42,13 +73,38 @@ export async function checkRunControlRedisHealth(config: AppConfig): Promise<{ o
     return { ok: false, message: `runControl: enabled but ${envName} / runControl.redisUrl is missing` };
   }
 
-  const client = await createRunControlRedisClient(config);
+  let client: RedisCommandClient | undefined;
   try {
+    client = await createRunControlRedisClient(config);
     const pong = await client.sendCommand(["PING"]);
     return { ok: pong === "PONG", message: `runControl Redis: ${String(pong)}` };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, message: `runControl Redis: ${message}` };
   } finally {
-    await client.close().catch(() => undefined);
+    await client?.close().catch(() => undefined);
   }
+}
+
+function withRedisTimeout<T>(promise: Promise<T>, commandName: string, timeoutMs: number, onTimeout?: () => void): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return new Promise<T>((resolve, reject) => {
+    timer = setTimeout(() => {
+      try {
+        onTimeout?.();
+      } catch {
+        // ignore cleanup failures; the timeout error is the useful signal
+      }
+      reject(new RedisCommandTimeoutError(commandName, timeoutMs));
+    }, timeoutMs);
+    timer.unref();
+    promise.then(
+      (value) => resolve(value),
+      (error) => reject(error),
+    ).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  });
 }
 
 export function getRunControlWorkerId(config: AppConfig): string {

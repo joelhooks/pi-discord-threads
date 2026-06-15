@@ -17,6 +17,7 @@ export interface RunControlConfig {
   heartbeatMs: number;
   staleRunMs: number;
   reconcileIntervalMs: number;
+  commandTimeoutMs: number;
 }
 
 export interface DiscordContextChannelConfig {
@@ -30,6 +31,14 @@ export interface PersonalWorkroomConfig {
   cwd?: string;
   sessionName: string;
   extensionPaths: string[];
+}
+
+export interface ThreadTitleConfig {
+  enabled: boolean;
+  model: string;
+  firstEvaluationTurn: number;
+  evaluationIntervalTurns: number;
+  minRenameIntervalMs: number;
 }
 
 export interface AppConfig {
@@ -62,6 +71,7 @@ export interface AppConfig {
       model: string;
       updateIntervalMs: number;
     };
+    threadTitles: ThreadTitleConfig;
   };
   attachments: {
     enabled: boolean;
@@ -73,8 +83,9 @@ export interface AppConfig {
 }
 
 export interface CliOptions {
-  command: "start" | "init-config" | "doctor" | "status" | "reconcile" | "install-launch-agent" | "uninstall-launch-agent" | "launch-agent-status" | "help";
+  command: "start" | "init-config" | "doctor" | "status" | "reconcile" | "daily-post" | "install-launch-agent" | "uninstall-launch-agent" | "launch-agent-status" | "help";
   configPath: string;
+  dailyPostRequestPath?: string;
   roles?: RunControlRole[];
   reconcileApply: boolean;
   launchAgentStart: boolean;
@@ -128,6 +139,13 @@ export function defaultConfig(): AppConfig {
         model: "openai-codex/gpt-5.5",
         updateIntervalMs: 5_000,
       },
+      threadTitles: {
+        enabled: true,
+        model: "openai-codex/gpt-5.4-mini",
+        firstEvaluationTurn: 2,
+        evaluationIntervalTurns: 8,
+        minRenameIntervalMs: 30 * 60_000,
+      },
     },
     attachments: {
       enabled: true,
@@ -150,6 +168,7 @@ export function defaultConfig(): AppConfig {
       heartbeatMs: 10_000,
       staleRunMs: 10 * 60_000,
       reconcileIntervalMs: 60_000,
+      commandTimeoutMs: 5_000,
     },
   };
 }
@@ -172,6 +191,10 @@ function mergeConfig(base: AppConfig, partial: Partial<AppConfig>): AppConfig {
       hud: {
         ...base.render.hud,
         ...(partial.render?.hud ?? {}),
+      },
+      threadTitles: {
+        ...base.render.threadTitles,
+        ...(partial.render?.threadTitles ?? {}),
       },
     },
     attachments: {
@@ -234,6 +257,7 @@ export function normalizeConfig(config: AppConfig): AppConfig {
         model: config.render.hud?.model?.trim() || "openai-codex/gpt-5.5",
         updateIntervalMs: Math.max(2_500, Math.min(30_000, config.render.hud?.updateIntervalMs || 5_000)),
       },
+      threadTitles: normalizeThreadTitles(config.render.threadTitles),
     },
     attachments: {
       enabled: config.attachments.enabled !== false,
@@ -281,6 +305,18 @@ function normalizeWorkspaces(workspaces: Record<string, string> | undefined): Re
   return normalized;
 }
 
+function normalizeThreadTitles(threadTitles: ThreadTitleConfig | undefined): ThreadTitleConfig {
+  const defaults = defaultConfig().render.threadTitles;
+  const merged = { ...defaults, ...(threadTitles ?? {}) };
+  return {
+    enabled: merged.enabled !== false,
+    model: merged.model?.trim() || defaults.model,
+    firstEvaluationTurn: Math.floor(clampNumber(merged.firstEvaluationTurn, 1, 20, defaults.firstEvaluationTurn)),
+    evaluationIntervalTurns: Math.floor(clampNumber(merged.evaluationIntervalTurns, 1, 50, defaults.evaluationIntervalTurns)),
+    minRenameIntervalMs: clampNumber(merged.minRenameIntervalMs, 0, 24 * 60 * 60_000, defaults.minRenameIntervalMs),
+  };
+}
+
 function normalizeRunControl(runControl: RunControlConfig | undefined): RunControlConfig {
   const defaults = defaultConfig().runControl;
   const merged = { ...defaults, ...(runControl ?? {}) };
@@ -299,6 +335,7 @@ function normalizeRunControl(runControl: RunControlConfig | undefined): RunContr
     heartbeatMs,
     staleRunMs,
     reconcileIntervalMs: clampNumber(merged.reconcileIntervalMs, 5_000, 60 * 60_000, defaults.reconcileIntervalMs),
+    commandTimeoutMs: clampNumber(merged.commandTimeoutMs, 1_000, 60_000, defaults.commandTimeoutMs),
   };
 }
 
@@ -343,6 +380,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
   let launchAgentStart = false;
   let launchAgentRestart = false;
   let force = false;
+  let dailyPostRequestPath: string | undefined;
   let roles: RunControlRole[] | undefined;
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -351,6 +389,17 @@ export function parseCliArgs(argv: string[]): CliOptions {
       if (!next) throw new Error("--config requires a path");
       configPath = next;
       i++;
+      continue;
+    }
+    if (arg === "--request") {
+      const next = args[i + 1];
+      if (!next) throw new Error("--request requires a path");
+      dailyPostRequestPath = next;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--request=")) {
+      dailyPostRequestPath = arg.slice("--request=".length);
       continue;
     }
     if (arg.startsWith("--config=")) {
@@ -405,9 +454,18 @@ export function parseCliArgs(argv: string[]): CliOptions {
     }
   }
 
-  if (!["start", "init-config", "doctor", "status", "reconcile", "install-launch-agent", "uninstall-launch-agent", "launch-agent-status", "help"].includes(command)) {
+  if (!["start", "init-config", "doctor", "status", "reconcile", "daily-post", "install-launch-agent", "uninstall-launch-agent", "launch-agent-status", "help"].includes(command)) {
     throw new Error(`Unknown command: ${command}`);
   }
 
-  return { command: command as CliOptions["command"], configPath, roles, reconcileApply, launchAgentStart, launchAgentRestart, force };
+  return {
+    command: command as CliOptions["command"],
+    configPath,
+    ...(dailyPostRequestPath ? { dailyPostRequestPath } : {}),
+    ...(roles ? { roles } : {}),
+    reconcileApply,
+    launchAgentStart,
+    launchAgentRestart,
+    force,
+  };
 }

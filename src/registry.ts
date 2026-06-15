@@ -23,6 +23,21 @@ export interface WorkGraphMetadata {
   createdFromEntryId?: string;
 }
 
+export interface ThreadTitleTurnRecord {
+  user: string;
+  assistant: string;
+  createdAt: string;
+}
+
+export interface ThreadTitleState {
+  turnCount: number;
+  lastEvaluatedTurn?: number;
+  lastRenamedTurn?: number;
+  lastRenamedAt?: string;
+  lastSuggestedTitle?: string;
+  recentTurns: ThreadTitleTurnRecord[];
+}
+
 export interface ThreadRecord {
   threadId: string;
   kind?: "discord-thread" | "discord-dm-workroom";
@@ -36,6 +51,7 @@ export interface ThreadRecord {
   extensionPaths?: string[];
   status: "idle" | "running" | "error" | "locked" | "interrupted";
   activeRun?: ActiveRunRecord;
+  titleState?: ThreadTitleState;
   workGraph?: WorkGraphMetadata;
   createdAt: string;
   updatedAt: string;
@@ -152,6 +168,7 @@ export class Registry {
       extensionPaths: input.extensionPaths ?? existing?.extensionPaths,
       status: input.status ?? existing?.status ?? "idle",
       activeRun: input.activeRun ?? existing?.activeRun,
+      titleState: existing?.titleState,
       workGraph: input.workGraph ?? existing?.workGraph ?? rootWorkGraph(input.threadId),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
@@ -202,10 +219,33 @@ function normalizeThreads(threads: Record<string, ThreadRecord>): Record<string,
       threadId: normalizedThreadId,
       kind: record.kind ?? (normalizedThreadId.startsWith("dm:") ? "discord-dm-workroom" : "discord-thread"),
       status: record.status ?? "idle",
+      titleState: normalizeTitleState(record.titleState),
       workGraph: record.workGraph ?? rootWorkGraph(normalizedThreadId),
     };
   }
   return normalized;
+}
+
+function normalizeTitleState(state: ThreadTitleState | undefined): ThreadTitleState | undefined {
+  if (!state) return undefined;
+  const recentTurns = Array.isArray(state.recentTurns)
+    ? state.recentTurns
+      .map((turn) => ({
+        user: String(turn.user ?? ""),
+        assistant: String(turn.assistant ?? ""),
+        createdAt: String(turn.createdAt ?? ""),
+      }))
+      .filter((turn) => turn.user || turn.assistant)
+      .slice(-12)
+    : [];
+  return {
+    turnCount: Number.isFinite(state.turnCount) ? Math.max(0, Math.floor(Number(state.turnCount))) : recentTurns.length,
+    lastEvaluatedTurn: Number.isFinite(state.lastEvaluatedTurn) ? Math.max(0, Math.floor(Number(state.lastEvaluatedTurn))) : undefined,
+    lastRenamedTurn: Number.isFinite(state.lastRenamedTurn) ? Math.max(0, Math.floor(Number(state.lastRenamedTurn))) : undefined,
+    lastRenamedAt: state.lastRenamedAt,
+    lastSuggestedTitle: state.lastSuggestedTitle,
+    recentTurns,
+  };
 }
 
 function rootWorkGraph(threadId: string): WorkGraphMetadata {
