@@ -33,7 +33,7 @@ import { DefaultResourceLoader, getAgentDir, SessionManager } from "@earendil-wo
 import { appendAttachmentContext, type InlineImageContent } from "./attachments.js";
 import type { AppConfig, RunControlRole } from "./config.js";
 import { PiRuntimeManager, type PromptProgress } from "./pi-runtime.js";
-import { Registry, type ActiveRunRecord, type LinkIngestRecord, type ThreadRecord, type ThreadTitleState } from "./registry.js";
+import type { ActiveRunRecord, LinkIngestRecord, RegistryPort, ThreadRecord, ThreadTitleState } from "./registry.js";
 import {
   listWorkspaces,
   parseLeadingCwdFlag,
@@ -61,7 +61,7 @@ interface RunBotOptions {
   config: AppConfig;
   token: string;
   allowedUserIds: string[];
-  registry: Registry;
+  registry: RegistryPort;
   runtimeManager: PiRuntimeManager;
   runControlStore?: RunControlStorePort;
   runControlRoles?: RunControlRole[];
@@ -196,6 +196,7 @@ export async function runBot(options: RunBotOptions): Promise<void> {
     await runControlWorker?.stop();
     await options.runControlStore?.close();
     await options.runtimeManager.disposeAll();
+    await options.registry.close?.();
     client.destroy();
     process.exit(0);
   };
@@ -479,7 +480,7 @@ async function processAsyncSubagentResultFile(
   }
 }
 
-function findThreadForAsyncSubagentResult(registry: Registry, result: AsyncSubagentResultFile): ThreadRecord | undefined {
+function findThreadForAsyncSubagentResult(registry: RegistryPort, result: AsyncSubagentResultFile): ThreadRecord | undefined {
   const sessionId = result.sessionId?.trim();
   const sessionFile = result.sessionFile?.trim();
   const candidates = registry.listThreads().filter((record) => {
@@ -560,7 +561,7 @@ function truncateForDiscordLine(value: string, maxChars: number): string {
   return `${clean.slice(0, Math.max(0, maxChars - 1))}…`;
 }
 
-async function handlePiAutocomplete(interaction: AutocompleteInteraction, config: AppConfig, registry: Registry): Promise<void> {
+async function handlePiAutocomplete(interaction: AutocompleteInteraction, config: AppConfig, registry: RegistryPort): Promise<void> {
   const focusedOption = interaction.options.getFocused(true);
   const focused = String(focusedOption.value).toLowerCase();
   const subcommand = interaction.options.getSubcommand(false);
@@ -2373,7 +2374,7 @@ async function fetchPlaceholderMessage(channel: PromptChannel, messageId: string
 async function sendFinalResponseMessages(
   channel: PromptChannel,
   record: ThreadRecord,
-  registry: Registry,
+  registry: RegistryPort,
   chunks: string[],
   assistantEntryId: string | undefined,
 ): Promise<void> {
@@ -2813,7 +2814,7 @@ function startTypingIndicator(channel: PromptChannel): () => void {
   return () => clearInterval(interval);
 }
 
-async function maybeRenameThreadForPrompt(thread: ThreadChannel, record: ThreadRecord, prompt: string, registry: Registry): Promise<void> {
+async function maybeRenameThreadForPrompt(thread: ThreadChannel, record: ThreadRecord, prompt: string, registry: RegistryPort): Promise<void> {
   const desired = summarizeForThreadName(prompt);
   if (!shouldRenameThread(thread.name, desired)) return;
   const renamed = await thread.setName(desired, "Update Pi thread name from current task").then(() => true).catch(() => false);
@@ -2837,7 +2838,7 @@ function shouldRenameThread(currentName: string, desiredName: string): boolean {
 const MAX_TITLE_EVIDENCE_TURNS = 12;
 const TITLE_RENAME_CONFIDENCE_FLOOR = 0.72;
 
-async function recordCompletedTitleTurn(registry: Registry, record: ThreadRecord, userText: string, assistantText: string): Promise<ThreadRecord> {
+async function recordCompletedTitleTurn(registry: RegistryPort, record: ThreadRecord, userText: string, assistantText: string): Promise<ThreadRecord> {
   const latest = registry.getThread(record.threadId) ?? record;
   const previous: ThreadTitleState = latest.titleState ?? { turnCount: 0, recentTurns: [] };
   const nextState: ThreadTitleState = {
@@ -3005,7 +3006,7 @@ function buildWorkspaceSelectComponents(config: AppConfig): ActionRowBuilder<Str
   return [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(select)];
 }
 
-function formatRecentSessions(registry: Registry): string {
+function formatRecentSessions(registry: RegistryPort): string {
   const records = recentThreads(registry).slice(0, 10);
   if (records.length === 0) return "No Discord ↔ Pi sessions are registered yet.";
   return [
@@ -3016,7 +3017,7 @@ function formatRecentSessions(registry: Registry): string {
   ].join("\n");
 }
 
-function recentThreads(registry: Registry): ThreadRecord[] {
+function recentThreads(registry: RegistryPort): ThreadRecord[] {
   return registry.listThreads()
     .slice()
     .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
@@ -3048,7 +3049,7 @@ function homeRelative(path: string): string {
   return path;
 }
 
-async function sendStatus(message: Message, registry: Registry): Promise<void> {
+async function sendStatus(message: Message, registry: RegistryPort): Promise<void> {
   const threadId = message.channel.isThread() ? message.channel.id : undefined;
   if (!threadId) {
     await safeReply(message, "Use `status` inside a registered Pi thread.");
@@ -3064,7 +3065,7 @@ async function sendStatus(message: Message, registry: Registry): Promise<void> {
   await safeReply(message, formatStatus(record));
 }
 
-async function sendStatusInteraction(interaction: ChatInputCommandInteraction, registry: Registry): Promise<void> {
+async function sendStatusInteraction(interaction: ChatInputCommandInteraction, registry: RegistryPort): Promise<void> {
   const threadId = interaction.channel?.isThread() ? interaction.channel.id : undefined;
   if (!threadId) {
     await replyEphemeral(interaction, "Use `/pi status` inside a registered Pi thread.");

@@ -106,7 +106,39 @@ export interface RegistryData {
   linkIngests: Record<string, LinkIngestRecord>;
 }
 
-export class Registry {
+export interface RegistryPort {
+  save(): Promise<void>;
+  getThread(threadId: string): ThreadRecord | undefined;
+  listThreads(): ThreadRecord[];
+  markRunningThreadsInterrupted(): Promise<number>;
+  upsertThread(input: {
+    threadId: string;
+    kind?: ThreadRecord["kind"];
+    guildId?: string;
+    parentChannelId?: string;
+    discordUserId?: string;
+    cwd: string;
+    workspaceName?: string;
+    sessionFile?: string;
+    sessionName?: string;
+    extensionPaths?: string[];
+    status?: ThreadRecord["status"];
+    activeRun?: ActiveRunRecord;
+    workGraph?: WorkGraphMetadata;
+  }): Promise<ThreadRecord>;
+  patchThread(threadId: string, patch: Partial<Omit<ThreadRecord, "threadId" | "createdAt">>): Promise<ThreadRecord>;
+  recordMessage(record: MessageRecord): Promise<void>;
+  recordMessageEntry(discordMessageId: string, entryId: string | undefined): Promise<void>;
+  getMessage(discordMessageId: string): MessageRecord | undefined;
+  upsertLinkIngest(record: LinkIngestRecord): Promise<void>;
+  getLinkIngest(mentionId: string): LinkIngestRecord | undefined;
+  listLinkIngests(): LinkIngestRecord[];
+  getLinkIngestStatusUpdate(mentionId: string, statusKey: string): LinkIngestStatusUpdateRecord | undefined;
+  recordLinkIngestStatusUpdate(update: LinkIngestStatusUpdateRecord): Promise<void>;
+  close?(): Promise<void>;
+}
+
+export class Registry implements RegistryPort {
   private data: RegistryData = { version: 1, threads: {}, messages: {}, linkIngests: {} };
   private loaded = false;
   private saveQueue: Promise<void> = Promise.resolve();

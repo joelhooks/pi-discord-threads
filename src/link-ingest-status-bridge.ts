@@ -7,7 +7,7 @@ import {
 import { Inngest } from "inngest";
 import { connect } from "inngest/connect";
 import type { AppConfig } from "./config.js";
-import { Registry, type LinkIngestStatusUpdateRecord } from "./registry.js";
+import type { LinkIngestStatusUpdateRecord, RegistryPort } from "./registry.js";
 import { SecretResolver } from "./secrets.js";
 
 const STATUS_EVENTS = {
@@ -33,7 +33,7 @@ export type StopLinkIngestStatusBridge = () => Promise<void>;
 export interface LinkIngestStatusBridgeOptions {
   client: Client;
   config: AppConfig;
-  registry: Registry;
+  registry: RegistryPort;
   secrets?: SecretResolver;
 }
 
@@ -229,7 +229,7 @@ function createStatusFunction(
 }
 
 async function recoverLinkIngestRecord(
-  registry: Registry,
+  registry: RegistryPort,
   event: NormalizedStatusEvent,
 ) {
   const discord = event.discord;

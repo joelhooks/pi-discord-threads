@@ -1,4 +1,6 @@
+import { join } from "node:path";
 import type { AppConfig } from "../config.js";
+import { Registry, type LinkIngestRecord, type LinkIngestStatusUpdateRecord, type MessageRecord, type RegistryPort, type ThreadRecord } from "../registry.js";
 import type {
   ActivePointer,
   QueuedRunInput,
@@ -7,10 +9,59 @@ import type {
   RunRecord,
 } from "../run-control/types.js";
 import { Effect, ManagedRuntime } from "effect";
-import { RunQueueEngineLive } from "./layers.js";
-import { RunQueueService, type RunQueueServiceShape } from "./services.js";
+import { JsonRegistryFromInstanceLive, RunQueueEngineLive } from "./layers.js";
+import type { DiscordMessageId, MentionId, ThreadId } from "./domain.js";
+import { RegistryService, RunQueueService, type RegistryServiceShape, type RunQueueServiceShape } from "./services.js";
 
+export const REGISTRY_ENGINE_NAME = "effect-managed";
 export const RUN_QUEUE_ENGINE_NAME = "effect-managed";
+
+export interface RegistryRuntimeClient extends RegistryPort {
+  readonly engine: typeof REGISTRY_ENGINE_NAME;
+  warmup(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export function createRegistryRuntimeClient(config: AppConfig): RegistryRuntimeClient {
+  const registry = new Registry(join(config.dataDir, "registry.json"));
+  const runtime = ManagedRuntime.make(JsonRegistryFromInstanceLive(registry));
+
+  const withRegistry = <A, E>(
+    operation: (registryService: RegistryServiceShape) => Effect.Effect<A, E>,
+  ): Promise<A> => runtime.runPromise(
+    Effect.gen(function* () {
+      const registryService = yield* RegistryService;
+      return yield* operation(registryService);
+    }),
+  );
+
+  return {
+    engine: REGISTRY_ENGINE_NAME,
+    warmup: () => withRegistry(() => Effect.succeed(undefined)),
+    close: () => runtime.dispose(),
+    save: () => withRegistry((registryService) => registryService.save()),
+    getThread: (threadId: string): ThreadRecord | undefined => registry.getThread(threadId),
+    listThreads: (): ThreadRecord[] => registry.listThreads(),
+    markRunningThreadsInterrupted: () => withRegistry((registryService) => registryService.markRunningThreadsInterrupted()),
+    upsertThread: (input: Parameters<RegistryPort["upsertThread"]>[0]) => withRegistry((registryService) => registryService.upsertThread(input)),
+    patchThread: (threadId: string, patch: Partial<Omit<ThreadRecord, "threadId" | "createdAt">>) =>
+      withRegistry((registryService) => registryService.patchThread(threadId as ThreadId, patch)),
+    recordMessage: (record: MessageRecord) => withRegistry((registryService) => registryService.recordMessage(record)),
+    recordMessageEntry: (discordMessageId: string, entryId: string | undefined) =>
+      withRegistry((registryService) => registryService.recordMessageEntry(discordMessageId as DiscordMessageId, entryId)),
+    getMessage: (discordMessageId: string): MessageRecord | undefined => registry.getMessage(discordMessageId),
+    upsertLinkIngest: (record: LinkIngestRecord) => withRegistry((registryService) => registryService.upsertLinkIngest(record)),
+    getLinkIngest: (mentionId: string): LinkIngestRecord | undefined => registry.getLinkIngest(mentionId),
+    listLinkIngests: (): LinkIngestRecord[] => registry.listLinkIngests(),
+    getLinkIngestStatusUpdate: (mentionId: string, statusKey: string): LinkIngestStatusUpdateRecord | undefined =>
+      registry.getLinkIngestStatusUpdate(mentionId, statusKey),
+    recordLinkIngestStatusUpdate: (update: LinkIngestStatusUpdateRecord) =>
+      withRegistry((registryService) => registryService.recordLinkIngestStatusUpdate({
+        ...update,
+        mentionId: update.mentionId as MentionId,
+      })),
+  };
+}
 
 export interface RunQueueRuntimeClient extends RunControlStorePort {
   readonly engine: typeof RUN_QUEUE_ENGINE_NAME;

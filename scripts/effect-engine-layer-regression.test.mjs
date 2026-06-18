@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,6 +10,7 @@ import {
   RegistryEngineLive,
   RegistryService,
   ThreadId,
+  createRegistryRuntimeClient,
 } from "../dist/engine/index.js";
 
 const decode = (schema, value) => Effect.runPromise(Schema.decodeUnknownEffect(schema)(value));
@@ -61,6 +62,67 @@ test("Effect registry layer persists thread and message records", async () => {
     assert.equal(persisted.threads[threadId].sessionName, "Effect Engine Test");
     assert.equal(persisted.messages[discordMessageId].direction, "user");
   } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Registry runtime client preserves sync reads over Effect-backed writes", async () => {
+  const { config, dataDir } = await withTempConfig();
+  const registry = createRegistryRuntimeClient(config);
+  try {
+    await registry.warmup();
+    assert.equal(registry.engine, "effect-managed");
+    assert.equal(registry.getThread("thread-runtime-1"), undefined);
+
+    await registry.upsertThread({
+      threadId: "thread-runtime-1",
+      cwd: dataDir,
+      status: "idle",
+      sessionName: "Registry Runtime Test",
+    });
+    assert.equal(registry.getThread("thread-runtime-1")?.sessionName, "Registry Runtime Test");
+
+    await registry.recordMessage({
+      discordMessageId: "message-runtime-1",
+      threadId: "thread-runtime-1",
+      direction: "assistant",
+      createdAt: new Date(0).toISOString(),
+    });
+    assert.equal(registry.getMessage("message-runtime-1")?.direction, "assistant");
+  } finally {
+    await registry.close().catch(() => undefined);
+    const persisted = JSON.parse(await readFile(join(dataDir, "registry.json"), "utf8"));
+    assert.equal(persisted.threads["thread-runtime-1"].sessionName, "Registry Runtime Test");
+    assert.equal(persisted.messages["message-runtime-1"].direction, "assistant");
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("Registry runtime client loads persisted file before sync reads", async () => {
+  const { config, dataDir } = await withTempConfig();
+  await writeFile(join(dataDir, "registry.json"), `${JSON.stringify({
+    version: 1,
+    threads: {
+      "thread-seeded-1": {
+        threadId: "thread-seeded-1",
+        kind: "discord-thread",
+        cwd: dataDir,
+        status: "idle",
+        sessionName: "Seeded Registry Runtime Test",
+        createdAt: new Date(0).toISOString(),
+        updatedAt: new Date(0).toISOString(),
+      },
+    },
+    messages: {},
+    linkIngests: {},
+  }, null, 2)}\n`, "utf8");
+
+  const registry = createRegistryRuntimeClient(config);
+  try {
+    await registry.warmup();
+    assert.equal(registry.getThread("thread-seeded-1")?.sessionName, "Seeded Registry Runtime Test");
+  } finally {
+    await registry.close().catch(() => undefined);
     await rm(dataDir, { recursive: true, force: true });
   }
 });

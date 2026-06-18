@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import type { AppConfig } from "../config.js";
-import type { Registry } from "../registry.js";
+import type { RegistryPort } from "../registry.js";
 import { isTerminalRunStatus, type RunControlStorePort, type RunRecord } from "./types.js";
 
 export type ReconcileSeverity = "info" | "warn" | "error";
@@ -24,7 +24,7 @@ export interface ReconcileReport {
 
 export async function reconcileRunControl(options: {
   store: RunControlStorePort;
-  registry: Registry;
+  registry: RegistryPort;
   config: AppConfig;
   apply: boolean;
 }): Promise<ReconcileReport> {
@@ -182,7 +182,7 @@ export function formatReconcileReport(report: ReconcileReport): string {
 
 export function startRunControlReconcileLoop(options: {
   store: RunControlStorePort;
-  registry: Registry;
+  registry: RegistryPort;
   config: AppConfig;
   apply: boolean;
 }): () => void {

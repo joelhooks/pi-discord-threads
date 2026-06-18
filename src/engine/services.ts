@@ -3,6 +3,7 @@ import type {
   LinkIngestRecord,
   LinkIngestStatusUpdateRecord,
   MessageRecord,
+  RegistryPort,
   ThreadRecord,
 } from "../registry.js";
 import type {
@@ -29,9 +30,10 @@ export class AppConfigService extends Context.Service<AppConfigService, AppConfi
 ) {}
 
 export interface RegistryServiceShape {
+  readonly save: () => Effect.Effect<void, RegistryWriteFailed>;
   readonly getThread: (threadId: ThreadId) => Effect.Effect<Option.Option<ThreadRecord>>;
   readonly listThreads: () => Effect.Effect<readonly ThreadRecord[]>;
-  readonly upsertThread: (input: Parameters<import("../registry.js").Registry["upsertThread"]>[0]) => Effect.Effect<ThreadRecord, RegistryWriteFailed>;
+  readonly upsertThread: (input: Parameters<RegistryPort["upsertThread"]>[0]) => Effect.Effect<ThreadRecord, RegistryWriteFailed>;
   readonly patchThread: (
     threadId: ThreadId,
     patch: Partial<Omit<ThreadRecord, "threadId" | "createdAt">>,

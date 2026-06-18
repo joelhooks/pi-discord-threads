@@ -5,9 +5,8 @@ import { type AppConfig, expandPath, loadConfig, parseCliArgs, writeDefaultConfi
 import { runBot } from "./discord-bot.js";
 import { postDailyMessage } from "./daily-post.js";
 import { PiRuntimeManager } from "./pi-runtime.js";
-import { Registry } from "./registry.js";
 import { SecretResolver } from "./secrets.js";
-import { RUN_QUEUE_ENGINE_NAME, createRunQueueRuntimeClient } from "./engine/runtime.js";
+import { REGISTRY_ENGINE_NAME, RUN_QUEUE_ENGINE_NAME, createRegistryRuntimeClient, createRunQueueRuntimeClient } from "./engine/runtime.js";
 import { checkRunControlRedisHealth, getRunControlWorkerId } from "./run-control/redis-client.js";
 import { formatReconcileReport, reconcileRunControl, startRunControlReconcileLoop } from "./run-control/reconcile.js";
 import { installLaunchAgent, printLaunchAgentStatus, uninstallLaunchAgent } from "./launch-agent.js";
@@ -102,6 +101,7 @@ async function main(): Promise<void> {
 
   const roles = config.runControl.enabled ? (cli.roles ?? config.runControl.roles) : ["bot" as const];
   const runControlStore = config.runControl.enabled ? createRunQueueRuntimeClient(config) : undefined;
+  let registry: ReturnType<typeof createRegistryRuntimeClient> | undefined;
   let stopReconcileLoop: (() => void) | undefined;
 
   try {
@@ -125,8 +125,9 @@ async function main(): Promise<void> {
     });
     const allowedUserIds = mergeIds(config.discord.allowedUserIds, allowedFromSecret);
 
-    const registry = new Registry(join(config.dataDir, "registry.json"));
-    await registry.load();
+    registry = createRegistryRuntimeClient(config);
+    await registry.warmup();
+    console.log(`Effect RegistryRuntime warmed: engine=${registry.engine}`);
     if (!config.runControl.enabled) {
       const interruptedCount = await registry.markRunningThreadsInterrupted();
       if (interruptedCount > 0) {
@@ -148,6 +149,7 @@ async function main(): Promise<void> {
         const shutdown = async () => {
           stopReconcileLoop?.();
           await runControlStore.close();
+          await registry?.close();
           resolve();
         };
         process.once("SIGINT", () => void shutdown());
@@ -174,6 +176,10 @@ async function main(): Promise<void> {
       const text = closeError instanceof Error ? closeError.message : String(closeError);
       console.warn(`failed to close run-control runtime after startup error: ${text}`);
     });
+    await registry?.close().catch((closeError) => {
+      const text = closeError instanceof Error ? closeError.message : String(closeError);
+      console.warn(`failed to close registry runtime after startup error: ${text}`);
+    });
     throw error;
   }
 }
@@ -193,6 +199,7 @@ async function doctor(configPath: string, config: AppConfig): Promise<void> {
   console.log(`config: ${expandPath(configPath)}${existsSync(expandPath(configPath)) ? "" : " (using defaults; file missing)"}`);
   console.log(`dataDir: ${config.dataDir}`);
   console.log(`registry: ${join(config.dataDir, "registry.json")}`);
+  console.log(`registryEngine: ${REGISTRY_ENGINE_NAME}`);
   console.log(`workspaces: ${Object.keys(config.pi.workspaces).length}`);
   console.log(`attachments: ${config.attachments.enabled ? "enabled" : "disabled"}, maxBytes=${config.attachments.maxBytes}`);
   console.log(`linkIngest: ${config.linkIngest.enabled ? "enabled" : "disabled"}, url=${config.linkIngest.inngestUrl}, eventKeyEnv=${config.linkIngest.eventKeyEnv ?? "(none)"}, eventKeySecret=${config.linkIngest.eventKeySecretName ?? "(none)"}, signingKeyEnv=${config.linkIngest.signingKeyEnv ?? "(none)"}, signingKeySecret=${config.linkIngest.signingKeySecretName ?? "(none)"}, statusBridge=${config.linkIngest.statusBridgeEnabled ? "enabled" : "disabled"}`);
@@ -211,16 +218,18 @@ async function reconcileCommand(config: AppConfig, apply: boolean): Promise<void
     console.log("runControl is disabled; no Redis reconciliation to perform.");
     return;
   }
-  const registry = new Registry(join(config.dataDir, "registry.json"));
-  await registry.load();
+  const registry = createRegistryRuntimeClient(config);
   const store = createRunQueueRuntimeClient(config);
   try {
+    await registry.warmup();
+    console.log(`Effect RegistryRuntime warmed: engine=${registry.engine}`);
     await store.warmup();
     console.log(`Effect RunQueueRuntime warmed: engine=${store.engine}, workerId=${getRunControlWorkerId(config)}, keyPrefix=${config.runControl.keyPrefix}`);
     const report = await reconcileRunControl({ store, registry, config, apply });
     console.log(formatReconcileReport(report));
   } finally {
     await store.close();
+    await registry.close();
   }
 }
 

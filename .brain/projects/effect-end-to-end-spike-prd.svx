@@ -323,6 +323,25 @@ Validation:
 - `npm run typecheck` passed.
 - `npm run test:effect-runtime-smoke` passed: 1 Redis lifecycle smoke test.
 
+### 2026-06-18 Slice 3: Registry runtime client live path
+
+Moved the live registry startup/reconcile path behind an Effect-backed runtime client while preserving existing synchronous registry reads for Discord/Pi adapter code:
+
+- `src/registry.ts` exports `RegistryPort` so live consumers no longer depend on the concrete `Registry` class.
+- `src/engine/layers.ts` extracts `makeRegistryService(registry)` and `JsonRegistryFromInstanceLive(registry)`.
+- `src/engine/runtime.ts` adds `createRegistryRuntimeClient(config)`, backed by `ManagedRuntime.make(JsonRegistryFromInstanceLive(registry))`.
+- `src/index.ts` warms the registry runtime on startup and one-shot reconcile, and logs `Effect RegistryRuntime warmed`.
+- `src/discord-bot.ts`, `src/pi-runtime.ts`, `src/run-control/reconcile.ts`, and `src/link-ingest-status-bridge.ts` now depend on `RegistryPort`.
+- `scripts/effect-engine-layer-regression.test.mjs` now proves the registry runtime client preserves sync reads over Effect-backed writes and loads a seeded `registry.json` before sync reads.
+
+Validation:
+
+- `npm run typecheck` passed.
+- `npm run test:engine-layer` passed: 4 tests.
+- `npm run brain:check` passed.
+- `node dist/index.js doctor --config /Users/joel/.config/pi-discord-threads/config.json` showed `registryEngine: effect-managed` and `runQueueEngine: effect-managed`.
+- `node dist/index.js reconcile --config /Users/joel/.config/pi-discord-threads/config.json --dry-run` warmed both Effect runtimes and reported `issues: 0`.
+
 ## Tracker mirror plan
 
 Do not publish tracker issues yet. The Brain PRD is enough until Slice 1 and Slice 2 harden the live spike surface.

@@ -12,7 +12,7 @@ import {
 import type { InlineImageContent } from "./attachments.js";
 import type { AppConfig } from "./config.js";
 import { DISCORD_SYSTEM_PROMPT } from "./discord-system-prompt.js";
-import type { Registry, ThreadRecord } from "./registry.js";
+import type { RegistryPort, ThreadRecord } from "./registry.js";
 import type { RunFeedEvent } from "./run-hud.js";
 import { decideRuntimePromptDisposition, hasVisibleActiveRun } from "./thread-run-state.js";
 
@@ -80,7 +80,7 @@ export class PiRuntimeManager {
 
   constructor(
     private readonly config: AppConfig,
-    private readonly registry: Registry,
+    private readonly registry: RegistryPort,
   ) {
     this.agentDir = config.pi.agentDir ?? getAgentDir();
   }
