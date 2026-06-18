@@ -57,6 +57,8 @@ Do not turn every pure helper into a machine. Use XState where illegal state com
 
 2026-06-18: Discord HUD/progress rendering now has the first `discord-bot.ts` decomposition seam. Pure Components V2 payload builders live in `src/discord/payloads.ts`; queued/deduped Discord message edits live in `src/discord/message-renderer.ts`; progress render lifecycle lives in `src/discord/progress-hud-machine.ts`. Final assistant output remains a fresh Discord message, while the HUD placeholder persists as an archived terminal card with ESC disabled.
 
+2026-06-18: Discord thread-title lifecycle rules now live in `src/discord/thread-title.ts`. The bot keeps routing and channel lookup, while the module owns placeholder-title replacement, completed-turn evidence capture, conservative title-evaluator cadence, human-title protection, and rename cooldown rules. Regression coverage lives in `scripts/thread-title-lifecycle-regression.test.mjs`.
+
 2026-06-18: Redis worker job claiming now has `src/run-control/worker-machine.ts` as a first XState slice. It models one stream job through `loadingRun -> validatingRun -> loadingActiveRunId -> claimingLease -> executingWithLease -> release/ack|pending|failed`. Busy finalization now leaves the stream job pending without logging an outside-handler failure.
 
 2026-06-18: Leased run execution/finalization now lives in `src/run-control/leased-run-machine.ts`. The worker loop no longer owns heartbeat/input/finalization booleans; the leased-run machine owns heartbeat cleanup, input pump ticking/draining, fresh execution, persisted-finalizing resume, finalization claim routing, duplicate-finalization fail-safe, terminal marking, and active-pointer clearing as named states.

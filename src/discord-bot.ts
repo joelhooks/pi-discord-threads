@@ -32,7 +32,7 @@ import { appendAttachmentContext, type InlineImageContent } from "./attachments.
 import type { AppConfig, RunControlRole } from "./config.js";
 import type { PiRuntimePort } from "./pi-runtime.js";
 import { createProgressEventBus } from "./progress-events.js";
-import type { ActiveRunRecord, LinkIngestRecord, RegistryPort, ThreadRecord, ThreadTitleState } from "./registry.js";
+import type { ActiveRunRecord, LinkIngestRecord, RegistryPort, ThreadRecord } from "./registry.js";
 import {
   listWorkspaces,
   parseLeadingCwdFlag,
@@ -58,7 +58,7 @@ import {
   formatQueuedText,
   type RichPayload,
 } from "./discord/payloads.js";
-import { evaluateThreadTitle, normalizeTitle } from "./thread-title-evaluator.js";
+import { maybeEvaluateThreadTitle, maybeRenameThreadForPrompt, recordCompletedTitleTurn } from "./discord/thread-title.js";
 import type { QueuedRunInput, RunControlExecutionResult, RunControlStorePort, RunRecord } from "./run-control/types.js";
 import { RunControlWorker, type RunControlWorkerAdapter } from "./run-control/worker.js";
 import { createForkedSessionFile, forkWorkGraph, formatWorkGraphEmbedDescription, formatWorkGraphStatus, rootWorkGraph } from "./work-graph.js";
@@ -2239,7 +2239,7 @@ async function runPromptWithPlaceholder(
     await sendFinalResponseMessages(channel, record, options.registry, chunks, result.assistantEntryId);
     await archiveWorkingHud(placeholder, record, progressHudSnapshot);
     const titleRecord = await recordCompletedTitleTurn(options.registry, record, prompt, result.text);
-    void maybeEvaluateThreadTitle(channel, titleRecord, options).catch((error) => {
+    void maybeEvaluateThreadTitle(getThreadChannel(channel), titleRecord, { config: options.config, registry: options.registry }).catch((error) => {
       const text = error instanceof Error ? error.message : String(error);
       console.warn(`thread title hook failed for ${record.threadId}: ${text}`);
     });
@@ -2407,7 +2407,7 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
         sessionFile: result.sessionFile ?? record.sessionFile,
       }).catch(() => record);
       const titleRecord = await recordCompletedTitleTurn(options.registry, idleRecord, run.prompt, result.text);
-      void maybeEvaluateThreadTitle(channel, titleRecord, options).catch((error) => {
+      void maybeEvaluateThreadTitle(getThreadChannel(channel), titleRecord, { config: options.config, registry: options.registry }).catch((error) => {
         const text = error instanceof Error ? error.message : String(error);
         console.warn(`thread title hook failed for ${record.threadId}: ${text}`);
       });
@@ -2550,138 +2550,6 @@ function startTypingIndicator(channel: PromptChannel): () => void {
   }, 8_000);
   interval.unref();
   return () => clearInterval(interval);
-}
-
-async function maybeRenameThreadForPrompt(thread: ThreadChannel, record: ThreadRecord, prompt: string, registry: RegistryPort): Promise<void> {
-  const desired = summarizeForThreadName(prompt);
-  if (!shouldRenameThread(thread.name, desired)) return;
-  const renamed = await thread.setName(desired, "Update Pi thread name from current task").then(() => true).catch(() => false);
-  if (renamed) await registry.patchThread(record.threadId, { sessionName: desired }).catch(() => undefined);
-}
-
-function shouldRenameThread(currentName: string, desiredName: string): boolean {
-  if (!desiredName || currentName === desiredName) return false;
-  const normalized = currentName.toLowerCase().trim();
-  return normalized === "pi session"
-    || normalized === "pi: pi session"
-    || normalized === "π pi session"
-    || normalized.startsWith("pi: workspace ")
-    || normalized.startsWith("pi: fork of ")
-    || normalized.startsWith("pi: resume ")
-    || normalized.startsWith("🗂️ workspace ")
-    || normalized.startsWith("π fork of ")
-    || normalized.startsWith("π resume ");
-}
-
-const MAX_TITLE_EVIDENCE_TURNS = 12;
-const TITLE_RENAME_CONFIDENCE_FLOOR = 0.72;
-
-async function recordCompletedTitleTurn(registry: RegistryPort, record: ThreadRecord, userText: string, assistantText: string): Promise<ThreadRecord> {
-  const latest = registry.getThread(record.threadId) ?? record;
-  const previous: ThreadTitleState = latest.titleState ?? { turnCount: 0, recentTurns: [] };
-  const nextState: ThreadTitleState = {
-    ...previous,
-    turnCount: previous.turnCount + 1,
-    recentTurns: [
-      ...previous.recentTurns,
-      {
-        user: clipTitleEvidence(userText),
-        assistant: clipTitleEvidence(assistantText),
-        createdAt: new Date().toISOString(),
-      },
-    ].slice(-MAX_TITLE_EVIDENCE_TURNS),
-  };
-  return registry.patchThread(record.threadId, { titleState: nextState }).catch(() => ({ ...latest, titleState: nextState }));
-}
-
-async function maybeEvaluateThreadTitle(channel: PromptChannel, record: ThreadRecord, options: RunBotOptions): Promise<void> {
-  const config = options.config.render.threadTitles;
-  if (!config.enabled) return;
-  const thread = getThreadChannel(channel);
-  if (!thread) return;
-  const state = record.titleState;
-  if (!state || !shouldEvaluateThreadTitle(state, config)) return;
-
-  const evaluatedState: ThreadTitleState = {
-    ...state,
-    lastEvaluatedTurn: state.turnCount,
-  };
-
-  let proposal;
-  try {
-    proposal = await evaluateThreadTitle({
-      cwd: record.cwd,
-      agentDir: options.config.pi.agentDir,
-      model: config.model,
-      currentTitle: thread.name,
-      workspaceName: record.workspaceName,
-      turnCount: state.turnCount,
-      recentTurns: state.recentTurns,
-    });
-  } catch (error) {
-    const text = error instanceof Error ? error.message : String(error);
-    console.warn(`thread title evaluator failed for ${record.threadId}: ${text}`);
-    await options.registry.patchThread(record.threadId, { titleState: evaluatedState }).catch(() => undefined);
-    return;
-  }
-
-  const desired = proposal?.title ? normalizeTitle(proposal.title) : undefined;
-  if (!proposal?.shouldRename || !desired || !shouldApplyThreadTitleProposal(thread.name, desired, state, config, proposal.confidence)) {
-    await options.registry.patchThread(record.threadId, { titleState: evaluatedState }).catch(() => undefined);
-    return;
-  }
-
-  const renamed = await thread.setName(desired, `Pi thread title evaluator: ${proposal.reason ?? "theme update"}`).then(() => true).catch((error) => {
-    const text = error instanceof Error ? error.message : String(error);
-    console.warn(`failed to rename Discord thread ${record.threadId}: ${text}`);
-    return false;
-  });
-  const nextState: ThreadTitleState = renamed
-    ? {
-      ...evaluatedState,
-      lastRenamedTurn: state.turnCount,
-      lastRenamedAt: new Date().toISOString(),
-      lastSuggestedTitle: desired,
-    }
-    : evaluatedState;
-  await options.registry.patchThread(record.threadId, {
-    titleState: nextState,
-    ...(renamed ? { sessionName: desired } : {}),
-  }).catch(() => undefined);
-}
-
-function shouldEvaluateThreadTitle(state: ThreadTitleState, config: RunBotOptions["config"]["render"]["threadTitles"]): boolean {
-  if (state.turnCount < config.firstEvaluationTurn) return false;
-  if (!state.lastEvaluatedTurn) return true;
-  return state.turnCount - state.lastEvaluatedTurn >= config.evaluationIntervalTurns;
-}
-
-function shouldApplyThreadTitleProposal(
-  currentName: string,
-  desiredName: string,
-  state: ThreadTitleState,
-  config: RunBotOptions["config"]["render"]["threadTitles"],
-  confidence: number | undefined,
-): boolean {
-  if (!desiredName || currentName.trim() === desiredName.trim()) return false;
-  if ((confidence ?? 1) < TITLE_RENAME_CONFIDENCE_FLOOR) return false;
-  if (!isBridgeManagedThreadTitle(currentName, state)) return false;
-  if (state.lastRenamedAt && Date.now() - Date.parse(state.lastRenamedAt) < config.minRenameIntervalMs) return false;
-  return true;
-}
-
-function isBridgeManagedThreadTitle(currentName: string, state: ThreadTitleState): boolean {
-  const normalized = currentName.trim();
-  if (!normalized) return true;
-  if (state.lastSuggestedTitle && normalized === state.lastSuggestedTitle) return true;
-  return /^(🗂️|✨|🐛|🔎|📚|🧪|🚀|🧹|💬|π)\s/.test(normalized)
-    || /^(pi|π)( session|:)/i.test(normalized);
-}
-
-function clipTitleEvidence(value: string): string {
-  const compact = value.replace(/\s+/g, " ").trim();
-  if (compact.length <= 1_500) return compact;
-  return `${compact.slice(0, 1_480)} …[truncated ${compact.length - 1_480} chars]`;
 }
 
 function formatElapsed(ms: number): string {
