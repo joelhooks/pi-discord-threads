@@ -1,4 +1,6 @@
+import type { InlineImageContent } from "../attachments.js";
 import type { AppConfig } from "../config.js";
+import type { CompactResult, PromptProgressHandler, PromptResult, QueueMessageResult } from "../pi-runtime.js";
 import type {
   LinkIngestRecord,
   LinkIngestStatusUpdateRecord,
@@ -21,6 +23,7 @@ import type {
   RegistryLinkIngestNotFound,
   RegistryThreadNotFound,
   RegistryWriteFailed,
+  PiSessionError,
   RunQueueError,
   ThreadId,
 } from "./domain.js";
@@ -115,5 +118,40 @@ export class RunQueueService extends Context.Service<RunQueueService, RunQueueSe
   "pi-discord/RunQueueService",
 ) {}
 
+export interface PiSessionServiceShape {
+  readonly enqueuePrompt: (
+    thread: ThreadRecord,
+    text: string,
+    images?: InlineImageContent[],
+    onProgress?: PromptProgressHandler,
+  ) => Effect.Effect<PromptResult, PiSessionError>;
+  readonly queueMessageDuringActive: (
+    threadId: string,
+    text: string,
+    mode?: "steer" | "followUp",
+    images?: InlineImageContent[],
+  ) => Effect.Effect<QueueMessageResult, PiSessionError>;
+  readonly queueMessageForThreadIfActive: (
+    thread: ThreadRecord,
+    text: string,
+    mode?: "steer" | "followUp",
+    images?: InlineImageContent[],
+  ) => Effect.Effect<QueueMessageResult, PiSessionError>;
+  readonly enqueueReload: (thread: ThreadRecord, onProgress?: PromptProgressHandler) => Effect.Effect<void, PiSessionError>;
+  readonly enqueueCompact: (
+    thread: ThreadRecord,
+    customInstructions?: string,
+    onProgress?: PromptProgressHandler,
+  ) => Effect.Effect<CompactResult, PiSessionError>;
+  readonly isActive: (threadId: string) => boolean;
+  readonly abort: (threadId: string) => Effect.Effect<void, PiSessionError>;
+  readonly disposeAll: () => Effect.Effect<void, PiSessionError>;
+}
+
+export class PiSessionService extends Context.Service<PiSessionService, PiSessionServiceShape>()(
+  "pi-discord/PiSessionService",
+) {}
+
 export type RegistryServiceError = RegistryError;
 export type RunQueueServiceError = RunQueueError;
+export type PiSessionServiceError = PiSessionError;

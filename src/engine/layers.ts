@@ -1,8 +1,10 @@
 import { join } from "node:path";
 import type { AppConfig } from "../config.js";
+import type { PiRuntimePort } from "../pi-runtime.js";
 import { Registry } from "../registry.js";
 import { createRunControlRedisClient, RedisCommandTimeoutError } from "../run-control/redis-client.js";
 import { RunControlStore } from "../run-control/store.js";
+import { isAssistantLeafContinueError } from "../thread-run-state.js";
 import type {
   ActivePointer,
   FinalizeClaim,
@@ -15,25 +17,67 @@ import {
   RegistryLinkIngestNotFound,
   RegistryLoadFailed,
   RegistryThreadNotFound,
+  PiSessionAlreadyProcessing,
+  PiSessionAssistantLeafContinueFailed,
+  PiSessionOperationFailed,
   RegistryWriteFailed,
   RunQueueConnectFailed,
   RunQueueOperationFailed,
   RunQueueTimeout,
   type DiscordMessageId,
   type MentionId,
+  type PiSessionError,
   type RunQueueError,
   type ThreadId,
 } from "./domain.js";
 import {
   AppConfigService,
+  PiSessionService,
   RegistryService,
   RunQueueService,
+  type PiSessionServiceShape,
   type RegistryServiceShape,
   type RunQueueServiceShape,
 } from "./services.js";
 
 export const AppConfigLive = (config: AppConfig): Layer.Layer<AppConfigService> =>
   Layer.succeed(AppConfigService, config);
+
+export function makePiSessionService(manager: PiRuntimePort): PiSessionServiceShape {
+  const call = <A>(operation: string, run: () => Promise<A>): Effect.Effect<A, PiSessionError> =>
+    Effect.tryPromise({
+      try: run,
+      catch: (cause) => mapPiSessionOperationError(operation, cause),
+    });
+
+  return {
+    enqueuePrompt: Effect.fn("PiSessionService.enqueuePrompt")((thread, text, images, onProgress) =>
+      call("enqueuePrompt", () => manager.enqueuePrompt(thread, text, images, onProgress)),
+    ),
+    queueMessageDuringActive: Effect.fn("PiSessionService.queueMessageDuringActive")((threadId, text, mode, images) =>
+      call("queueMessageDuringActive", () => manager.queueMessageDuringActive(threadId, text, mode, images)),
+    ),
+    queueMessageForThreadIfActive: Effect.fn("PiSessionService.queueMessageForThreadIfActive")((thread, text, mode, images) =>
+      call("queueMessageForThreadIfActive", () => manager.queueMessageForThreadIfActive(thread, text, mode, images)),
+    ),
+    enqueueReload: Effect.fn("PiSessionService.enqueueReload")((thread, onProgress) =>
+      call("enqueueReload", () => manager.enqueueReload(thread, onProgress)),
+    ),
+    enqueueCompact: Effect.fn("PiSessionService.enqueueCompact")((thread, customInstructions, onProgress) =>
+      call("enqueueCompact", () => manager.enqueueCompact(thread, customInstructions, onProgress)),
+    ),
+    isActive: (threadId) => manager.isActive(threadId),
+    abort: Effect.fn("PiSessionService.abort")((threadId) =>
+      call("abort", () => manager.abort(threadId)),
+    ),
+    disposeAll: Effect.fn("PiSessionService.disposeAll")(() =>
+      call("disposeAll", () => manager.disposeAll()),
+    ),
+  };
+}
+
+export const PiSessionManagerLive = (manager: PiRuntimePort): Layer.Layer<PiSessionService> =>
+  Layer.succeed(PiSessionService, makePiSessionService(manager));
 
 export function makeRegistryService(registry: Registry): RegistryServiceShape {
   const write = <A>(operation: string, run: () => Promise<A>): Effect.Effect<A, RegistryWriteFailed> =>
@@ -300,6 +344,17 @@ export const RegistryEngineLive = (config: AppConfig): Layer.Layer<RegistryServi
 
 export const RunQueueEngineLive = (config: AppConfig): Layer.Layer<RunQueueService, RunQueueError> =>
   RedisRunQueueLive.pipe(Layer.provide(AppConfigLive(config)));
+
+function mapPiSessionOperationError(operation: string, cause: unknown): PiSessionError {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  if (message.includes("Agent is already processing")) {
+    return new PiSessionAlreadyProcessing({ operation, cause });
+  }
+  if (isAssistantLeafContinueError(cause)) {
+    return new PiSessionAssistantLeafContinueFailed({ operation, cause });
+  }
+  return new PiSessionOperationFailed({ operation, cause });
+}
 
 function mapRunQueueConnectError(timeoutMs: number, cause: unknown): RunQueueConnectFailed | RunQueueTimeout {
   if (cause instanceof RedisCommandTimeoutError) {

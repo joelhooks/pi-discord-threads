@@ -1,5 +1,7 @@
 import { join } from "node:path";
+import type { InlineImageContent } from "../attachments.js";
 import type { AppConfig } from "../config.js";
+import { PiRuntimeManager, type CompactResult, type PiRuntimePort, type PromptProgressHandler, type PromptResult, type QueueMessageResult } from "../pi-runtime.js";
 import { Registry, type LinkIngestRecord, type LinkIngestStatusUpdateRecord, type MessageRecord, type RegistryPort, type ThreadRecord } from "../registry.js";
 import type {
   ActivePointer,
@@ -8,13 +10,14 @@ import type {
   RunJob,
   RunRecord,
 } from "../run-control/types.js";
-import { Effect, ManagedRuntime } from "effect";
-import { JsonRegistryFromInstanceLive, RunQueueEngineLive } from "./layers.js";
+import { Cause, Effect, Exit, ManagedRuntime, Option } from "effect";
+import { JsonRegistryFromInstanceLive, PiSessionManagerLive, RunQueueEngineLive } from "./layers.js";
 import type { DiscordMessageId, MentionId, ThreadId } from "./domain.js";
-import { RegistryService, RunQueueService, type RegistryServiceShape, type RunQueueServiceShape } from "./services.js";
+import { PiSessionService, RegistryService, RunQueueService, type PiSessionServiceShape, type RegistryServiceShape, type RunQueueServiceShape } from "./services.js";
 
 export const REGISTRY_ENGINE_NAME = "effect-managed";
 export const RUN_QUEUE_ENGINE_NAME = "effect-managed";
+export const PI_SESSION_ENGINE_NAME = "effect-managed";
 
 export interface RegistryRuntimeClient extends RegistryPort {
   readonly engine: typeof REGISTRY_ENGINE_NAME;
@@ -61,6 +64,79 @@ export function createRegistryRuntimeClient(config: AppConfig): RegistryRuntimeC
         mentionId: update.mentionId as MentionId,
       })),
   };
+}
+
+export interface PiSessionRuntimeClient extends PiRuntimePort {
+  readonly engine: typeof PI_SESSION_ENGINE_NAME;
+  warmup(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export function createPiSessionRuntimeClient(config: AppConfig, registry: RegistryPort): PiSessionRuntimeClient {
+  return createPiSessionRuntimeClientFromManager(new PiRuntimeManager(config, registry));
+}
+
+export function createPiSessionRuntimeClientFromManager(manager: PiRuntimePort): PiSessionRuntimeClient {
+  const runtime = ManagedRuntime.make(PiSessionManagerLive(manager));
+
+  const withSession = async <A, E>(
+    operation: (session: PiSessionServiceShape) => Effect.Effect<A, E>,
+  ): Promise<A> => {
+    const exit = await runtime.runPromiseExit(
+      Effect.gen(function* () {
+        const session = yield* PiSessionService;
+        return yield* operation(session);
+      }),
+    );
+    if (Exit.isSuccess(exit)) return exit.value;
+    throw unwrapPiSessionCause(exit.cause);
+  };
+
+  let runtimeDisposed = false;
+  const disposeRuntime = async () => {
+    if (runtimeDisposed) return;
+    runtimeDisposed = true;
+    try {
+      await manager.disposeAll();
+    } finally {
+      await runtime.dispose();
+    }
+  };
+
+  return {
+    engine: PI_SESSION_ENGINE_NAME,
+    warmup: () => withSession(() => Effect.succeed(undefined)),
+    close: disposeRuntime,
+    enqueuePrompt: (thread: ThreadRecord, text: string, images?: InlineImageContent[], onProgress?: PromptProgressHandler): Promise<PromptResult> =>
+      withSession((session) => session.enqueuePrompt(thread, text, images, onProgress)),
+    queueMessageDuringActive: (threadId: string, text: string, mode?: "steer" | "followUp", images?: InlineImageContent[]): Promise<QueueMessageResult> =>
+      withSession((session) => session.queueMessageDuringActive(threadId, text, mode, images)),
+    queueMessageForThreadIfActive: (thread: ThreadRecord, text: string, mode?: "steer" | "followUp", images?: InlineImageContent[]): Promise<QueueMessageResult> =>
+      withSession((session) => session.queueMessageForThreadIfActive(thread, text, mode, images)),
+    enqueueReload: (thread: ThreadRecord, onProgress?: PromptProgressHandler): Promise<void> =>
+      withSession((session) => session.enqueueReload(thread, onProgress)),
+    enqueueCompact: (thread: ThreadRecord, customInstructions?: string, onProgress?: PromptProgressHandler): Promise<CompactResult> =>
+      withSession((session) => session.enqueueCompact(thread, customInstructions, onProgress)),
+    isActive: (threadId: string): boolean => manager.isActive(threadId),
+    abort: (threadId: string): Promise<void> => withSession((session) => session.abort(threadId)),
+    disposeAll: disposeRuntime,
+  };
+}
+
+function unwrapPiSessionCause(cause: Cause.Cause<unknown>): unknown {
+  const failure = Option.getOrUndefined(Cause.findErrorOption(cause));
+  if (isPiSessionWrappedError(failure)) {
+    return failure.cause instanceof Error ? failure.cause : failure;
+  }
+  return Cause.squash(cause);
+}
+
+function isPiSessionWrappedError(error: unknown): error is { readonly _tag: string; readonly cause: unknown } {
+  if (!error || typeof error !== "object" || !("_tag" in error)) return false;
+  const tag = (error as { _tag?: unknown })._tag;
+  return tag === "PiSessionAlreadyProcessing"
+    || tag === "PiSessionAssistantLeafContinueFailed"
+    || tag === "PiSessionOperationFailed";
 }
 
 export interface RunQueueRuntimeClient extends RunControlStorePort {

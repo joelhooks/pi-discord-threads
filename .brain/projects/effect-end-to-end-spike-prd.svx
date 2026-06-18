@@ -374,6 +374,34 @@ Validation:
 - `npm run test:run-queue-service` passed: 6 tests.
 - `npm run brain:check` passed.
 
+### 2026-06-18 Slice 5: PiSessionService runtime seam
+
+Routed the live Pi session lifecycle boundary through an Effect service/runtime client while preserving the existing Discord/Pi adapter behavior:
+
+- `src/engine/domain.ts` adds typed Pi session errors for already-processing, assistant-leaf continuation, and generic operation failures.
+- `src/engine/services.ts` adds `PiSessionService` around the public `PiRuntimePort` operations.
+- `src/engine/layers.ts` adds `makePiSessionService` and `PiSessionManagerLive(manager)` so the concrete `PiRuntimeManager` can be strangled behind a service boundary.
+- `src/engine/runtime.ts` adds `createPiSessionRuntimeClient(config, registry)` and `createPiSessionRuntimeClientFromManager(manager)`, backed by `ManagedRuntime.make(PiSessionManagerLive(manager))`.
+- `src/discord-bot.ts` now depends on structural `PiRuntimePort`, not the concrete manager class.
+- `src/index.ts` warms and reports `Effect PiSessionRuntime warmed`, and `doctor` prints `piSessionEngine`.
+- `scripts/pi-session-service-regression.test.mjs` covers delegation, typed error mapping, runtime-client public error preservation, idempotent runtime close, and fake-layer substitution.
+- `package.json` adds `test:pi-session-service`.
+
+Validation:
+
+- `npm run typecheck` passed.
+- `npm run build` passed.
+- `npm run test:pi-session-service` passed: 5 tests.
+- `npm run test:progress-event-bus` passed: 4 tests.
+- `npm run test:engine-layer` passed: 4 tests.
+- `npm run test:run-queue-service` passed: 6 tests.
+- `npm run test:effect-runtime-smoke` passed: 1 Redis lifecycle smoke test.
+- `npm run test:thread-run-state` passed: 6 tests.
+- `npm run test:recovery-prompt` passed: 2 tests.
+- `npm run brain:check` passed.
+- `node dist/index.js doctor --config /Users/joel/.config/pi-discord-threads/config.json` showed `registryEngine`, `piSessionEngine`, and `runQueueEngine` as `effect-managed`, with Redis `PONG`.
+- `node dist/index.js reconcile --config /Users/joel/.config/pi-discord-threads/config.json --dry-run` reported `issues: 0`.
+
 ## Tracker mirror plan
 
 Do not publish tracker issues yet. The Brain PRD is enough until Slice 1 and Slice 2 harden the live spike surface.

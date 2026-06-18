@@ -12,6 +12,7 @@
     "test:recovery-prompt": "npm run build && node --test scripts/recovery-prompt-regression.test.mjs",
     "test:thread-run-state": "npm run build && node --test scripts/thread-run-state-regression.test.mjs",
     "test:progress-event-bus": "npm run build && node --test scripts/progress-event-bus-regression.test.mjs",
+    "test:pi-session-service": "npm run build && node --test scripts/pi-session-service-regression.test.mjs",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "render-system-prompt": "npm run build && node scripts/render-system-prompt.mjs",

@@ -32,7 +32,7 @@ import {
 import { DefaultResourceLoader, getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { appendAttachmentContext, type InlineImageContent } from "./attachments.js";
 import type { AppConfig, RunControlRole } from "./config.js";
-import { PiRuntimeManager } from "./pi-runtime.js";
+import type { PiRuntimePort } from "./pi-runtime.js";
 import { createProgressEventBus, type PromptProgress } from "./progress-events.js";
 import type { ActiveRunRecord, LinkIngestRecord, RegistryPort, ThreadRecord, ThreadTitleState } from "./registry.js";
 import {
@@ -63,7 +63,7 @@ interface RunBotOptions {
   token: string;
   allowedUserIds: string[];
   registry: RegistryPort;
-  runtimeManager: PiRuntimeManager;
+  runtimeManager: PiRuntimePort;
   runControlStore?: RunControlStorePort;
   runControlRoles?: RunControlRole[];
   runControlWorkerId?: string;
@@ -3316,7 +3316,7 @@ function formatCompactReceipt(result: { tokensBefore: number; firstKeptEntryId: 
 
 async function abortInteraction(
   interaction: ChatInputCommandInteraction,
-  runtimeManager: PiRuntimeManager,
+  runtimeManager: PiRuntimePort,
 ): Promise<void> {
   const threadId = interaction.channel?.isThread() ? interaction.channel.id : undefined;
   if (!threadId) {

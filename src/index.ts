@@ -4,9 +4,8 @@ import { join } from "node:path";
 import { type AppConfig, expandPath, loadConfig, parseCliArgs, writeDefaultConfig } from "./config.js";
 import { runBot } from "./discord-bot.js";
 import { postDailyMessage } from "./daily-post.js";
-import { PiRuntimeManager } from "./pi-runtime.js";
 import { SecretResolver } from "./secrets.js";
-import { REGISTRY_ENGINE_NAME, RUN_QUEUE_ENGINE_NAME, createRegistryRuntimeClient, createRunQueueRuntimeClient } from "./engine/runtime.js";
+import { PI_SESSION_ENGINE_NAME, REGISTRY_ENGINE_NAME, RUN_QUEUE_ENGINE_NAME, createPiSessionRuntimeClient, createRegistryRuntimeClient, createRunQueueRuntimeClient } from "./engine/runtime.js";
 import { checkRunControlRedisHealth, getRunControlWorkerId } from "./run-control/redis-client.js";
 import { formatReconcileReport, reconcileRunControl, startRunControlReconcileLoop } from "./run-control/reconcile.js";
 import { installLaunchAgent, printLaunchAgentStatus, uninstallLaunchAgent } from "./launch-agent.js";
@@ -102,6 +101,7 @@ async function main(): Promise<void> {
   const roles = config.runControl.enabled ? (cli.roles ?? config.runControl.roles) : ["bot" as const];
   const runControlStore = config.runControl.enabled ? createRunQueueRuntimeClient(config) : undefined;
   let registry: ReturnType<typeof createRegistryRuntimeClient> | undefined;
+  let runtimeManager: ReturnType<typeof createPiSessionRuntimeClient> | undefined;
   let stopReconcileLoop: (() => void) | undefined;
 
   try {
@@ -158,7 +158,9 @@ async function main(): Promise<void> {
       return;
     }
 
-    const runtimeManager = new PiRuntimeManager(config, registry);
+    runtimeManager = createPiSessionRuntimeClient(config, registry);
+    await runtimeManager.warmup();
+    console.log(`Effect PiSessionRuntime warmed: engine=${runtimeManager.engine}`);
     await runBot({
       runControlStore,
       runControlRoles: roles,
@@ -175,6 +177,10 @@ async function main(): Promise<void> {
     await runControlStore?.close().catch((closeError) => {
       const text = closeError instanceof Error ? closeError.message : String(closeError);
       console.warn(`failed to close run-control runtime after startup error: ${text}`);
+    });
+    await runtimeManager?.disposeAll().catch((closeError) => {
+      const text = closeError instanceof Error ? closeError.message : String(closeError);
+      console.warn(`failed to close Pi session runtime after startup error: ${text}`);
     });
     await registry?.close().catch((closeError) => {
       const text = closeError instanceof Error ? closeError.message : String(closeError);
@@ -200,6 +206,7 @@ async function doctor(configPath: string, config: AppConfig): Promise<void> {
   console.log(`dataDir: ${config.dataDir}`);
   console.log(`registry: ${join(config.dataDir, "registry.json")}`);
   console.log(`registryEngine: ${REGISTRY_ENGINE_NAME}`);
+  console.log(`piSessionEngine: ${PI_SESSION_ENGINE_NAME}`);
   console.log(`workspaces: ${Object.keys(config.pi.workspaces).length}`);
   console.log(`attachments: ${config.attachments.enabled ? "enabled" : "disabled"}, maxBytes=${config.attachments.maxBytes}`);
   console.log(`linkIngest: ${config.linkIngest.enabled ? "enabled" : "disabled"}, url=${config.linkIngest.inngestUrl}, eventKeyEnv=${config.linkIngest.eventKeyEnv ?? "(none)"}, eventKeySecret=${config.linkIngest.eventKeySecretName ?? "(none)"}, signingKeyEnv=${config.linkIngest.signingKeyEnv ?? "(none)"}, signingKeySecret=${config.linkIngest.signingKeySecretName ?? "(none)"}, statusBridge=${config.linkIngest.statusBridgeEnabled ? "enabled" : "disabled"}`);

@@ -54,6 +54,17 @@ export interface CompactResult {
   sessionFile: string | undefined;
 }
 
+export interface PiRuntimePort {
+  enqueuePrompt(thread: ThreadRecord, text: string, images?: InlineImageContent[], onProgress?: PromptProgressHandler): Promise<PromptResult>;
+  queueMessageDuringActive(threadId: string, text: string, mode?: "steer" | "followUp", images?: InlineImageContent[]): Promise<QueueMessageResult>;
+  queueMessageForThreadIfActive(thread: ThreadRecord, text: string, mode?: "steer" | "followUp", images?: InlineImageContent[]): Promise<QueueMessageResult>;
+  enqueueReload(thread: ThreadRecord, onProgress?: PromptProgressHandler): Promise<void>;
+  enqueueCompact(thread: ThreadRecord, customInstructions?: string, onProgress?: PromptProgressHandler): Promise<CompactResult>;
+  isActive(threadId: string): boolean;
+  abort(threadId: string): Promise<void>;
+  disposeAll(): Promise<void>;
+}
+
 interface PiCompactionResult {
   summary: string;
   firstKeptEntryId: string;
@@ -61,7 +72,7 @@ interface PiCompactionResult {
   details?: unknown;
 }
 
-export class PiRuntimeManager {
+export class PiRuntimeManager implements PiRuntimePort {
   private readonly runtimes = new Map<string, ManagedRuntime>();
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly agentDir: string;

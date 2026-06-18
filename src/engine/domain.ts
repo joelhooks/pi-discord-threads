@@ -55,6 +55,21 @@ export class RunQueueTimeout extends Data.TaggedError("RunQueueTimeout")<{
   readonly cause: unknown;
 }> {}
 
+export class PiSessionAlreadyProcessing extends Data.TaggedError("PiSessionAlreadyProcessing")<{
+  readonly operation: string;
+  readonly cause: unknown;
+}> {}
+
+export class PiSessionAssistantLeafContinueFailed extends Data.TaggedError("PiSessionAssistantLeafContinueFailed")<{
+  readonly operation: string;
+  readonly cause: unknown;
+}> {}
+
+export class PiSessionOperationFailed extends Data.TaggedError("PiSessionOperationFailed")<{
+  readonly operation: string;
+  readonly cause: unknown;
+}> {}
+
 export type RegistryError =
   | RegistryLoadFailed
   | RegistryWriteFailed
@@ -63,3 +78,8 @@ export type RegistryError =
   | InvalidExternalPayload;
 
 export type RunQueueError = RunQueueConnectFailed | RunQueueOperationFailed | RunQueueTimeout;
+
+export type PiSessionError =
+  | PiSessionAlreadyProcessing
+  | PiSessionAssistantLeafContinueFailed
+  | PiSessionOperationFailed;
