@@ -52,6 +52,8 @@ import type { RunControlStore } from "./run-control/store.js";
 import type { QueuedRunInput, RunControlExecutionResult, RunRecord } from "./run-control/types.js";
 import { RunControlWorker, type RunControlWorkerAdapter } from "./run-control/worker.js";
 import { createForkedSessionFile, forkWorkGraph, formatWorkGraphEmbedDescription, formatWorkGraphStatus, rootWorkGraph } from "./work-graph.js";
+import { isBridgeRecoveryPrompt, recoverableInterruptedPrompt } from "./recovery-prompt.js";
+import { STARTUP_RECOVERY_ENV, startupRecoveryEnabled } from "./startup-recovery.js";
 
 interface RunBotOptions {
   config: AppConfig;
@@ -106,7 +108,11 @@ export async function runBot(options: RunBotOptions): Promise<void> {
     }
     if (botIngressEnabled) {
       stopAsyncSubagentBridge = startAsyncSubagentResultBridge(client, options);
-      await autoResumeInterruptedThreads(client, options);
+      if (startupRecoveryEnabled()) {
+        await autoResumeInterruptedThreads(client, options);
+      } else {
+        await reconcileInterruptedThreadPlaceholders(client, options);
+      }
     }
   });
 
@@ -255,6 +261,14 @@ async function autoResumeInterruptedThreads(client: Client, options: RunBotOptio
         await options.runControlStore.clearActiveIfMatches(record.threadId, record.activeRun.runId).catch(() => undefined);
       }
 
+      if (isBridgeRecoveryPrompt(record.activeRun.prompt)) {
+        console.warn(`skipping recursive auto-resume recovery prompt for interrupted thread ${record.threadId}`);
+        await placeholder.edit(buildInterruptedRunPayload(record)).catch(() => undefined);
+        await options.registry.patchThread(record.threadId, { status: "interrupted", activeRun: undefined }).catch(() => undefined);
+        reconciled++;
+        continue;
+      }
+
       const prompt = buildRecoveryPrompt(record, "continue");
       await placeholder.edit(buildWorkingPayload(record, prompt, {
         phase: "starting",
@@ -279,6 +293,51 @@ async function autoResumeInterruptedThreads(client: Client, options: RunBotOptio
   }
   if (reconciled > 0) {
     console.log(`reconciled ${reconciled} interrupted Pi thread placeholder(s) without resumable prompts`);
+  }
+}
+
+async function reconcileInterruptedThreadPlaceholders(client: Client, options: RunBotOptions): Promise<void> {
+  const interrupted = options.registry.listThreads()
+    .filter((record) => record.status === "interrupted" && record.activeRun?.placeholderDiscordMessageId && record.kind !== "discord-dm-workroom");
+  if (interrupted.length === 0) return;
+
+  let reconciled = 0;
+  for (const record of interrupted) {
+    try {
+      const channel = await client.channels.fetch(record.threadId);
+      if (!channel || typeof (channel as { isThread?: unknown }).isThread !== "function" || !(channel as { isThread: () => boolean }).isThread()) {
+        continue;
+      }
+      const thread = channel as ThreadChannel;
+      const placeholder = await thread.messages.fetch(record.activeRun?.placeholderDiscordMessageId ?? "");
+
+      const persistedFinal = getPersistedFinalAssistant(record);
+      if (persistedFinal) {
+        const chunks = chunkForDiscord(persistedFinal.text, options.config.render.maxDiscordChars);
+        await sendFinalResponseMessages(thread, record, options.registry, chunks, persistedFinal.entryId);
+        await retireWorkingPlaceholder(placeholder, record);
+        await options.registry.patchThread(record.threadId, { status: "idle", activeRun: undefined }).catch(() => undefined);
+        reconciled++;
+        continue;
+      }
+
+      if (options.config.runControl.enabled && options.runControlStore && record.activeRun?.runId) {
+        await options.runControlStore.markTerminal(record.activeRun.runId, "interrupted", {
+          error: "bridge restarted before Discord received a final answer",
+        }).catch(() => undefined);
+        await options.runControlStore.clearActiveIfMatches(record.threadId, record.activeRun.runId).catch(() => undefined);
+      }
+
+      await placeholder.edit(buildInterruptedRunPayload(record)).catch(() => undefined);
+      reconciled++;
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      console.warn(`failed to reconcile interrupted thread ${record.threadId}: ${text}`);
+    }
+  }
+
+  if (reconciled > 0) {
+    console.log(`reconciled ${reconciled} interrupted Pi thread placeholder(s) without auto-resume`);
   }
 }
 
@@ -1789,7 +1848,8 @@ function buildRecoveryPrompt(record: ThreadRecord, prompt: string): string {
 
   const activeRun = record.activeRun;
   const interruptedAt = activeRun?.interruptedAt ?? record.updatedAt;
-  const interruptedPrompt = activeRun?.prompt?.trim();
+  const recoverablePrompt = recoverableInterruptedPrompt(activeRun?.prompt);
+  const interruptedPrompt = recoverablePrompt && !isRecoveryIntent(recoverablePrompt) ? recoverablePrompt : undefined;
   const userPrompt = prompt.trim() || "continue";
   const wantsContinuation = isRecoveryIntent(userPrompt);
 
@@ -2181,6 +2241,7 @@ function buildHudCardPayload(record: ThreadRecord, options: {
   footer: string;
   abortDisabled?: boolean;
   expectedMessageId?: string;
+  inputText?: string | false;
 }): RichPayload {
   const progress = fixedProgressRows(options.progress);
   const title = truncateForComponent(hudTitle(record), 90);
@@ -2190,8 +2251,8 @@ function buildHudCardPayload(record: ThreadRecord, options: {
   const nowLines = [
     "**Now**",
     truncateForComponent(options.now, 650),
-    options.signals ? `-# ${truncateForComponent(options.signals, 360)}` : "-# waiting on live Pi events",
-  ];
+    options.signals ? `-# ${truncateForComponent(options.signals, 360)}` : undefined,
+  ].filter((line): line is string => Boolean(line));
   const statusBlock = options.risk
     ? `**Watch**\n${truncateForComponent(options.risk, 650)}`
     : `**Next**\n${truncateForComponent(options.next ?? "continuing", 650)}`;
@@ -2212,7 +2273,7 @@ function buildHudCardPayload(record: ThreadRecord, options: {
       textDisplayComponent(nowLines.join("\n")),
       textDisplayComponent(["**Progress**", ...progress.map((item) => truncateForComponent(item, 260))].join("\n")),
       textDisplayComponent(statusBlock),
-      textDisplayComponent("**Input**\nSend a message to steer this turn.\nFollow-up queue requires ESC first, then send it."),
+      ...(options.inputText === false ? [] : [textDisplayComponent(options.inputText ?? "**Input**\nSend a message to steer this turn.\nFollow-up queue requires ESC first, then send it.")]),
       textDisplayComponent(`-# ${truncateForComponent(options.footer, 280)}`),
     ])],
   };
@@ -2352,18 +2413,23 @@ function buildErrorPayload(record: ThreadRecord, error: string): RichPayload {
 
 function buildInterruptedRunPayload(record: ThreadRecord): RichPayload {
   const activeRun = record.activeRun;
+  const promptPreview = isBridgeRecoveryPrompt(activeRun?.prompt)
+    ? "bridge recovery prompt suppressed"
+    : activeRun?.promptPreview || "not recorded";
   return buildHudCardPayload(record, {
     tone: "interrupted",
     stateLabel: "interrupted",
     now: "Bridge restarted before Discord received a final answer.",
     progress: [
       "⚠ run interrupted by bridge restart",
-      `· request: ${activeRun?.promptPreview || "not recorded"}`,
+      `· request: ${promptPreview}`,
       `· session: ${record.sessionFile ?? activeRun?.sessionFile ?? "not created yet"}`,
     ],
+    signals: "terminal card; no live Pi turn is running",
     risk: "Send `continue` in this thread to recover from durable session history, or send a new prompt to continue from there.",
     footer: "ESC disabled because this run is already terminal",
     abortDisabled: true,
+    inputText: false,
   });
 }
 

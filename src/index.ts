@@ -11,6 +11,7 @@ import { checkRunControlRedisHealth, createRunControlRedisClient, getRunControlW
 import { formatReconcileReport, reconcileRunControl, startRunControlReconcileLoop } from "./run-control/reconcile.js";
 import { RunControlStore } from "./run-control/store.js";
 import { installLaunchAgent, printLaunchAgentStatus, uninstallLaunchAgent } from "./launch-agent.js";
+import { STARTUP_RECOVERY_ENV, startupRecoveryEnabled } from "./startup-recovery.js";
 
 installProcessGuards();
 
@@ -123,7 +124,11 @@ async function main(): Promise<void> {
   if (!config.runControl.enabled) {
     const interruptedCount = await registry.markRunningThreadsInterrupted();
     if (interruptedCount > 0) {
-      console.log(`marked ${interruptedCount} stale running Pi session(s) as interrupted`);
+      if (startupRecoveryEnabled()) {
+        console.log(`marked ${interruptedCount} stale running Pi session(s) as interrupted`);
+      } else {
+        console.warn(`startup recovery disabled; marked ${interruptedCount} stale running Pi session(s) as interrupted without auto-resume. Set ${STARTUP_RECOVERY_ENV}=1 to resume them on boot.`);
+      }
     }
   }
 
