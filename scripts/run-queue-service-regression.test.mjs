@@ -6,6 +6,7 @@ import { RedisCommandTimeoutError } from "../dist/run-control/redis-client.js";
 import {
   RunQueueConnectFailed,
   RunQueueEngineLive,
+  createRunQueueRuntimeClient,
   makeRunQueueService,
   RunQueueOperationFailed,
   RunQueueService,
@@ -133,6 +134,25 @@ test("RunQueueEngineLive maps missing Redis URL to a typed connect error", async
 
   assert.equal(error._tag, "RunQueueConnectFailed");
   assert.ok(error instanceof RunQueueConnectFailed);
+});
+
+test("RunQueue runtime client exposes typed layer failures to Promise callers", async () => {
+  const config = defaultConfig();
+  config.runControl.enabled = true;
+  config.runControl.redisUrl = undefined;
+  config.runControl.redisUrlEnv = "PI_DISCORD_THREADS_TEST_MISSING_RUNTIME_REDIS_URL";
+  delete process.env.PI_DISCORD_THREADS_TEST_MISSING_RUNTIME_REDIS_URL;
+
+  const client = createRunQueueRuntimeClient(config);
+  try {
+    await assert.rejects(() => client.warmup(), (error) => {
+      assert.equal(error._tag, "RunQueueConnectFailed");
+      assert.ok(error instanceof RunQueueConnectFailed);
+      return true;
+    });
+  } finally {
+    await client.close();
+  }
 });
 
 test("RunQueueService can be swapped with a fake layer", async () => {

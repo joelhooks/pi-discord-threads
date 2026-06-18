@@ -210,19 +210,27 @@ Implemented second safe vertical slice:
 - Added `makeRunQueueService(store, timeoutMs)` for structural store wrapping and cheap fake layers.
 - Added `RedisRunQueueLive` and `RunQueueEngineLive(config)` using `Layer.effect`, `createRunControlRedisClient`, `RunControlStore`, and scoped store close finalizer.
 - Moved `FinalizeClaim` into `src/run-control/types.ts` so the service contract does not import it from the concrete Redis store adapter.
-- Added `scripts/run-queue-service-regression.test.mjs` proving delegation, typed timeout mapping, generic operation-error mapping, missing Redis URL connect-error mapping, and `Layer.mock` substitution.
+- Added `scripts/run-queue-service-regression.test.mjs` proving delegation, typed timeout mapping, generic operation-error mapping, missing Redis URL connect-error mapping, runtime-client error propagation, and `Layer.mock` substitution.
 
 Validation receipts:
 
 - `npm run typecheck` passed.
-- `npm run test:run-queue-service` passed: 5 tests.
+- `npm run test:run-queue-service` passed: 6 tests.
 - `npm run test:engine-layer` passed: 2 tests.
 - `npm run test:thread-run-state` passed: 5 tests.
 - `npm run test:recovery-prompt` passed: 2 tests.
 
+Additional live integration step:
+
+- Added `src/engine/runtime.ts` with `createRunQueueRuntimeClient(config)` backed by Effect v4 `ManagedRuntime.make(RunQueueEngineLive(config))`.
+- Changed the live daemon start path in `src/index.ts` to construct and warm up the Effect-backed run queue runtime client when `runControl.enabled` is true.
+- Added startup-error cleanup around the warmed runtime so token/config/login failures close Redis resources instead of leaving the process hanging.
+- Changed one-shot `reconcile` to use the same Effect-backed runtime client.
+- Widened worker/bot/reconciler dependencies to the structural `RunControlStorePort`, so existing Promise-based code can run through the Effect service without rewriting Discord handlers yet.
+
 Deferred intentionally:
 
-- `RunControlWorker` still consumes `RunControlStore` directly.
-- Discord run enqueue/active-input paths still use the concrete store directly.
-- No live Redis connection is opened by the new layer unless a caller explicitly provides `RedisRunQueueLive` / `RunQueueEngineLive`.
-- Worker loops/timers are not Effect fibers yet.
+- `RunControlWorker` now receives the Effect-backed port in live startup, but its loop/timers are not Effect fibers yet.
+- Discord run enqueue/active-input paths now can run through the Effect-backed port, but Discord handlers are still Promise adapters.
+- No `AppRuntime` / `Layer.launch` daemon wrapper yet.
+- Registry is still constructed directly in `src/index.ts` for live startup.

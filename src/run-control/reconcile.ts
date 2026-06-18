@@ -1,8 +1,7 @@
 import { existsSync } from "node:fs";
 import type { AppConfig } from "../config.js";
 import type { Registry } from "../registry.js";
-import type { RunControlStore } from "./store.js";
-import { isTerminalRunStatus, type RunRecord } from "./types.js";
+import { isTerminalRunStatus, type RunControlStorePort, type RunRecord } from "./types.js";
 
 export type ReconcileSeverity = "info" | "warn" | "error";
 
@@ -24,7 +23,7 @@ export interface ReconcileReport {
 }
 
 export async function reconcileRunControl(options: {
-  store: RunControlStore;
+  store: RunControlStorePort;
   registry: Registry;
   config: AppConfig;
   apply: boolean;
@@ -182,7 +181,7 @@ export function formatReconcileReport(report: ReconcileReport): string {
 }
 
 export function startRunControlReconcileLoop(options: {
-  store: RunControlStore;
+  store: RunControlStorePort;
   registry: Registry;
   config: AppConfig;
   apply: boolean;
@@ -202,7 +201,7 @@ export function startRunControlReconcileLoop(options: {
   return () => clearInterval(interval);
 }
 
-async function isRunLeaseExpired(store: RunControlStore, run: RunRecord): Promise<boolean> {
+async function isRunLeaseExpired(store: RunControlStorePort, run: RunRecord): Promise<boolean> {
   const ttl = await store.getRunLeaseTtl(run.runId);
   if (ttl > 0) return false;
   return true;

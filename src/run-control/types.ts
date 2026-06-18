@@ -76,3 +76,40 @@ export interface ActivePointer {
   logicalThreadId: string;
   runId: string;
 }
+
+export interface RunControlStorePort {
+  close(): Promise<void>;
+  ensureConsumerGroup(): Promise<void>;
+  tryEnqueueRun(run: RunRecord): Promise<{ enqueued: true; run: RunRecord } | { enqueued: false; activeRunId: string }>;
+  appendInput(input: QueuedRunInput): Promise<string>;
+  getInputStreamLength(logicalThreadId: string): Promise<number>;
+  countInputsForRun(logicalThreadId: string, runId: string): Promise<number>;
+  readInputsSince(logicalThreadId: string, lastId: string, count?: number): Promise<QueuedRunInput[]>;
+  dequeueJob(workerId: string, blockMs: number): Promise<RunJob | undefined>;
+  claimStaleJob(workerId: string): Promise<RunJob | undefined>;
+  acknowledgeJob(job: RunJob): Promise<void>;
+  getRun(runId: string): Promise<RunRecord | undefined>;
+  patchRun(
+    runId: string,
+    patch: Partial<RunRecord>,
+    options?: { preserveTerminal?: boolean },
+  ): Promise<RunRecord | undefined>;
+  markTerminal(
+    runId: string,
+    status: "succeeded" | "failed" | "interrupted" | "aborted",
+    patch?: Partial<RunRecord>,
+  ): Promise<RunRecord | undefined>;
+  getActiveRunId(logicalThreadId: string): Promise<string | undefined>;
+  getQueueableActiveRunId(logicalThreadId: string): Promise<string | undefined>;
+  clearActiveIfMatches(logicalThreadId: string, runId: string): Promise<boolean>;
+  claimRunLease(run: RunRecord, workerId: string, leaseToken: string): Promise<boolean>;
+  heartbeatRunLease(runId: string, leaseToken: string, workerId: string): Promise<boolean>;
+  releaseRunLease(runId: string, leaseToken: string): Promise<boolean>;
+  acquireFinalize(runId: string, leaseToken: string): Promise<FinalizeClaim>;
+  completeFinalize(runId: string, leaseToken: string): Promise<boolean>;
+  getRunLeaseTtl(runId: string): Promise<number>;
+  appendRunEvent(runId: string, type: string, fields?: Record<string, unknown>): Promise<string>;
+  recordWorkerIdle(workerId: string): Promise<void>;
+  listRuns(): Promise<RunRecord[]>;
+  listActivePointers(): Promise<ActivePointer[]>;
+}
