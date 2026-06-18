@@ -27,7 +27,8 @@
     "brain:check": "pi-notes brain check",
     "test:engine-layer": "npm run build && node --test scripts/effect-engine-layer-regression.test.mjs",
     "test:run-queue-service": "npm run build && node --test scripts/run-queue-service-regression.test.mjs",
-    "test:effect-runtime-smoke": "npm run build && node --test scripts/effect-runtime-smoke.test.mjs"
+    "test:effect-runtime-smoke": "npm run build && node --test scripts/effect-runtime-smoke.test.mjs",
+    "test:app-lifecycle-machine": "npm run build && node --test scripts/app-lifecycle-machine-regression.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.78.1",

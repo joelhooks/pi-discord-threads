@@ -236,11 +236,21 @@ Only after the above seams are proven:
 - one shutdown path
 - long-lived resources owned by layer scope
 
+2026-06-18 root-actor cut:
+
+- Added `src/app-lifecycle-machine.ts` using XState v5 `setup(...).createMachine(...)` as the process root lifecycle model.
+- Added `src/app-runtime.ts` to run the root actor from `src/index.ts`.
+- Moved daemon startup out of ad hoc `src/index.ts` sequencing and into named states: run queue warmup, registry warmup, reconcile start, secret resolution, Pi session runtime warmup, Discord connect, running, draining, failed, stopped.
+- `running` now exposes parallel role regions for `bot`, `worker`, and `reconcile` so role truth is explicit.
+- `src/discord-bot.ts` now exports `startBot()` with a ready/stop handle; the root actor owns process signals and runtime shutdown instead of `runBot()` calling `process.exit(0)`.
+- Added `scripts/app-lifecycle-machine-regression.test.mjs` and `npm run test:app-lifecycle-machine` for root actor startup, reconcile-only mode, and startup-failure cleanup.
+
 Validation:
 
 - LaunchAgent restart
 - clean SIGTERM drain
 - no hanging handles in smoke harness
+- `npm run test:app-lifecycle-machine`
 
 ## Decisions already made
 

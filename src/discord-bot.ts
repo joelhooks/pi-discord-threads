@@ -58,7 +58,7 @@ import { extractFirstUrl, postPreparedLinkIngest, prepareLinkIngest, type LinkIn
 import { buildLinkIngestCommandText, linkIngestAcceptedTitle, linkIngestUsage, parsePrefixLinkIngestCommand, type LinkIngestCommandMode } from "./link-ingest-command.js";
 import { startLinkIngestStatusBridge, type StopLinkIngestStatusBridge } from "./link-ingest-status-bridge.js";
 
-interface RunBotOptions {
+export interface RunBotOptions {
   config: AppConfig;
   token: string;
   allowedUserIds: string[];
@@ -70,13 +70,18 @@ interface RunBotOptions {
   runControlStopReconcileLoop?: () => void;
 }
 
+export interface BotRuntimeHandle {
+  readonly ready: Promise<void>;
+  stop(): Promise<void>;
+}
+
 type PromptChannel = {
   send(options: MessageCreateOptions): Promise<Message>;
   sendTyping(): Promise<void>;
   isThread?: () => boolean;
 };
 
-export async function runBot(options: RunBotOptions): Promise<void> {
+export function startBot(options: RunBotOptions): BotRuntimeHandle {
   const allowedUsers = new Set(options.allowedUserIds.filter(Boolean));
   const roles = options.runControlRoles ?? ["bot"];
   const botIngressEnabled = roles.includes("bot");
@@ -93,40 +98,61 @@ export async function runBot(options: RunBotOptions): Promise<void> {
     partials: [Partials.Channel],
   });
 
+  let readySettled = false;
+  let resolveReady: () => void = () => undefined;
+  let rejectReady: (error: unknown) => void = () => undefined;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = () => {
+      if (readySettled) return;
+      readySettled = true;
+      resolve();
+    };
+    rejectReady = (error: unknown) => {
+      if (readySettled) return;
+      readySettled = true;
+      reject(error);
+    };
+  });
+
   client.once(Events.ClientReady, async () => {
-    console.log(`pi-discord-threads logged in as ${client.user?.tag ?? "unknown bot"}`);
-    if (allowedUsers.size > 0) {
-      console.log(`allowlist enabled for ${allowedUsers.size} Discord user id(s)`);
-    }
-    if (botIngressEnabled) {
-      await registerSlashCommands(client, options.config);
-    }
-    if (options.config.runControl.enabled && options.runControlStore && roles.includes("worker")) {
-      runControlWorker = new RunControlWorker(
-        options.runControlStore,
-        createRunControlWorkerAdapter(client, options),
-        options.config,
-        options.runControlWorkerId ?? `${process.pid}`,
-      );
-      runControlWorker.start();
-    }
-    if (botIngressEnabled) {
-      stopAsyncSubagentBridge = startAsyncSubagentResultBridge(client, options);
-      try {
-        stopLinkIngestStatusBridge = await startLinkIngestStatusBridge({
-          client,
-          config: options.config,
-          registry: options.registry,
-        });
-      } catch (error) {
-        const text = error instanceof Error ? error.message : String(error);
-        console.warn(`link ingest status bridge unavailable: ${text}`);
+    try {
+      console.log(`pi-discord-threads logged in as ${client.user?.tag ?? "unknown bot"}`);
+      if (allowedUsers.size > 0) {
+        console.log(`allowlist enabled for ${allowedUsers.size} Discord user id(s)`);
       }
-      if (startupRecoveryEnabled()) {
-        await autoResumeInterruptedThreads(client, options);
-      } else {
-        await reconcileInterruptedThreadPlaceholders(client, options);
+      if (botIngressEnabled) {
+        await registerSlashCommands(client, options.config);
       }
+      if (options.config.runControl.enabled && options.runControlStore && roles.includes("worker")) {
+        runControlWorker = new RunControlWorker(
+          options.runControlStore,
+          createRunControlWorkerAdapter(client, options),
+          options.config,
+          options.runControlWorkerId ?? `${process.pid}`,
+        );
+        runControlWorker.start();
+      }
+      if (botIngressEnabled) {
+        stopAsyncSubagentBridge = startAsyncSubagentResultBridge(client, options);
+        try {
+          stopLinkIngestStatusBridge = await startLinkIngestStatusBridge({
+            client,
+            config: options.config,
+            registry: options.registry,
+          });
+        } catch (error) {
+          const text = error instanceof Error ? error.message : String(error);
+          console.warn(`link ingest status bridge unavailable: ${text}`);
+        }
+        if (startupRecoveryEnabled()) {
+          await autoResumeInterruptedThreads(client, options);
+        } else {
+          await reconcileInterruptedThreadPlaceholders(client, options);
+        }
+      }
+      resolveReady();
+    } catch (error) {
+      rejectReady(error);
     }
   });
 
@@ -189,22 +215,28 @@ export async function runBot(options: RunBotOptions): Promise<void> {
     }
   });
 
-  const shutdown = async (signal: string) => {
-    console.log(`received ${signal}, shutting down...`);
+  let stopped = false;
+  const stop = async () => {
+    if (stopped) return;
+    stopped = true;
+    if (!readySettled) rejectReady(new Error("Discord bot stopped before ready"));
     options.runControlStopReconcileLoop?.();
     stopAsyncSubagentBridge?.();
     await stopLinkIngestStatusBridge?.();
     await runControlWorker?.stop();
-    await options.runControlStore?.close();
-    await options.runtimeManager.disposeAll();
-    await options.registry.close?.();
     client.destroy();
-    process.exit(0);
   };
-  process.once("SIGINT", () => void shutdown("SIGINT"));
-  process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
-  await client.login(options.token);
+  void client.login(options.token).then(() => undefined).catch((error) => {
+    rejectReady(error);
+  });
+
+  return { ready, stop };
+}
+
+export async function runBot(options: RunBotOptions): Promise<void> {
+  const bot = startBot(options);
+  await bot.ready;
 }
 
 async function registerSlashCommands(client: Client, config: AppConfig): Promise<void> {

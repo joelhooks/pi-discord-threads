@@ -30,6 +30,31 @@ Current boundary:
 
 Rule: new lifecycle states/transitions belong in `thread-run-state.ts` first. Do not keep adding scattered `status`/`activeRun` conditionals to `discord-bot.ts`.
 
+## XState lifecycle modeling
+
+2026-06-18: Use XState v5 as the canonical modeling tool for finite daemon and runtime lifecycle truth. Effect remains the resource/fiber/scope layer; XState owns named states, events, guards, parallel regions, and invoked actors where lifecycle ambiguity causes bugs.
+
+Source receipts: installed `xstate@5.32.1`; local XState declarations expose `setup(...).createMachine(...)`, `fromPromise`, `fromCallback`, `invoke`, `parallel`, `final`, `history`, `guards`, and actor cleanup semantics. Use the installed package source/declarations as implementation canon before relying on memory or examples.
+
+Preferred XState v5 idiom for new machines:
+
+- define machines with `setup({ types, actors, actions, guards }).createMachine(...)`;
+- model side effects as invoked actors, not anonymous async `entry` handlers;
+- use `fromPromise` for bounded startup/shutdown steps;
+- use `fromCallback` for long-lived subscriptions, process signals, Discord gateway lifetime, and cleanup handles;
+- use parallel regions when roles can be independently ready/degraded/stopping, especially `bot`, `worker`, and `reconcile`;
+- keep domain transitions in small machine modules, with Discord/Redis/Pi adapters executing effects at the edges.
+
+Candidate XState surfaces:
+
+1. `AppLifecycleMachine`: process startup, role readiness, signal handling, drain, shutdown, terminal failure.
+2. `ThreadRunMachine`: per-thread prompt/queue/running/interrupted/final states; already started in `src/thread-run-state.ts`.
+3. `RunWorkerMachine`: Redis job claim, lease heartbeat, prompt execution, finalization, ACK/reclaim/fail-safe.
+4. `PiSessionMachine`: idle/running/compacting/retrying/aborting/stale-stream recovery for one durable Pi session.
+5. `LinkIngestStatusMachine`: accepted/classified/archived/extracted/summarized/ready/indexed/failed/send-failed projection.
+
+Do not turn every pure helper into a machine. Use XState where illegal state combinations, retries, cancellation, resource lifetime, or parallel readiness are the real problem.
+
 ## pi-notes boundary
 
 pi-notes renders `.brain/**/*.svx`, auto-imports standard and project-local Brain components, and can route browser Review Batches back to the spawning Pi session when opened through Pi.

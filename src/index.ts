@@ -2,14 +2,13 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { type AppConfig, expandPath, loadConfig, parseCliArgs, writeDefaultConfig } from "./config.js";
-import { runBot } from "./discord-bot.js";
+import { runAppLifecycle } from "./app-runtime.js";
 import { postDailyMessage } from "./daily-post.js";
 import { SecretResolver } from "./secrets.js";
-import { PI_SESSION_ENGINE_NAME, REGISTRY_ENGINE_NAME, RUN_QUEUE_ENGINE_NAME, createPiSessionRuntimeClient, createRegistryRuntimeClient, createRunQueueRuntimeClient } from "./engine/runtime.js";
+import { PI_SESSION_ENGINE_NAME, REGISTRY_ENGINE_NAME, RUN_QUEUE_ENGINE_NAME, createRegistryRuntimeClient, createRunQueueRuntimeClient } from "./engine/runtime.js";
 import { checkRunControlRedisHealth, getRunControlWorkerId } from "./run-control/redis-client.js";
-import { formatReconcileReport, reconcileRunControl, startRunControlReconcileLoop } from "./run-control/reconcile.js";
+import { formatReconcileReport, reconcileRunControl } from "./run-control/reconcile.js";
 import { installLaunchAgent, printLaunchAgentStatus, uninstallLaunchAgent } from "./launch-agent.js";
-import { STARTUP_RECOVERY_ENV, startupRecoveryEnabled } from "./startup-recovery.js";
 
 installProcessGuards();
 
@@ -99,106 +98,7 @@ async function main(): Promise<void> {
   }
 
   const roles = config.runControl.enabled ? (cli.roles ?? config.runControl.roles) : ["bot" as const];
-  const runControlStore = config.runControl.enabled ? createRunQueueRuntimeClient(config) : undefined;
-  let registry: ReturnType<typeof createRegistryRuntimeClient> | undefined;
-  let runtimeManager: ReturnType<typeof createPiSessionRuntimeClient> | undefined;
-  let stopReconcileLoop: (() => void) | undefined;
-
-  try {
-    await runControlStore?.warmup();
-    if (runControlStore) {
-      console.log(`Effect RunQueueRuntime warmed: engine=${runControlStore.engine}, workerId=${getRunControlWorkerId(config)}, keyPrefix=${config.runControl.keyPrefix}`);
-    }
-
-    const secrets = new SecretResolver();
-    const token = await secrets.resolveRequired({
-      envName: config.discord.tokenEnv,
-      secretName: config.discord.tokenSecretName,
-      ttl: config.discord.tokenLeaseTtl,
-      label: "Discord bot token",
-    });
-
-    const allowedFromSecret = await secrets.resolveOptional({
-      envName: config.discord.allowedUserIdEnv,
-      secretName: config.discord.allowedUserIdSecretName,
-      ttl: config.discord.tokenLeaseTtl,
-    });
-    const allowedUserIds = mergeIds(config.discord.allowedUserIds, allowedFromSecret);
-
-    registry = createRegistryRuntimeClient(config);
-    await registry.warmup();
-    console.log(`Effect RegistryRuntime warmed: engine=${registry.engine}`);
-    if (!config.runControl.enabled) {
-      const interruptedCount = await registry.markRunningThreadsInterrupted();
-      if (interruptedCount > 0) {
-        if (startupRecoveryEnabled()) {
-          console.log(`marked ${interruptedCount} stale running Pi session(s) as interrupted`);
-        } else {
-          console.warn(`startup recovery disabled; marked ${interruptedCount} stale running Pi session(s) as interrupted without auto-resume. Set ${STARTUP_RECOVERY_ENV}=1 to resume them on boot.`);
-        }
-      }
-    }
-
-    stopReconcileLoop = config.runControl.enabled && runControlStore && roles.includes("reconcile")
-      ? startRunControlReconcileLoop({ store: runControlStore, registry, config, apply: true })
-      : undefined;
-
-    if (config.runControl.enabled && runControlStore && !roles.includes("bot") && !roles.includes("worker") && roles.includes("reconcile")) {
-      console.log("run-control reconcile role running; press Ctrl-C to stop");
-      await new Promise<void>((resolve) => {
-        const shutdown = async () => {
-          stopReconcileLoop?.();
-          await runControlStore.close();
-          await registry?.close();
-          resolve();
-        };
-        process.once("SIGINT", () => void shutdown());
-        process.once("SIGTERM", () => void shutdown());
-      });
-      return;
-    }
-
-    runtimeManager = createPiSessionRuntimeClient(config, registry);
-    await runtimeManager.warmup();
-    console.log(`Effect PiSessionRuntime warmed: engine=${runtimeManager.engine}`);
-    await runBot({
-      runControlStore,
-      runControlRoles: roles,
-      runControlWorkerId: getRunControlWorkerId(config),
-      runControlStopReconcileLoop: stopReconcileLoop,
-      config,
-      token,
-      allowedUserIds,
-      registry,
-      runtimeManager,
-    });
-  } catch (error) {
-    stopReconcileLoop?.();
-    await runControlStore?.close().catch((closeError) => {
-      const text = closeError instanceof Error ? closeError.message : String(closeError);
-      console.warn(`failed to close run-control runtime after startup error: ${text}`);
-    });
-    await runtimeManager?.disposeAll().catch((closeError) => {
-      const text = closeError instanceof Error ? closeError.message : String(closeError);
-      console.warn(`failed to close Pi session runtime after startup error: ${text}`);
-    });
-    await registry?.close().catch((closeError) => {
-      const text = closeError instanceof Error ? closeError.message : String(closeError);
-      console.warn(`failed to close registry runtime after startup error: ${text}`);
-    });
-    throw error;
-  }
-}
-
-function mergeIds(configured: string[], secretValue: string | undefined): string[] {
-  const ids = new Set(configured.map((id) => id.trim()).filter(Boolean));
-  if (secretValue) {
-    for (const id of secretValue.split(/[\s,]+/)) {
-      const trimmed = id.trim();
-      if (trimmed) ids.add(trimmed);
-    }
-  }
-  return [...ids];
+  await runAppLifecycle({ config, roles });
 }
 
 async function doctor(configPath: string, config: AppConfig): Promise<void> {
