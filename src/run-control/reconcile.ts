@@ -93,7 +93,18 @@ export async function reconcileRunControl(options: {
   }
 
   for (const pointer of activePointers) {
-    const run = runsById.get(pointer.runId);
+    let run = runsById.get(pointer.runId);
+    if (!run) {
+      // listRuns() and listActivePointers() are separate Redis scans. A run can be
+      // enqueued between them, so re-read the pointed run before treating the
+      // active pointer as orphaned. Otherwise reconcile can clear a fresh active
+      // pointer and then interrupt the just-created run on the next pass.
+      run = await store.getRun(pointer.runId);
+      if (run) {
+        runsById.set(run.runId, run);
+        runs.push(run);
+      }
+    }
     if (!run) {
       issues.push({
         code: "active-pointer-missing-run",

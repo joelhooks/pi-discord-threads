@@ -116,6 +116,53 @@ test("reconcile reports non-terminal Redis runs superseded by a different active
   assert.match(issue.message, /run-newer/);
 });
 
+test("reconcile re-reads an active-pointer run before clearing a possibly fresh pointer", async () => {
+  const freshRun = createRun("run-fresh");
+  let clearCount = 0;
+  const terminalMarks = [];
+  const store = {
+    async listRuns() {
+      return [];
+    },
+    async listActivePointers() {
+      return [{ logicalThreadId: freshRun.logicalThreadId, runId: freshRun.runId }];
+    },
+    async getRun(runId) {
+      return runId === freshRun.runId ? freshRun : undefined;
+    },
+    async clearActiveIfMatches() {
+      clearCount++;
+      return true;
+    },
+    async markTerminal(runId, status) {
+      terminalMarks.push({ runId, status });
+      return { ...freshRun, status };
+    },
+  };
+  const registry = {
+    getThread() {
+      return { threadId: freshRun.threadId, status: "interrupted" };
+    },
+    listThreads() {
+      return [];
+    },
+    async patchThread() {},
+    async save() {},
+  };
+
+  const report = await reconcileRunControl({
+    store,
+    registry,
+    config: defaultConfig(),
+    apply: true,
+  });
+
+  assert.equal(report.issues.some((issue) => issue.code === "active-pointer-missing-run"), false);
+  assert.equal(report.issues.some((issue) => issue.code === "nonterminal-run-without-active-pointer"), false);
+  assert.equal(clearCount, 0);
+  assert.deepEqual(terminalMarks, []);
+});
+
 test("reconcile loop suppresses in-flight failures after stop", async () => {
   const config = defaultConfig();
   config.runControl.reconcileIntervalMs = 10;
