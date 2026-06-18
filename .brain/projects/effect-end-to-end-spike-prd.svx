@@ -1,0 +1,301 @@
+---
+title: "Effect End-to-End Spike PRD"
+type: "project"
+status: "active"
+created_at: "2026-06-18"
+tags:
+  - prd
+  - effect
+  - pi-discord-threads
+  - runtime
+  - spike
+---
+
+# Effect End-to-End Spike PRD
+
+## Decision
+
+Yes: we can spike Effect end-to-end and use **granular commit history as rollback** instead of building a bespoke kill switch first.
+
+The condition is discipline: every slice must be small, tested, and independently revertible. If a slice misbehaves live, rollback is `git revert <commit>` plus LaunchAgent restart, or config rollback when the change is only runtime config.
+
+This is a pragmatic spike, not a forever architecture declaration.
+
+## Problem
+
+`pi-discord-threads` has accumulated hand-rolled lifecycle code around Discord Gateway events, Pi runtime sessions, Redis run control, registry state, progress HUD updates, link ingest status, and startup/recovery behavior.
+
+The risky part is not TypeScript syntax. It is ownership of long-lived resources, queues, duplicate/active run coordination, finalization, shutdown, and recovery.
+
+We want Effect to become the reliability shell around those seams without pausing shipping for an overbuilt migration framework.
+
+## Desired outcome
+
+A thin but real end-to-end Effect runtime path:
+
+```text
+process entrypoint
+  -> Effect runtime/layers
+  -> config/secrets
+  -> registry
+  -> run queue / Redis
+  -> worker loop
+  -> Pi session execution
+  -> progress events
+  -> Discord adapter
+```
+
+Success means a real Discord prompt can flow through the Effect-backed path, finish normally, and leave enough logs/tests/commits to trust the next slice.
+
+## Non-goals
+
+- No wholesale rewrite of every Discord handler.
+- No new bespoke kill switch unless live pain proves we need it.
+- No replacement of Discord.js, Pi SDK, Redis, or Inngest.
+- No Effect workflow engine fantasy. Inngest stays the durable background workflow plane.
+- No giant `Engine` class.
+- No hiding untyped external payloads behind `unknown` soup.
+
+## Source receipts
+
+- Runtime architecture note: `.brain/resources/pi-discord-runtime-architecture-options-2026-06-17.svx`
+- Current Effect v4 source posture: `.agent_sources/github.com/Effect-TS/effect`, v4 beta source from `effect-smol`, `effect@4.0.0-beta.84`
+- Live main merge commit: `4a36874 feat: land Effect engine runtime`
+- Prior feature commits:
+  - `c40c9db feat: add Effect registry service layer`
+  - `6e08bf9 feat: wrap run queue with Effect service`
+  - `65e3d56 feat: route run queue through Effect runtime`
+- Current live cutover evidence from operator check:
+  - LaunchAgent PID `80612`
+  - `runControl: enabled`
+  - `runControl Redis: PONG`
+  - daemon log: `run-control worker flagg.localdomain-80612 listening for Redis jobs`
+- Existing Effect files:
+  - `src/engine/domain.ts`
+  - `src/engine/services.ts`
+  - `src/engine/layers.ts`
+  - `src/engine/runtime.ts`
+  - `src/engine/index.ts`
+- Existing tests:
+  - `scripts/effect-engine-layer-regression.test.mjs`
+  - `scripts/run-queue-service-regression.test.mjs`
+  - `scripts/thread-run-state-regression.test.mjs`
+  - `scripts/recovery-prompt-regression.test.mjs`
+
+## Operator workflows
+
+### Normal Discord prompt
+
+1. Joel sends a Discord prompt.
+2. Bridge registers/looks up the thread.
+3. Prompt becomes a queued run through the Effect-backed run queue port.
+4. Worker claims the Redis job.
+5. Pi runtime executes the prompt.
+6. Progress and final response update Discord.
+7. Registry and run queue end in terminal state.
+
+### Interrupted/restart prompt
+
+1. Bridge restarts mid-run.
+2. Run queue/registry reconcile marks or preserves state according to startup recovery config.
+3. No duplicate active run eats future prompts.
+4. A fresh prompt either queues to active work or starts a new run with visible status.
+
+### Rollback
+
+Rollback is intentionally boring:
+
+```sh
+cd /Users/joel/Code/joelhooks/pi-discord-threads
+git revert <bad-commit>
+npm install
+npm run build
+launchctl kickstart -k gui/501/com.joelhooks.pi-discord-threads
+```
+
+Config-only rollback for the current run-control cutover:
+
+```sh
+cp /Users/joel/.config/pi-discord-threads/config.json.effect-cutover.20260618T045914Z.bak \
+  /Users/joel/.config/pi-discord-threads/config.json
+launchctl kickstart -k gui/501/com.joelhooks.pi-discord-threads
+```
+
+## Implementation shape
+
+### Commit discipline
+
+Each commit should be one reversible seam:
+
+1. Add/adjust service interface.
+2. Add live adapter/layer.
+3. Add Promise runtime bridge if needed.
+4. Route one existing edge through the bridge.
+5. Add regression/smoke evidence.
+6. Update Brain receipt.
+
+No commit should mix unrelated cleanup with runtime cutover.
+
+### Pragmatic test harness
+
+Prefer a small harness over a kill switch:
+
+- use temp `runControl.keyPrefix`
+- use local Redis
+- use fake Discord adapter or no Discord when testing queue/worker semantics
+- run the Effect runtime end-to-end enough to prove acquire/release, enqueue/claim/ack/finalize, and terminal state
+- keep it executable via npm script so it becomes the receipt for each slice
+
+Candidate script:
+
+```txt
+scripts/effect-runtime-smoke.test.mjs
+```
+
+Candidate npm script:
+
+```txt
+test:effect-runtime-smoke
+```
+
+### End-to-end spike slices
+
+#### Slice 1: Runtime receipts
+
+Make live state obvious.
+
+- Log when `RunQueueRuntimeClient` warms.
+- `doctor` prints `runQueueEngine: effect-managed` when run control is enabled.
+- Include worker id and Redis health.
+
+Validation:
+
+- `npm run typecheck`
+- `npm run build`
+- `node dist/index.js doctor --config ~/.config/pi-discord-threads/config.json`
+
+#### Slice 2: Effect runtime smoke harness
+
+Add temp-prefix Redis smoke coverage.
+
+Prove:
+
+- runtime warms
+- synthetic run enqueues
+- worker claim/dequeue path sees it
+- ack/terminal update works
+- runtime closes without leaking Redis handles
+
+Validation:
+
+- `npm run test:effect-runtime-smoke`
+- existing run queue tests still pass
+
+#### Slice 3: Registry runtime client live path
+
+Move live `Registry` construction in `src/index.ts` behind an Effect-backed runtime client, similar to run queue.
+
+Preserve `Registry` as the current storage adapter. Do not swap to Postgres yet.
+
+Validation:
+
+- registry service tests
+- startup/doctor works
+- Discord prompt smoke
+
+#### Slice 4: ProgressEventBus seam
+
+Extract progress/HUD/run events into a domain event bus with Discord as a subscriber.
+
+Goal: stop spreading status updates across runtime manager, run-control worker, and Discord placeholder logic.
+
+Validation:
+
+- final response still posts
+- progress placeholder still updates
+- run queue events still append
+
+#### Slice 5: PiSessionService seam
+
+Wrap `PiRuntimeManager` prompt/abort/compact/reload behavior behind a service boundary.
+
+Do not rewrite the Pi SDK. Treat it as the adapter.
+
+Validation:
+
+- prompt success
+- active-run queueing
+- abort/reload/compact existing tests
+
+#### Slice 6: AppRuntime / Layer launch
+
+Only after the above seams are proven:
+
+- compose config, registry, run queue, worker, progress, Discord adapter
+- one process startup path
+- one shutdown path
+- long-lived resources owned by layer scope
+
+Validation:
+
+- LaunchAgent restart
+- clean SIGTERM drain
+- no hanging handles in smoke harness
+
+## Decisions already made
+
+- Effect v4 beta is accepted for this spike.
+- Discord.js remains the edge adapter.
+- Redis run-control is live and Effect-backed today.
+- Commit history/config backup are sufficient rollback for now.
+- Kill switch is deferred until live pain says otherwise.
+- Strangler migration remains the shape, but the spike can go end-to-end through thin seams.
+
+## Open questions
+
+### Should the smoke harness use real Pi runtime?
+
+Recommendation: not at first. Start with queue/worker state and fake execution. Add a real Pi prompt smoke later because real Pi execution is slower and more failure-prone.
+
+### Should Registry move to Effect runtime before PiSessionService?
+
+Recommendation: yes. Registry is smaller and already has an Effect service. It is the cleaner next live seam.
+
+### Should we add Postgres now?
+
+Recommendation: no. That is a storage migration. Finish the Effect service seam first, then swap adapters later.
+
+### Should we convert Discord handlers to `Effect.gen` now?
+
+Recommendation: no. Keep handlers as Promise adapters until services are stable. Rewrite handler internals only where it removes real lifecycle duplication.
+
+## Validation plan
+
+Every spike slice should run at least:
+
+```sh
+npm run typecheck
+npm run build
+npm run test:engine-layer
+npm run test:run-queue-service
+npm run test:thread-run-state
+npm run test:recovery-prompt
+npm run brain:check
+```
+
+Add slice-specific smoke commands as they exist.
+
+For live cutovers:
+
+```sh
+node dist/index.js doctor --config /Users/joel/.config/pi-discord-threads/config.json
+launchctl print gui/501/com.joelhooks.pi-discord-threads | rg 'state =|pid =|last exit code'
+tail -80 /Users/joel/.local/share/pi-discord-threads/daemon.log
+tail -80 /Users/joel/.local/share/pi-discord-threads/daemon.err.log
+```
+
+## Tracker mirror plan
+
+Do not publish tracker issues yet. The Brain PRD is enough until Slice 1 and Slice 2 harden the live spike surface.
+
+If mirrored later, create one issue per slice above, dependency ordered.
