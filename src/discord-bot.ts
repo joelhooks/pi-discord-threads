@@ -1971,7 +1971,7 @@ async function queueIfActive(
       pendingMessageCount: await options.runControlStore.countInputsForRun(record.threadId, activeRunId).catch(() => undefined),
     };
   }
-  return options.runtimeManager.queueMessageDuringActive(record.threadId, intent.text, intent.mode, images);
+  return options.runtimeManager.queueMessageForThreadIfActive(record, intent.text, intent.mode, images);
 }
 
 async function queueIfActiveForInteraction(
@@ -2163,6 +2163,15 @@ async function runPromptWithPlaceholder(
     const result = await options.runtimeManager.enqueuePrompt(record, prompt, images, progress.update);
     await stopProgress();
     stopTyping();
+    if (result.kind === "queued") {
+      await options.registry.patchThread(record.threadId, {
+        status: record.status,
+        activeRun: record.activeRun,
+        sessionFile: result.sessionFile ?? record.sessionFile,
+      }).catch(() => undefined);
+      await placeholder.delete().catch(() => placeholder.edit(buildQueuedPayload(result.mode, result.pendingMessageCount ?? 0)).then(() => undefined).catch(() => undefined));
+      return;
+    }
     await options.registry.recordMessageEntry(sourceDiscordId, result.userEntryId);
 
     const chunks = chunkForDiscord(result.text, options.config.render.maxDiscordChars);
@@ -2285,6 +2294,9 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
         const result = await options.runtimeManager.enqueuePrompt(record, run.prompt, run.images ?? [], combinedProgress);
         await stopProgress();
         stopTyping();
+        if (result.kind === "queued") {
+          throw new Error("Run-control worker prompt was queued into an already-active Pi session instead of producing a final answer");
+        }
         await options.registry.recordMessageEntry(run.sourceDiscordMessageId, result.userEntryId);
         return result;
       } catch (error) {

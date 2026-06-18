@@ -18,6 +18,18 @@ Effect is a good fit for reliability-heavy daemon seams: process lifecycle, Disc
 
 Recommendation: do not rewrite the bridge wholesale. If the tool keeps growing, adopt Effect at the edge-to-core seams first: `run-control`, `link-ingest-status-bridge`, `SecretResolver`/config, and `PiRuntimeManager` lifecycle. Keep Discord handlers thin and keep simple pure functions plain TypeScript.
 
+## Thread run lifecycle
+
+2026-06-18: `discord-bot.ts` was already too large to keep absorbing run lifecycle rules. Put finite run-state decisions in `src/thread-run-state.ts` using XState v5, then let Discord code route/render and Pi runtime execute.
+
+Current boundary:
+
+- `src/thread-run-state.ts`: state machine and prompt-start/queue decisions.
+- `src/pi-runtime.ts`: detects live Pi runtime/session state and queues into active sessions instead of starting duplicate turns.
+- `src/discord-bot.ts`: creates/updates Discord messages, records registry metadata, and reacts to completed vs queued runtime results.
+
+Rule: new lifecycle states/transitions belong in `thread-run-state.ts` first. Do not keep adding scattered `status`/`activeRun` conditionals to `discord-bot.ts`.
+
 ## pi-notes boundary
 
 pi-notes renders `.brain/**/*.svx`, auto-imports standard and project-local Brain components, and can route browser Review Batches back to the spawning Pi session when opened through Pi.

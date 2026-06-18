@@ -14,17 +14,28 @@ import type { AppConfig } from "./config.js";
 import { DISCORD_SYSTEM_PROMPT } from "./discord-system-prompt.js";
 import type { Registry, ThreadRecord } from "./registry.js";
 import type { RunFeedEvent } from "./run-hud.js";
+import { decideRuntimePromptDisposition } from "./thread-run-state.js";
 
 interface ManagedRuntime {
   runtime: AgentSessionRuntime;
   disposeTimer?: NodeJS.Timeout;
 }
 
-export interface PromptResult {
+export type PromptResult = PromptCompletedResult | PromptQueuedResult;
+
+export interface PromptCompletedResult {
+  kind: "completed";
   text: string;
   sessionFile: string | undefined;
   userEntryId?: string;
   assistantEntryId?: string;
+}
+
+export interface PromptQueuedResult {
+  kind: "queued";
+  mode: "steer" | "followUp";
+  pendingMessageCount?: number;
+  sessionFile: string | undefined;
 }
 
 export interface QueueMessageResult {
@@ -80,20 +91,19 @@ export class PiRuntimeManager {
 
   async queueMessageDuringActive(threadId: string, text: string, mode: "steer" | "followUp" = "steer", images: InlineImageContent[] = []): Promise<QueueMessageResult> {
     const managed = this.runtimes.get(threadId);
-    const session = managed?.runtime.session;
-    if (!session?.isStreaming) return { queued: false };
+    if (!managed) return { queued: false };
+    return this.queueMessageOnSession(managed.runtime.session, text, mode, images);
+  }
 
-    if (mode === "followUp") {
-      await session.followUp(text, images);
-    } else {
-      await session.steer(text, images);
-    }
+  async queueMessageForThreadIfActive(thread: ThreadRecord, text: string, mode: "steer" | "followUp" = "steer", images: InlineImageContent[] = []): Promise<QueueMessageResult> {
+    const existing = this.runtimes.get(thread.threadId);
+    if (existing) return this.queueMessageOnSession(existing.runtime.session, text, mode, images);
 
-    return {
-      queued: true,
-      mode,
-      pendingMessageCount: session.pendingMessageCount,
-    };
+    if (!thread.sessionFile) return { queued: false };
+    const managed = await this.getOrCreateRuntime(thread);
+    const result = await this.queueMessageOnSession(managed.runtime.session, text, mode, images);
+    if (!result.queued) this.scheduleDispose(thread.threadId, managed);
+    return result;
   }
 
   async enqueueReload(thread: ThreadRecord, onProgress?: PromptProgressHandler): Promise<void> {
@@ -217,6 +227,37 @@ export class PiRuntimeManager {
     const beforeCount = session.sessionManager.getEntries().length;
     const beforeAssistantCount = countAssistantMessages(session.messages);
     let assistantText = "";
+
+    const disposition = decideRuntimePromptDisposition({
+      registryStatus: thread.status,
+      hasRegistryActiveRun: Boolean(thread.activeRun),
+      runtimeStreaming: session.isStreaming,
+      requestedMode: "followUp",
+    });
+    if (disposition.kind === "queue") {
+      const queued = await this.queueMessageOnSession(session, text, disposition.mode, images);
+      if (queued.queued) {
+        this.publishProgress(onProgress, {
+          phase: "thinking",
+          title: "Queued follow-up",
+          detail: "Pi is already processing this session; Discord input was queued instead of starting a duplicate run",
+          sessionFile: session.sessionFile,
+          feedEvent: {
+            type: "queue_update",
+            title: "Queued follow-up",
+            detail: "Pi is already processing this session; Discord input was queued instead of starting a duplicate run",
+            data: { followUp: [text], steering: [] },
+          },
+        });
+        this.scheduleDispose(thread.threadId, managed);
+        return {
+          kind: "queued",
+          mode: queued.mode ?? disposition.mode,
+          pendingMessageCount: queued.pendingMessageCount,
+          sessionFile: session.sessionFile,
+        };
+      }
+    }
 
     this.publishProgress(onProgress, {
       phase: "thinking",
@@ -521,10 +562,32 @@ export class PiRuntimeManager {
     });
 
     return {
+      kind: "completed",
       text: finalText,
       sessionFile,
       userEntryId: entryIds.userEntryId,
       assistantEntryId: entryIds.assistantEntryId,
+    };
+  }
+
+  private async queueMessageOnSession(
+    session: AgentSessionRuntime["session"],
+    text: string,
+    mode: "steer" | "followUp",
+    images: InlineImageContent[] = [],
+  ): Promise<QueueMessageResult> {
+    if (!session.isStreaming) return { queued: false };
+
+    if (mode === "followUp") {
+      await session.followUp(text, images);
+    } else {
+      await session.steer(text, images);
+    }
+
+    return {
+      queued: true,
+      mode,
+      pendingMessageCount: session.pendingMessageCount,
     };
   }
 
