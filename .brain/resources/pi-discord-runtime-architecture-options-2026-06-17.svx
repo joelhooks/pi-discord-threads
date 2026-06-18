@@ -171,3 +171,30 @@ Final-product assertions:
 6. State-machine tests cover run transitions: queued -> running -> finalizing -> succeeded/failed/interrupted, plus duplicate finalization and stale active-pointer cleanup.
 7. Adapter swap test proves JSON registry can be replaced by a fake/Postgres adapter without touching Discord handlers or Pi prompt execution.
 8. `npm test` or the chosen test command includes Effect-based unit tests for services and integration tests for the Redis worker using test doubles or a disposable local Redis.
+
+## 2026-06-18 implementation slice
+
+Branch/worktree: `effect-v4-engine-layer` at `../pi-discord-threads-effect-v4-engine`.
+
+Implemented first safe vertical slice:
+
+- Pinned `effect@4.0.0-beta.84`.
+- Added `src/engine/domain.ts` with branded IDs and tagged registry errors.
+- Added `src/engine/services.ts` with v4 `Context.Service` definitions for app config and registry access.
+- Added `src/engine/layers.ts` with `Layer.effect` JSON registry adapter, scoped finalizer, and `RegistryEngineLive(config)` composition.
+- Added `scripts/effect-engine-layer-regression.test.mjs` proving persistence through the live layer and storage swap through `Layer.mock`.
+
+Validation receipts:
+
+- `npm run typecheck` passed.
+- `npm run build` passed.
+- `npm run test:engine-layer` passed: 2 tests.
+- `npm run test:thread-run-state` passed: 4 tests.
+- `npm run test:recovery-prompt` passed: 2 tests.
+
+Deferred intentionally:
+
+- No `AppRuntime` / `Layer.launch` daemon rewrite yet.
+- No Discord handler rewrite.
+- No Redis worker layer yet.
+- Full repo `exactOptionalPropertyTypes` / `noUncheckedIndexedAccess` currently exposes many pre-existing optional-field issues; do that as a separate hardening slice.

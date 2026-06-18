@@ -11,7 +11,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:recovery-prompt": "npm run build && node --test scripts/recovery-prompt-regression.test.mjs",
     "test:thread-run-state": "npm run build && node --test scripts/thread-run-state-regression.test.mjs",
-    "test:registry-lifecycle": "npm run build && node --test scripts/registry-lifecycle-regression.test.mjs",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "render-system-prompt": "npm run build && node scripts/render-system-prompt.mjs",
@@ -19,11 +18,13 @@
     "smoke:capture": "tsx scripts/link-ingest-capture-smoke.ts",
     "smoke:link-ingest-live-discord": "tsx scripts/link-ingest-live-discord-smoke.ts",
     "smoke:recovery-live": "npm run build && tsx scripts/recovery-live-smoke.ts",
-    "brain:check": "pi-notes brain check"
+    "brain:check": "pi-notes brain check",
+    "test:engine-layer": "npm run build && node --test scripts/effect-engine-layer-regression.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.78.1",
     "discord.js": "^14.18.0",
+    "effect": "4.0.0-beta.84",
     "inngest": "^4.4.0",
     "redis": "^5.12.1",
     "typebox": "^1.1.38",
