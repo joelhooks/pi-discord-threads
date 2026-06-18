@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createActor } from "xstate";
-import { decideRuntimePromptDisposition, hasVisibleActiveRun, threadRunMachine } from "../dist/thread-run-state.js";
+import { decideRuntimePromptDisposition, hasVisibleActiveRun, isAssistantLeafContinueError, threadRunMachine } from "../dist/thread-run-state.js";
 
 test("running thread prompt queues follow-up instead of starting duplicate run", () => {
   const actor = createActor(threadRunMachine).start();
@@ -40,4 +40,9 @@ test("visible active run requires running status and activeRun metadata", () => 
   assert.equal(hasVisibleActiveRun({ registryStatus: "running", hasRegistryActiveRun: true }), true);
   assert.equal(hasVisibleActiveRun({ registryStatus: "idle", hasRegistryActiveRun: true }), false);
   assert.equal(hasVisibleActiveRun({ registryStatus: "interrupted", hasRegistryActiveRun: true }), false);
+});
+
+test("assistant leaf continuation guard is recognized for one-shot prompt retry", () => {
+  assert.equal(isAssistantLeafContinueError(new Error("Cannot continue from message role: assistant")), true);
+  assert.equal(isAssistantLeafContinueError(new Error("Agent is already processing")), false);
 });

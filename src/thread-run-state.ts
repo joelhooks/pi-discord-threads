@@ -112,3 +112,8 @@ export function decideRuntimePromptDisposition(input: {
   }
   return { kind: "start" };
 }
+
+export function isAssistantLeafContinueError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("Cannot continue from message role: assistant");
+}

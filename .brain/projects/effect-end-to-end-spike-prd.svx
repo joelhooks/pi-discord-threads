@@ -342,6 +342,19 @@ Validation:
 - `node dist/index.js doctor --config /Users/joel/.config/pi-discord-threads/config.json` showed `registryEngine: effect-managed` and `runQueueEngine: effect-managed`.
 - `node dist/index.js reconcile --config /Users/joel/.config/pi-discord-threads/config.json --dry-run` warmed both Effect runtimes and reported `issues: 0`.
 
+### 2026-06-18 Live follow-up: assistant-leaf compaction guard
+
+After the registry runtime cutover, a live Discord follow-up exposed a Pi session edge case: pre-prompt compaction can hit Pi's `Cannot continue from message role: assistant` guard before the new user message is submitted. The bridge now treats that exact guard as a one-shot retryable prompt handoff:
+
+- `src/thread-run-state.ts` adds `isAssistantLeafContinueError` for the narrow guard.
+- `src/pi-runtime.ts` retries the original prompt once after this pre-prompt compaction handoff and emits a retry progress event.
+- `scripts/thread-run-state-regression.test.mjs` covers guard detection so unrelated prompt errors still fail normally.
+
+Validation:
+
+- `npm run typecheck` passed.
+- `npm run test:thread-run-state` passed: 6 tests.
+
 ## Tracker mirror plan
 
 Do not publish tracker issues yet. The Brain PRD is enough until Slice 1 and Slice 2 harden the live spike surface.

@@ -14,7 +14,7 @@ import type { AppConfig } from "./config.js";
 import { DISCORD_SYSTEM_PROMPT } from "./discord-system-prompt.js";
 import type { RegistryPort, ThreadRecord } from "./registry.js";
 import type { RunFeedEvent } from "./run-hud.js";
-import { decideRuntimePromptDisposition, hasVisibleActiveRun } from "./thread-run-state.js";
+import { decideRuntimePromptDisposition, hasVisibleActiveRun, isAssistantLeafContinueError } from "./thread-run-state.js";
 
 interface ManagedRuntime {
   runtime: AgentSessionRuntime;
@@ -519,7 +519,7 @@ export class PiRuntimeManager {
     }
     await this.registry.patchThread(thread.threadId, runPatch);
     try {
-      await session.prompt(text, images.length > 0 ? { images } : undefined);
+      await this.promptWithAssistantLeafRecovery(session, text, images, onProgress);
     } finally {
       unsubscribe();
       this.scheduleDispose(thread.threadId, managed);
@@ -578,6 +578,36 @@ export class PiRuntimeManager {
       userEntryId: entryIds.userEntryId,
       assistantEntryId: entryIds.assistantEntryId,
     };
+  }
+
+  private async promptWithAssistantLeafRecovery(
+    session: AgentSessionRuntime["session"],
+    text: string,
+    images: InlineImageContent[],
+    onProgress?: PromptProgressHandler,
+  ): Promise<void> {
+    const options = images.length > 0 ? { images } : undefined;
+    try {
+      await session.prompt(text, options);
+      return;
+    } catch (error) {
+      if (!isAssistantLeafContinueError(error)) throw error;
+      this.publishProgress(onProgress, {
+        phase: "retry",
+        title: "Retrying prompt after compaction handoff",
+        detail: "Pi compacted before this turn and hit an assistant-leaf continuation guard; retrying the original user prompt once.",
+        sessionFile: session.sessionFile,
+        feedEvent: {
+          type: "auto_retry_start",
+          title: "Retrying prompt after compaction handoff",
+          detail: "Pi compacted before this turn and hit an assistant-leaf continuation guard; retrying the original user prompt once.",
+          phase: "retry",
+          data: { reason: "assistant_leaf_continue_after_compaction" },
+        },
+      });
+      console.warn("retrying Pi prompt after assistant-leaf continuation guard during pre-prompt compaction");
+      await session.prompt(text, options);
+    }
   }
 
   private async queueMessageOnSession(
