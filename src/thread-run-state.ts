@@ -117,3 +117,8 @@ export function isAssistantLeafContinueError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("Cannot continue from message role: assistant");
 }
+
+export function isAlreadyProcessingError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("Agent is already processing") && message.includes("streamingBehavior");
+}

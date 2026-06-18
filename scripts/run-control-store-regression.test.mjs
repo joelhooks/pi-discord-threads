@@ -42,6 +42,7 @@ class FakeRedis {
       this.streams.push({ key: args[1], id, args });
       return id;
     }
+    if (command === "XAUTOCLAIM") return ["0-0", []];
     throw new Error(`unexpected command: ${args.join(" ")}`);
   }
 
@@ -215,4 +216,19 @@ test("tryEnqueueRun clears stale terminal active pointer and retries", async () 
   assert.deepEqual(result, { enqueued: true, run: next });
   assert.equal(fake.strings.get("pi-discord-threads:thread:thread-1:active"), "run-next");
   assert.equal(fake.hashes.get("pi-discord-threads:runs:run-next").get("status"), "queued");
+});
+
+test("claimStaleJob reclaims after the worker lease TTL instead of the broader stale run window", async () => {
+  const fake = new FakeRedis();
+  const config = defaultConfig();
+  config.runControl.enabled = true;
+  config.runControl.leaseTtlMs = 12_345;
+  config.runControl.staleRunMs = 999_999;
+  const store = new RunControlStore(fake, config);
+
+  await store.claimStaleJob("worker-1");
+
+  const command = fake.commands.find((args) => args[0] === "XAUTOCLAIM");
+  assert.ok(command, "expected XAUTOCLAIM command");
+  assert.equal(command[4], "12345");
 });

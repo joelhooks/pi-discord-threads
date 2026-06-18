@@ -15,7 +15,7 @@ import { DISCORD_SYSTEM_PROMPT } from "./discord-system-prompt.js";
 import type { PromptProgress, PromptProgressHandler } from "./progress-events.js";
 import { publishProgressSafely } from "./progress-events.js";
 import type { RegistryPort, ThreadRecord } from "./registry.js";
-import { decideRuntimePromptDisposition, hasVisibleActiveRun, isAssistantLeafContinueError } from "./thread-run-state.js";
+import { decideRuntimePromptDisposition, hasVisibleActiveRun, isAlreadyProcessingError, isAssistantLeafContinueError } from "./thread-run-state.js";
 
 export type { PromptProgress, PromptProgressHandler } from "./progress-events.js";
 
@@ -586,26 +586,69 @@ export class PiRuntimeManager implements PiRuntimePort {
     onProgress?: PromptProgressHandler,
   ): Promise<void> {
     const options = images.length > 0 ? { images } : undefined;
-    try {
-      await session.prompt(text, options);
-      return;
-    } catch (error) {
-      if (!isAssistantLeafContinueError(error)) throw error;
-      this.publishProgress(onProgress, {
-        phase: "retry",
-        title: "Retrying prompt after compaction handoff",
-        detail: "Pi compacted before this turn and hit an assistant-leaf continuation guard; retrying the original user prompt once.",
-        sessionFile: session.sessionFile,
-        feedEvent: {
-          type: "auto_retry_start",
-          title: "Retrying prompt after compaction handoff",
-          detail: "Pi compacted before this turn and hit an assistant-leaf continuation guard; retrying the original user prompt once.",
-          phase: "retry",
-          data: { reason: "assistant_leaf_continue_after_compaction" },
-        },
-      });
-      console.warn("retrying Pi prompt after assistant-leaf continuation guard during pre-prompt compaction");
-      await session.prompt(text, options);
+    let recoveredAssistantLeaf = false;
+    let recoveredAlreadyProcessing = false;
+
+    while (true) {
+      try {
+        await session.prompt(text, options);
+        return;
+      } catch (error) {
+        if (isAssistantLeafContinueError(error) && !recoveredAssistantLeaf) {
+          recoveredAssistantLeaf = true;
+          this.publishProgress(onProgress, {
+            phase: "retry",
+            title: "Retrying prompt after compaction handoff",
+            detail: "Pi compacted before this turn and hit an assistant-leaf continuation guard; retrying the original user prompt once.",
+            sessionFile: session.sessionFile,
+            feedEvent: {
+              type: "auto_retry_start",
+              title: "Retrying prompt after compaction handoff",
+              detail: "Pi compacted before this turn and hit an assistant-leaf continuation guard; retrying the original user prompt once.",
+              phase: "retry",
+              data: { reason: "assistant_leaf_continue_after_compaction" },
+            },
+          });
+          console.warn("retrying Pi prompt after assistant-leaf continuation guard during pre-prompt compaction");
+          await this.resetStaleSessionBeforePromptRetry(session, "assistant-leaf recovery");
+          continue;
+        }
+
+        if (isAlreadyProcessingError(error) && !recoveredAlreadyProcessing) {
+          recoveredAlreadyProcessing = true;
+          this.publishProgress(onProgress, {
+            phase: "retry",
+            title: "Retrying prompt after stale streaming guard",
+            detail: "Pi reported an already-processing turn after the bridge had the thread lock; aborting stale runtime state and retrying once.",
+            sessionFile: session.sessionFile,
+            feedEvent: {
+              type: "auto_retry_start",
+              title: "Retrying prompt after stale streaming guard",
+              detail: "Pi reported an already-processing turn after the bridge had the thread lock; aborting stale runtime state and retrying once.",
+              phase: "retry",
+              data: { reason: "stale_already_processing_before_prompt" },
+            },
+          });
+          console.warn("retrying Pi prompt after stale already-processing guard");
+          await this.resetStaleSessionBeforePromptRetry(session, "already-processing recovery");
+          continue;
+        }
+
+        throw error;
+      }
+    }
+  }
+
+  private async resetStaleSessionBeforePromptRetry(
+    session: AgentSessionRuntime["session"],
+    reason: string,
+  ): Promise<void> {
+    if (session.isStreaming) {
+      console.warn(`${reason} left Pi session streaming; aborting stale run before retry`);
+      await session.abort().catch(() => undefined);
+    }
+    if (repairDanglingAssistantLeaf(session.sessionManager)) {
+      session.agent.state.messages = session.sessionManager.buildSessionContext().messages;
     }
   }
 
@@ -694,11 +737,13 @@ export class PiRuntimeManager implements PiRuntimePort {
     const next = previous
       .catch(() => undefined)
       .then(operation);
-    const queued = next.finally(() => {
-      if (this.queues.get(threadId) === queued) {
-        this.queues.delete(threadId);
-      }
-    });
+    const queued = next
+      .finally(() => {
+        if (this.queues.get(threadId) === queued) {
+          this.queues.delete(threadId);
+        }
+      })
+      .catch(() => undefined);
     this.queues.set(threadId, queued);
     return next;
   }

@@ -197,12 +197,13 @@ export class RunControlStore {
   }
 
   async claimStaleJob(workerId: string): Promise<RunJob | undefined> {
+    const reclaimIdleMs = Math.max(1, this.config.runControl.leaseTtlMs);
     const reply = await this.command([
       "XAUTOCLAIM",
       this.keys.jobs,
       WORKER_GROUP,
       workerId,
-      String(this.config.runControl.staleRunMs),
+      String(reclaimIdleMs),
       "0-0",
       "COUNT",
       "1",
