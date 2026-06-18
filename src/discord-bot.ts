@@ -4,8 +4,6 @@ import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import {
   ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
   ChannelType,
   Client,
   EmbedBuilder,
@@ -33,7 +31,7 @@ import { DefaultResourceLoader, getAgentDir, SessionManager } from "@earendil-wo
 import { appendAttachmentContext, type InlineImageContent } from "./attachments.js";
 import type { AppConfig, RunControlRole } from "./config.js";
 import type { PiRuntimePort } from "./pi-runtime.js";
-import { createProgressEventBus, type PromptProgress } from "./progress-events.js";
+import { createProgressEventBus } from "./progress-events.js";
 import type { ActiveRunRecord, LinkIngestRecord, RegistryPort, ThreadRecord, ThreadTitleState } from "./registry.js";
 import {
   listWorkspaces,
@@ -47,7 +45,19 @@ import {
 import { applicationCommands, askPiMessageCommandName } from "./discord-commands.js";
 import { DISCORD_SYSTEM_PROMPT_URL } from "./discord-system-prompt.js";
 import { chunkForDiscord, stripBotMention, stripCommandPrefix, summarizeForThreadName } from "./render.js";
-import { fallbackHudFrame, RunHudNarrator, type RunHudFrame } from "./run-hud.js";
+import { DiscordMessageRenderer } from "./discord/message-renderer.js";
+import { createProgressHudController, type ProgressHudSnapshot } from "./discord/progress-hud-machine.js";
+import {
+  buildArchivedHudPayload,
+  buildErrorPayload,
+  buildFinalizingBusyPayload,
+  buildInterruptedRunPayload,
+  buildQueuedPayload,
+  buildQueuedRunPayload,
+  buildWorkingPayload,
+  formatQueuedText,
+  type RichPayload,
+} from "./discord/payloads.js";
 import { evaluateThreadTitle, normalizeTitle } from "./thread-title-evaluator.js";
 import type { QueuedRunInput, RunControlExecutionResult, RunControlStorePort, RunRecord } from "./run-control/types.js";
 import { RunControlWorker, type RunControlWorkerAdapter } from "./run-control/worker.js";
@@ -296,7 +306,7 @@ async function autoResumeInterruptedThreads(client: Client, options: RunBotOptio
       if (persistedFinal) {
         const chunks = chunkForDiscord(persistedFinal.text, options.config.render.maxDiscordChars);
         await sendFinalResponseMessages(thread, record, options.registry, chunks, persistedFinal.entryId);
-        await retireWorkingPlaceholder(placeholder, record);
+        await archiveWorkingHud(placeholder, record);
         await options.registry.patchThread(record.threadId, { status: "idle", activeRun: undefined }).catch(() => undefined);
         reconciled++;
         continue;
@@ -363,7 +373,7 @@ async function reconcileInterruptedThreadPlaceholders(client: Client, options: R
       if (persistedFinal) {
         const chunks = chunkForDiscord(persistedFinal.text, options.config.render.maxDiscordChars);
         await sendFinalResponseMessages(thread, record, options.registry, chunks, persistedFinal.entryId);
-        await retireWorkingPlaceholder(placeholder, record);
+        await archiveWorkingHud(placeholder, record);
         await options.registry.patchThread(record.threadId, { status: "idle", activeRun: undefined }).catch(() => undefined);
         reconciled++;
         continue;
@@ -2162,6 +2172,7 @@ async function runPromptWithPlaceholder(
 
   let stopTyping: (() => void) | undefined;
   let stopProgress: (() => Promise<void>) | undefined;
+  let progressHudSnapshot: ProgressHudSnapshot | undefined;
 
   if (options.config.runControl.enabled && options.runControlStore) {
     await enqueueRunControlPrompt(channel, sourceDiscordId, placeholder, record, prompt, options, images);
@@ -2185,10 +2196,26 @@ async function runPromptWithPlaceholder(
     stopTyping = startTypingIndicator(channel);
     const thread = getThreadChannel(channel);
     if (thread) await maybeRenameThreadForPrompt(thread, record, prompt, options.registry);
-    const progress = createProgressUpdater(placeholder, runningRecord, prompt, options.config);
+    const renderer = new DiscordMessageRenderer(placeholder, {
+      onError(error) {
+        console.warn(`progress HUD edit failed for ${record.threadId}: ${error.message}`);
+      },
+    });
+    const progress = createProgressHudController({
+      renderer,
+      record: runningRecord,
+      prompt,
+      config: options.config,
+      warn(message) {
+        console.warn(message);
+      },
+    });
     const progressEvents = createProgressEventBus(progress.update);
-    stopProgress = progress.stop;
-    await placeholder.edit(buildWorkingPayload(runningRecord, prompt, {
+    stopProgress = async () => {
+      progressHudSnapshot = progress.snapshot();
+      await progress.stop();
+    };
+    await renderer.render(buildWorkingPayload(runningRecord, prompt, {
       phase: "starting",
       title: "Starting Pi session",
       detail: record.sessionFile ? "Rehydrating existing session" : "Creating a durable session",
@@ -2210,7 +2237,7 @@ async function runPromptWithPlaceholder(
 
     const chunks = chunkForDiscord(result.text, options.config.render.maxDiscordChars);
     await sendFinalResponseMessages(channel, record, options.registry, chunks, result.assistantEntryId);
-    await retireWorkingPlaceholder(placeholder, record);
+    await archiveWorkingHud(placeholder, record, progressHudSnapshot);
     const titleRecord = await recordCompletedTitleTurn(options.registry, record, prompt, result.text);
     void maybeEvaluateThreadTitle(channel, titleRecord, options).catch((error) => {
       const text = error instanceof Error ? error.message : String(error);
@@ -2298,6 +2325,7 @@ function buildRunControlRecord(
 }
 
 function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): RunControlWorkerAdapter {
+  const hudSnapshots = new Map<string, ProgressHudSnapshot>();
   return {
     async executeRun(run, progressEvents) {
       const record = options.registry.getThread(run.threadId);
@@ -2322,10 +2350,26 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
           status: "running",
           activeRun: runningRecord.activeRun,
         }).catch(() => undefined);
-        const progress = createProgressUpdater(placeholder, runningRecord, run.prompt, options.config);
-        stopProgress = progress.stop;
+        const renderer = new DiscordMessageRenderer(placeholder, {
+          onError(error) {
+            console.warn(`progress HUD edit failed for ${run.runId}: ${error.message}`);
+          },
+        });
+        const progress = createProgressHudController({
+          renderer,
+          record: runningRecord,
+          prompt: run.prompt,
+          config: options.config,
+          warn(message) {
+            console.warn(message);
+          },
+        });
+        stopProgress = async () => {
+          hudSnapshots.set(run.runId, progress.snapshot());
+          await progress.stop();
+        };
         unsubscribeProgress = progressEvents.subscribe(progress.update);
-        await placeholder.edit(buildWorkingPayload(runningRecord, run.prompt, {
+        await renderer.render(buildWorkingPayload(runningRecord, run.prompt, {
           phase: "starting",
           title: "Worker claimed Redis run",
           detail: run.sessionFile ? "Rehydrating existing session" : "Creating a durable session",
@@ -2342,6 +2386,7 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
       } catch (error) {
         unsubscribeProgress?.();
         await stopProgress?.();
+        hudSnapshots.delete(run.runId);
         stopTyping?.();
         throw error;
       }
@@ -2351,9 +2396,11 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
       if (!record) throw new Error(`No registry record for run-control thread ${run.threadId}`);
       const channel = await resolvePromptChannel(client, record);
       const chunks = chunkForDiscord(result.text, options.config.render.maxDiscordChars);
+      const hudSnapshot = hudSnapshots.get(run.runId);
+      hudSnapshots.delete(run.runId);
       await sendFinalResponseMessages(channel, record, options.registry, chunks, result.assistantEntryId);
       const placeholder = await fetchPlaceholderMessage(channel, run.placeholderDiscordMessageId);
-      await retireWorkingPlaceholder(placeholder, record);
+      await archiveWorkingHud(placeholder, record, hudSnapshot);
       const idleRecord = await options.registry.patchThread(record.threadId, {
         status: "idle",
         activeRun: undefined,
@@ -2370,6 +2417,7 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
       if (!record) throw new Error(`No registry record for run-control thread ${run.threadId}`);
       const channel = await resolvePromptChannel(client, record);
       const placeholder = await fetchPlaceholderMessage(channel, run.placeholderDiscordMessageId);
+      hudSnapshots.delete(run.runId);
       await options.registry.patchThread(record.threadId, { status: "error", activeRun: undefined }).catch(() => undefined);
       await placeholder.edit(buildErrorPayload(record, error.message));
     },
@@ -2435,54 +2483,17 @@ async function sendFinalResponseMessages(
   }
 }
 
-async function retireWorkingPlaceholder(placeholder: Message, record: ThreadRecord): Promise<void> {
-  await placeholder.delete().catch(async () => {
-    await placeholder.edit(buildFinalPostedPayload(record)).catch(() => undefined);
+async function archiveWorkingHud(placeholder: Message, record: ThreadRecord, snapshot?: ProgressHudSnapshot): Promise<void> {
+  // Archive is best-effort after final text posts. Do not turn a posted final answer
+  // into a run-control failure just because Discord refused the terminal HUD edit;
+  // once activeRun clears, stale ESC clicks are still rejected by expectedMessageId.
+  const renderer = new DiscordMessageRenderer(placeholder, {
+    onError(error) {
+      console.warn(`failed to archive run HUD ${placeholder.id}: ${error.message}`);
+    },
   });
+  await renderer.deactivate(buildArchivedHudPayload(snapshot?.record ?? record, snapshot));
 }
-
-function buildFinalPostedPayload(record: ThreadRecord): RichPayload {
-  return buildHudCardPayload(record, {
-    tone: "done",
-    stateLabel: "done",
-    now: "Final answer posted below.",
-    progress: ["✓ Pi turn finished", "✓ Discord reply sent", "· placeholder retired"],
-    next: "Send the next message in this thread when you want to continue.",
-    footer: "ready for the next turn",
-    abortDisabled: true,
-  });
-}
-
-type RichPayload = {
-  content?: string;
-  embeds?: MessageCreateOptions["embeds"];
-  components?: MessageCreateOptions["components"];
-  flags?: MessageFlags.IsComponentsV2;
-};
-type DiscordTopLevelComponent = NonNullable<MessageCreateOptions["components"]>[number];
-
-type HudTone = "running" | "done" | "warning" | "error" | "interrupted";
-
-const DiscordComponentType = {
-  Button: 2,
-  Section: 9,
-  TextDisplay: 10,
-  Separator: 14,
-  Container: 17,
-} as const;
-
-const DiscordSeparatorSpacing = {
-  Small: 1,
-  Large: 2,
-} as const;
-
-const HUD_ACCENT: Record<HudTone, number> = {
-  running: 0x5865f2,
-  done: 0x57f287,
-  warning: 0xf0b232,
-  error: 0xed4245,
-  interrupted: 0xf0b232,
-};
 
 function buildThreadCreatedPayload(prompt: string): MessageCreateOptions {
   return {
@@ -2494,157 +2505,6 @@ function buildThreadCreatedPayload(prompt: string): MessageCreateOptions {
         .addFields({ name: "Prompt", value: truncateForEmbed(prompt, 900) })
         .setFooter({ text: "Pi skills are available normally, including /skill:name." }),
     ],
-  };
-}
-
-function buildWorkingPayload(record: ThreadRecord, _prompt: string, progress: PromptProgress): RichPayload {
-  return buildHudPayload(record, fallbackHudFrame(progress), progress.elapsedMs ?? 0, progress.isError);
-}
-
-function buildHudPayload(record: ThreadRecord, frame: RunHudFrame, _elapsedMs: number, isError = false): RichPayload {
-  const normalized = normalizeHudFrame(frame);
-  return buildHudCardPayload(record, {
-    tone: isError ? "error" : normalized.risk ? "warning" : "running",
-    stateLabel: isError ? "attention" : "active turn",
-    header: normalized.header,
-    now: normalized.now,
-    progress: normalized.progress,
-    signals: normalized.signals,
-    risk: normalized.risk,
-    next: normalized.next,
-    footer: "final answer posts as a fresh reply below",
-    expectedMessageId: record.activeRun?.placeholderDiscordMessageId,
-  });
-}
-
-function buildHudCardPayload(record: ThreadRecord, options: {
-  tone: HudTone;
-  stateLabel: string;
-  header?: string;
-  now: string;
-  progress: string[];
-  signals?: string;
-  risk?: string;
-  next?: string;
-  footer: string;
-  abortDisabled?: boolean;
-  expectedMessageId?: string;
-  inputText?: string | false;
-}): RichPayload {
-  const progress = fixedProgressRows(options.progress);
-  const title = truncateForComponent(hudTitle(record), 90);
-  const startedAt = hudStartedTimestamp(record);
-  const subtitle = [`${options.stateLabel}${startedAt ? ` · started <t:${startedAt}:R>` : ""}`];
-  if (record.workspaceName) subtitle.push(`workspace: ${record.workspaceName}`);
-  const nowLines = [
-    "**Now**",
-    truncateForComponent(options.now, 650),
-    options.signals ? `-# ${truncateForComponent(options.signals, 360)}` : undefined,
-  ].filter(Boolean) as string[];
-  const statusBlock = options.risk
-    ? `**Watch**\n${truncateForComponent(options.risk, 650)}`
-    : `**Next**\n${truncateForComponent(options.next ?? "continuing", 650)}`;
-
-  return {
-    content: "",
-    embeds: [],
-    flags: MessageFlags.IsComponentsV2,
-    components: [containerComponent(options.tone, [
-      sectionComponent(
-        [`### ${title}`, `-# ${subtitle.join(" · ")}`].join("\n"),
-        escButtonComponent(record.threadId, {
-          abortDisabled: options.abortDisabled,
-          expectedMessageId: options.expectedMessageId,
-        }),
-      ),
-      separatorComponent(),
-      textDisplayComponent(nowLines.join("\n")),
-      textDisplayComponent(["**Progress**", ...progress.map((item) => truncateForComponent(item, 260))].join("\n")),
-      textDisplayComponent(statusBlock),
-      ...(options.inputText === false ? [] : [textDisplayComponent(options.inputText ?? "**Input**\nSend a message to steer this turn.\nPrefix with `follow-up:` to queue after the current turn.")]),
-      textDisplayComponent(`-# ${truncateForComponent(options.footer, 280)}`),
-    ])],
-  };
-}
-
-function hudTitle(record: ThreadRecord): string {
-  const sessionName = record.sessionName?.trim();
-  if (sessionName && !/^Discord \d+$/i.test(sessionName)) return sessionName;
-  return record.workspaceName?.trim() || "Pi turn";
-}
-
-function hudStartedTimestamp(record: ThreadRecord): number | undefined {
-  const startedAt = record.activeRun?.startedAt ?? record.updatedAt;
-  const millis = Date.parse(startedAt);
-  if (!Number.isFinite(millis)) return undefined;
-  return Math.floor(millis / 1000);
-}
-
-function fixedProgressRows(progress: string[]): string[] {
-  const rows = progress.slice(0, 3).map((item) => item.trim()).filter(Boolean);
-  while (rows.length < 3) rows.push("·");
-  return rows;
-}
-
-function containerComponent(tone: HudTone, components: DiscordTopLevelComponent[]): DiscordTopLevelComponent {
-  return {
-    type: DiscordComponentType.Container,
-    accent_color: HUD_ACCENT[tone],
-    components,
-  } as DiscordTopLevelComponent;
-}
-
-function sectionComponent(content: string, accessory: ReturnType<typeof escButtonComponent>): DiscordTopLevelComponent {
-  return {
-    type: DiscordComponentType.Section,
-    components: [textDisplayComponent(content)],
-    accessory,
-  } as DiscordTopLevelComponent;
-}
-
-function textDisplayComponent(content: string): DiscordTopLevelComponent {
-  return {
-    type: DiscordComponentType.TextDisplay,
-    content: truncateForComponent(content, 3_800),
-  } as DiscordTopLevelComponent;
-}
-
-function separatorComponent(): DiscordTopLevelComponent {
-  return {
-    type: DiscordComponentType.Separator,
-    divider: true,
-    spacing: DiscordSeparatorSpacing.Small,
-  } as DiscordTopLevelComponent;
-}
-
-function escButtonComponent(threadId: string, options: { abortDisabled?: boolean; expectedMessageId?: string } = {}) {
-  const disabled = options.abortDisabled === true || !options.expectedMessageId;
-  return {
-    type: DiscordComponentType.Button,
-    custom_id: options.expectedMessageId ? `pi:abort:${threadId}|${options.expectedMessageId}` : `pi:abort:${threadId}`,
-    label: "ESC",
-    style: ButtonStyle.Danger,
-    disabled,
-  };
-}
-
-function truncateForComponent(value: string, maxChars: number): string {
-  const clean = value.trim() || "-";
-  if (clean.length <= maxChars) return clean;
-  return `${clean.slice(0, Math.max(0, maxChars - 1))}…`;
-}
-
-function normalizeHudFrame(frame: RunHudFrame): RunHudFrame {
-  const progress = Array.isArray(frame.progress)
-    ? frame.progress.map((item) => String(item).trim()).filter(Boolean).slice(0, 3)
-    : [];
-  return {
-    header: String(frame.header || "Pi is working").trim() || "Pi is working",
-    now: String(frame.now || "working through the task").trim() || "working through the task",
-    progress: progress.length > 0 ? progress : ["→ working"],
-    signals: frame.signals ? String(frame.signals).trim() : undefined,
-    risk: frame.risk ? String(frame.risk).trim() : undefined,
-    next: frame.next ? String(frame.next).trim() : undefined,
   };
 }
 
@@ -2680,194 +2540,6 @@ function buildLinkIngestAcceptedPayload(result: LinkIngestSendResult, mode: Link
         )
         .setTimestamp(new Date()),
     ],
-  };
-}
-
-function buildDonePayload(_record: ThreadRecord, _sessionFile: string | undefined, firstChunk: string | undefined): RichPayload {
-  return {
-    content: firstChunk ?? "(no assistant text produced)",
-    embeds: [],
-    components: [],
-  };
-}
-
-function formatQueuedText(mode: "steer" | "followUp", pendingCount: number): string {
-  const label = mode === "followUp" ? "follow-up" : "steering";
-  return `Queued as ${label}${pendingCount > 0 ? ` (${pendingCount} pending)` : ""}.`;
-}
-
-function buildQueuedPayload(mode: "steer" | "followUp", pendingCount: number): RichPayload {
-  return {
-    content: formatQueuedText(mode, pendingCount),
-    embeds: [],
-    components: [],
-  };
-}
-
-function buildFinalizingBusyPayload(): RichPayload {
-  return {
-    content: "Previous turn is finalizing. Send this again in a moment if it does not post automatically.",
-    embeds: [],
-    components: [],
-  };
-}
-
-function buildQueuedRunPayload(record: ThreadRecord): RichPayload {
-  return buildHudCardPayload(record, {
-    tone: "warning",
-    stateLabel: "queued",
-    now: "Waiting for a run-control worker to claim this turn.",
-    signals: "not active yet; no Pi turn is running for this card",
-    progress: [
-      "✓ run accepted by Redis",
-      "→ waiting for worker claim",
-      "· live events start after claim",
-    ],
-    next: "A worker will switch this card to active when it claims the lease.",
-    footer: "final answer posts as a fresh reply below",
-    expectedMessageId: record.activeRun?.placeholderDiscordMessageId,
-  });
-}
-
-function buildErrorPayload(record: ThreadRecord, error: string): RichPayload {
-  return buildHudCardPayload(record, {
-    tone: "error",
-    stateLabel: "failed",
-    now: "Pi run failed before Discord received a final answer.",
-    progress: ["✗ run failed", "· session state preserved", "· send a new message to retry or continue"],
-    risk: error,
-    footer: "ESC disabled because this run is already terminal",
-    abortDisabled: true,
-  });
-}
-
-function buildInterruptedRunPayload(record: ThreadRecord): RichPayload {
-  const activeRun = record.activeRun;
-  const promptPreview = activeRun?.promptPreview && !isBridgeRecoveryPrompt(activeRun.prompt)
-    ? activeRun.promptPreview
-    : "not recorded; use durable session history";
-  return buildHudCardPayload(record, {
-    tone: "interrupted",
-    stateLabel: "interrupted",
-    now: "Bridge restarted before Discord received a final answer.",
-    signals: "terminal card; no live Pi turn is running",
-    progress: [
-      "⚠ run interrupted by bridge restart",
-      `· request: ${promptPreview}`,
-      `· session: ${record.sessionFile ?? activeRun?.sessionFile ?? "not created yet"}`,
-    ],
-    risk: "Send `continue` in this thread to recover from durable session history, or send a new prompt to continue from there.",
-    footer: "ESC disabled because this run is already terminal",
-    abortDisabled: true,
-    inputText: false,
-  });
-}
-
-function buildRunControls(threadId: string, options: { abortDisabled?: boolean; expectedMessageId?: string } = {}): ActionRowBuilder<ButtonBuilder>[] {
-  if (options.abortDisabled) return [];
-  const button = new ButtonBuilder()
-    .setCustomId(options.expectedMessageId ? `pi:abort:${threadId}|${options.expectedMessageId}` : `pi:abort:${threadId}`)
-    .setLabel("ESC")
-    .setStyle(ButtonStyle.Danger)
-    .setDisabled(!options.expectedMessageId);
-  return [
-    new ActionRowBuilder<ButtonBuilder>().addComponents(button),
-  ];
-}
-
-function createProgressUpdater(placeholder: Message, record: ThreadRecord, prompt: string, config: AppConfig): {
-  update: (progress: PromptProgress) => void;
-  stop: () => Promise<void>;
-} {
-  const startedAt = Date.now();
-  let latestProgress: PromptProgress | undefined;
-  let latestFrame: RunHudFrame | undefined;
-  let hudRecord = record;
-  let timer: NodeJS.Timeout | undefined;
-  let heartbeat: NodeJS.Timeout | undefined;
-  let lastEditAt = 0;
-  let stopped = false;
-  let editQueue: Promise<void> = Promise.resolve();
-
-  const withElapsed = (progress: PromptProgress): PromptProgress => ({
-    ...progress,
-    elapsedMs: Date.now() - startedAt,
-  });
-
-  const narrator = config.render.hud.enabled
-    ? new RunHudNarrator({
-        cwd: record.cwd,
-        agentDir: config.pi.agentDir,
-        model: config.render.hud.model,
-        updateIntervalMs: config.render.hud.updateIntervalMs,
-        onFrame(frame, options) {
-          if (stopped) return;
-          latestFrame = frame;
-          scheduleFlush(options?.immediate === true ? 0 : config.render.hud.updateIntervalMs);
-        },
-        onError(error) {
-          console.warn(`run HUD narrator failed: ${error.message}`);
-        },
-      })
-    : undefined;
-
-  narrator?.start();
-
-  const flush = async () => {
-    if (stopped || !latestProgress) return;
-    timer = undefined;
-    lastEditAt = Date.now();
-    const elapsedMs = Date.now() - startedAt;
-    const payload = latestFrame
-      ? buildHudPayload(hudRecord, latestFrame, elapsedMs)
-      : buildWorkingPayload(hudRecord, prompt, withElapsed(latestProgress));
-    editQueue = editQueue
-      .catch(() => undefined)
-      .then(async () => {
-        if (stopped) return;
-        await placeholder.edit(payload).catch(() => undefined);
-      });
-    await editQueue;
-  };
-
-  const scheduleFlush = (delayMs: number) => {
-    if (stopped || !latestProgress) return;
-    const elapsed = Date.now() - lastEditAt;
-    const minInterval = Math.max(2_500, config.render.hud.updateIntervalMs);
-    if (delayMs === 0 || elapsed >= minInterval) {
-      if (timer) clearTimeout(timer);
-      timer = undefined;
-      void flush();
-      return;
-    }
-    const dueIn = Math.max(250, minInterval - elapsed);
-    if (!timer) {
-      timer = setTimeout(() => void flush(), dueIn);
-      timer.unref();
-    }
-  };
-
-  heartbeat = setInterval(() => {
-    if (!latestProgress || stopped) return;
-    void flush();
-  }, config.render.hud.updateIntervalMs);
-  heartbeat.unref();
-
-  return {
-    update(progress) {
-      if (stopped) return;
-      if (progress.sessionName) hudRecord = { ...hudRecord, sessionName: progress.sessionName };
-      latestProgress = progress;
-      if (progress.feedEvent) narrator?.record(progress.feedEvent);
-      scheduleFlush(progress.isError || progress.phase === "compaction" || progress.phase === "retry" ? 0 : config.render.hud.updateIntervalMs);
-    },
-    async stop() {
-      stopped = true;
-      if (timer) clearTimeout(timer);
-      if (heartbeat) clearInterval(heartbeat);
-      narrator?.dispose();
-      await editQueue;
-    },
   };
 }
 

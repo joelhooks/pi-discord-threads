@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultConfig } from "../dist/config.js";
 import { createProgressEventBus } from "../dist/progress-events.js";
-import { RunControlWorker } from "../dist/run-control/worker.js";
+import { runRunControlLeasedRun } from "../dist/run-control/leased-run-machine.js";
 
 test("ProgressEventBus fans out progress events to subscribers", async () => {
   const seen = [];
@@ -98,8 +98,16 @@ test("RunControlWorker wires progress bus to run-event appenders and adapter sub
     applyInput: async () => ({ queued: true }),
   };
 
-  const worker = new RunControlWorker(store, adapter, defaultConfig(), "worker-progress-test");
-  await worker.runWithLease(run, "lease-progress-1");
+  await runRunControlLeasedRun({
+    store,
+    adapter,
+    config: defaultConfig(),
+    run,
+    leaseToken: "lease-progress-1",
+    workerId: "worker-progress-test",
+    createFinalizeToken: () => "finalize-progress-1",
+    warn: () => undefined,
+  });
 
   assert.deepEqual(adapterEvents, ["Agent running"]);
   assert.deepEqual(appendedRunEvents, [{
