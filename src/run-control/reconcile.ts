@@ -255,19 +255,29 @@ export function startRunControlReconcileLoop(options: {
   config: AppConfig;
   apply: boolean;
 }): () => void {
+  let stopped = false;
   const runOnce = async () => {
     const report = await reconcileRunControl(options);
-    if (report.issues.length > 0 || report.applied.length > 0) {
+    if (!stopped && (report.issues.length > 0 || report.applied.length > 0)) {
       console.log(formatReconcileReport(report));
     }
   };
-  const interval = setInterval(() => void runOnce().catch((error) => {
-    const text = error instanceof Error ? error.message : String(error);
-    console.warn(`run-control reconcile loop failed: ${text}`);
-  }), options.config.runControl.reconcileIntervalMs);
+  const runOnceLogged = async () => {
+    try {
+      await runOnce();
+    } catch (error) {
+      if (stopped) return;
+      const text = error instanceof Error ? error.message : String(error);
+      console.warn(`run-control reconcile loop failed: ${text}`);
+    }
+  };
+  const interval = setInterval(() => void runOnceLogged(), options.config.runControl.reconcileIntervalMs);
   interval.unref();
-  void runOnce().catch(() => undefined);
-  return () => clearInterval(interval);
+  void runOnceLogged();
+  return () => {
+    stopped = true;
+    clearInterval(interval);
+  };
 }
 
 const ACTIVE_RUN_PROMPT_LIMIT = 24_000;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultConfig } from "../dist/config.js";
-import { reconcileRunControl } from "../dist/run-control/reconcile.js";
+import { reconcileRunControl, startRunControlReconcileLoop } from "../dist/run-control/reconcile.js";
 
 function createRun(id, status = "running") {
   const now = new Date(0).toISOString();
@@ -114,4 +114,37 @@ test("reconcile reports non-terminal Redis runs superseded by a different active
   const issue = report.issues.find((candidate) => candidate.code === "nonterminal-run-not-active");
   assert.ok(issue);
   assert.match(issue.message, /run-newer/);
+});
+
+test("reconcile loop suppresses in-flight failures after stop", async () => {
+  const config = defaultConfig();
+  config.runControl.reconcileIntervalMs = 10;
+  const store = {
+    async listRuns() {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      throw new Error("late reconcile failure");
+    },
+    async listActivePointers() {
+      return [];
+    },
+  };
+  const registry = {
+    getThread() {
+      return undefined;
+    },
+    listThreads() {
+      return [];
+    },
+  };
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  try {
+    const stop = startRunControlReconcileLoop({ store, registry, config, apply: true });
+    stop();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.deepEqual(warnings, []);
 });
