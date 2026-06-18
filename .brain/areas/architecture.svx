@@ -57,7 +57,9 @@ Do not turn every pure helper into a machine. Use XState where illegal state com
 
 2026-06-18: Redis worker job claiming now has `src/run-control/worker-machine.ts` as a first XState slice. It models one stream job through `loadingRun -> validatingRun -> loadingActiveRunId -> claimingLease -> executingWithLease -> release/ack|pending|failed`. Busy finalization now leaves the stream job pending without logging an outside-handler failure.
 
-2026-06-18: Leased run execution/finalization now lives in `src/run-control/leased-run-machine.ts`. The worker loop no longer owns heartbeat/input/finalization booleans; the leased-run machine owns heartbeat cleanup, input pump ticking/draining, fresh execution, persisted-finalizing resume, finalization claim routing, duplicate-finalization fail-safe, terminal marking, and active-pointer clearing as named states. `src/run-control/worker.ts` is now mostly process-loop glue.
+2026-06-18: Leased run execution/finalization now lives in `src/run-control/leased-run-machine.ts`. The worker loop no longer owns heartbeat/input/finalization booleans; the leased-run machine owns heartbeat cleanup, input pump ticking/draining, fresh execution, persisted-finalizing resume, finalization claim routing, duplicate-finalization fail-safe, terminal marking, and active-pointer clearing as named states.
+
+2026-06-18: Worker lane polling now lives in `src/run-control/worker-lane-machine.ts`. Each lane models consumer-group ensure/retry, dequeue, idle heartbeat, per-job handling, and graceful stop as named states. `src/run-control/worker.ts` now only starts/stops lane actors and wires leased-run execution into the lane machine.
 
 ## pi-notes boundary
 

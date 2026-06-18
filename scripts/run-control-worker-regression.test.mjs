@@ -4,6 +4,7 @@ import { createActor, waitFor } from "xstate";
 import { defaultConfig } from "../dist/config.js";
 import { RunControlWorker } from "../dist/run-control/worker.js";
 import { runControlLeasedRunMachine } from "../dist/run-control/leased-run-machine.js";
+import { runControlWorkerLaneMachine } from "../dist/run-control/worker-lane-machine.js";
 import { runControlWorkerJobMachine } from "../dist/run-control/worker-machine.js";
 
 const run = {
@@ -261,6 +262,53 @@ test("RunControlLeasedRunMachine exposes execution and finalization as machine s
   assert.equal(states.some((state) => state.includes("freshExecution")), true);
   assert.equal(states.some((state) => state.includes("patchingRunFinalizing")), true);
   assert.equal(states.some((state) => state.includes("postingSuccessDiscord")), true);
+});
+
+test("RunControlWorkerLaneMachine exposes ensure/dequeue/idle/stop lifecycle as machine state", async () => {
+  const states = [];
+  const warnings = [];
+  let ensureAttempts = 0;
+  let resolveIdle;
+  const idleSeen = new Promise((resolve) => { resolveIdle = resolve; });
+  const store = createStore({
+    ensureConsumerGroup: async () => {
+      ensureAttempts++;
+      if (ensureAttempts === 1) throw new Error("redis down");
+    },
+    dequeueJob: async () => undefined,
+    recordWorkerIdle: async () => {
+      resolveIdle();
+    },
+  });
+  const actor = createActor(runControlWorkerLaneMachine, {
+    input: {
+      store,
+      workerId: "worker-1",
+      blockMs: 1,
+      initialEnsureRetryDelayMs: 1,
+      maxEnsureRetryDelayMs: 2,
+      createLeaseToken: () => "lease-1",
+      executeWithLease: async () => undefined,
+      shouldLeavePending: () => false,
+      log: () => undefined,
+      warn: (message) => warnings.push(message),
+      error: () => undefined,
+    },
+  });
+  actor.subscribe((snapshot) => states.push(snapshot.value));
+
+  actor.start();
+  await idleSeen;
+  actor.send({ type: "STOP" });
+  const done = await waitFor(actor, (snapshot) => snapshot.status === "done", { timeout: 1_000 });
+  actor.stop();
+
+  assert.equal(done.context.stopRequested, true);
+  assert.equal(ensureAttempts, 2);
+  assert.equal(warnings.some((message) => message.includes("redis down")), true);
+  assert.equal(states.includes("retryingConsumerGroup"), true);
+  assert.equal(states.includes("dequeuing"), true);
+  assert.equal(states.includes("recordingIdle"), true);
 });
 
 test("RunControlWorkerJobMachine exposes claim-to-execute lifecycle as machine state", async () => {
