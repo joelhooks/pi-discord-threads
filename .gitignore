@@ -7,4 +7,6 @@ dist/
 .registry.json
 .wzrrd/
 .pi/
+.pi-fable/
+tmp/
 /~/

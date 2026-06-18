@@ -14,6 +14,7 @@
     "test:progress-event-bus": "npm run build && node --test scripts/progress-event-bus-regression.test.mjs",
     "test:progress-hud": "npm run build && node --test scripts/progress-hud-machine-regression.test.mjs",
     "test:thread-title": "npm run build && node --test scripts/thread-title-lifecycle-regression.test.mjs",
+    "test:async-subagent-bridge": "npm run build && node --test scripts/async-subagent-result-bridge-regression.test.mjs",
     "test:pi-session-service": "npm run build && node --test scripts/pi-session-service-regression.test.mjs",
     "test:pi-runtime": "npm run build && node --test scripts/pi-runtime-regression.test.mjs",
     "test:registry-lifecycle": "npm run build && node --test scripts/registry-lifecycle-regression.test.mjs",

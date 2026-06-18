@@ -178,7 +178,7 @@ export const runControlWorkerLaneMachine = setup({
           actions: "rememberJob",
         },
         onError: {
-          target: "recordingIdle",
+          target: "retryingConsumerGroup",
           actions: ["rememberError", "clearJob", "warnDequeueFailure"],
         },
       },

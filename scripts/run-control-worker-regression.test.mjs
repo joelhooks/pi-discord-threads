@@ -311,6 +311,58 @@ test("RunControlWorkerLaneMachine exposes ensure/dequeue/idle/stop lifecycle as 
   assert.equal(states.includes("recordingIdle"), true);
 });
 
+test("RunControlWorkerLaneMachine backs off and re-ensures after dequeue failures", async () => {
+  const states = [];
+  const warnings = [];
+  let ensureAttempts = 0;
+  let dequeueAttempts = 0;
+  let resolveIdle;
+  const idleSeen = new Promise((resolve) => { resolveIdle = resolve; });
+  const store = createStore({
+    ensureConsumerGroup: async () => {
+      ensureAttempts++;
+    },
+    dequeueJob: async () => {
+      dequeueAttempts++;
+      if (dequeueAttempts === 1) throw new Error("NOGROUP No such key");
+      return undefined;
+    },
+    recordWorkerIdle: async () => {
+      resolveIdle();
+    },
+  });
+  const actor = createActor(runControlWorkerLaneMachine, {
+    input: {
+      store,
+      workerId: "worker-1",
+      blockMs: 1,
+      initialEnsureRetryDelayMs: 1,
+      maxEnsureRetryDelayMs: 2,
+      createLeaseToken: () => "lease-1",
+      executeWithLease: async () => undefined,
+      shouldLeavePending: () => false,
+      log: () => undefined,
+      warn: (message) => warnings.push(message),
+      error: () => undefined,
+    },
+  });
+  actor.subscribe((snapshot) => states.push(snapshot.value));
+
+  actor.start();
+  await idleSeen;
+  actor.send({ type: "STOP" });
+  const done = await waitFor(actor, (snapshot) => snapshot.status === "done", { timeout: 1_000 });
+  actor.stop();
+
+  assert.equal(done.context.stopRequested, true);
+  assert.equal(ensureAttempts, 2);
+  assert.equal(dequeueAttempts, 2);
+  assert.equal(warnings.some((message) => message.includes("NOGROUP")), true);
+  assert.equal(states.includes("retryingConsumerGroup"), true);
+  assert.equal(states.includes("ensuringConsumerGroup"), true);
+  assert.equal(states.includes("recordingIdle"), true);
+});
+
 test("RunControlWorkerJobMachine exposes claim-to-execute lifecycle as machine state", async () => {
   const states = [];
   const store = createStore({
