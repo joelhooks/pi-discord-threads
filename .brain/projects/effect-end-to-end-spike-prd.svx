@@ -294,6 +294,22 @@ tail -80 /Users/joel/.local/share/pi-discord-threads/daemon.log
 tail -80 /Users/joel/.local/share/pi-discord-threads/daemon.err.log
 ```
 
+## Implementation receipts
+
+### 2026-06-18 Slice 1: runtime receipts
+
+Implemented runtime visibility so operators can answer whether the live queue path is actually Effect-backed:
+
+- `src/engine/runtime.ts` exports `RUN_QUEUE_ENGINE_NAME = "effect-managed"` and exposes it on `RunQueueRuntimeClient.engine`.
+- `src/index.ts` logs `Effect RunQueueRuntime warmed` after live startup/reconcile warmup.
+- `doctor` prints `runQueueEngine`, `runControlWorkerId`, and Redis health.
+
+Validation:
+
+- `npm run typecheck` passed.
+- `npm run build` passed.
+- `node dist/index.js doctor --config /Users/joel/.config/pi-discord-threads/config.json` showed `runQueueEngine: effect-managed` and `runControl Redis: PONG`.
+
 ## Tracker mirror plan
 
 Do not publish tracker issues yet. The Brain PRD is enough until Slice 1 and Slice 2 harden the live spike surface.

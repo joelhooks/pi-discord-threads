@@ -7,7 +7,7 @@ import { postDailyMessage } from "./daily-post.js";
 import { PiRuntimeManager } from "./pi-runtime.js";
 import { Registry } from "./registry.js";
 import { SecretResolver } from "./secrets.js";
-import { createRunQueueRuntimeClient } from "./engine/runtime.js";
+import { RUN_QUEUE_ENGINE_NAME, createRunQueueRuntimeClient } from "./engine/runtime.js";
 import { checkRunControlRedisHealth, getRunControlWorkerId } from "./run-control/redis-client.js";
 import { formatReconcileReport, reconcileRunControl, startRunControlReconcileLoop } from "./run-control/reconcile.js";
 import { installLaunchAgent, printLaunchAgentStatus, uninstallLaunchAgent } from "./launch-agent.js";
@@ -106,6 +106,9 @@ async function main(): Promise<void> {
 
   try {
     await runControlStore?.warmup();
+    if (runControlStore) {
+      console.log(`Effect RunQueueRuntime warmed: engine=${runControlStore.engine}, workerId=${getRunControlWorkerId(config)}, keyPrefix=${config.runControl.keyPrefix}`);
+    }
 
     const secrets = new SecretResolver();
     const token = await secrets.resolveRequired({
@@ -194,6 +197,8 @@ async function doctor(configPath: string, config: AppConfig): Promise<void> {
   console.log(`attachments: ${config.attachments.enabled ? "enabled" : "disabled"}, maxBytes=${config.attachments.maxBytes}`);
   console.log(`linkIngest: ${config.linkIngest.enabled ? "enabled" : "disabled"}, url=${config.linkIngest.inngestUrl}, eventKeyEnv=${config.linkIngest.eventKeyEnv ?? "(none)"}, eventKeySecret=${config.linkIngest.eventKeySecretName ?? "(none)"}, signingKeyEnv=${config.linkIngest.signingKeyEnv ?? "(none)"}, signingKeySecret=${config.linkIngest.signingKeySecretName ?? "(none)"}, statusBridge=${config.linkIngest.statusBridgeEnabled ? "enabled" : "disabled"}`);
   console.log(`runControl: ${config.runControl.enabled ? "enabled" : "disabled"}, roles=${config.runControl.roles.join(",")}, keyPrefix=${config.runControl.keyPrefix}`);
+  console.log(`runQueueEngine: ${config.runControl.enabled ? RUN_QUEUE_ENGINE_NAME : "disabled"}`);
+  console.log(`runControlWorkerId: ${getRunControlWorkerId(config)}`);
   const redisHealth = await checkRunControlRedisHealth(config);
   console.log(redisHealth.message);
   console.log(`node: ${process.version}`);
@@ -211,6 +216,7 @@ async function reconcileCommand(config: AppConfig, apply: boolean): Promise<void
   const store = createRunQueueRuntimeClient(config);
   try {
     await store.warmup();
+    console.log(`Effect RunQueueRuntime warmed: engine=${store.engine}, workerId=${getRunControlWorkerId(config)}, keyPrefix=${config.runControl.keyPrefix}`);
     const report = await reconcileRunControl({ store, registry, config, apply });
     console.log(formatReconcileReport(report));
   } finally {

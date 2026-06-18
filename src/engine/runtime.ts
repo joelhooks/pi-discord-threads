@@ -10,7 +10,10 @@ import { Effect, ManagedRuntime } from "effect";
 import { RunQueueEngineLive } from "./layers.js";
 import { RunQueueService, type RunQueueServiceShape } from "./services.js";
 
+export const RUN_QUEUE_ENGINE_NAME = "effect-managed";
+
 export interface RunQueueRuntimeClient extends RunControlStorePort {
+  readonly engine: typeof RUN_QUEUE_ENGINE_NAME;
   warmup(): Promise<void>;
 }
 
@@ -27,6 +30,7 @@ export function createRunQueueRuntimeClient(config: AppConfig): RunQueueRuntimeC
   );
 
   return {
+    engine: RUN_QUEUE_ENGINE_NAME,
     warmup: () => withQueue(() => Effect.succeed(undefined)),
     close: () => runtime.dispose(),
     ensureConsumerGroup: () => withQueue((queue) => queue.ensureConsumerGroup()),
