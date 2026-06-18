@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createActor, waitFor } from "xstate";
 import { defaultConfig } from "../dist/config.js";
 import { RunControlWorker } from "../dist/run-control/worker.js";
+import { runControlWorkerJobMachine } from "../dist/run-control/worker-machine.js";
 
 const run = {
   runId: "run-1",
@@ -156,4 +158,63 @@ test("stale job for non-active run is skipped and ACKed", async () => {
 
   assert.equal(claimCount, 0);
   assert.equal(ackCount, 1);
+});
+
+test("busy finalization leaves the stream job pending without logging an outside-handler failure", async () => {
+  let ackCount = 0;
+  let releaseCount = 0;
+  let sawRelease;
+  const releaseSeen = new Promise((resolve) => { sawRelease = resolve; });
+  const errors = [];
+  const originalError = console.error;
+  console.error = (message) => errors.push(String(message));
+  const store = createStore({
+    acquireFinalize: async () => "busy",
+    acknowledgeJob: async () => { ackCount++; },
+    releaseRunLease: async () => {
+      releaseCount++;
+      sawRelease();
+      return true;
+    },
+  });
+  const worker = new RunControlWorker(store, createAdapter(), createConfig(), "worker-1");
+
+  try {
+    worker.start();
+    await releaseSeen;
+    await worker.stop();
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.equal(releaseCount, 1);
+  assert.equal(ackCount, 0);
+  assert.deepEqual(errors, []);
+});
+
+test("RunControlWorkerJobMachine exposes claim-to-execute lifecycle as machine state", async () => {
+  const states = [];
+  const store = createStore({
+    getActiveRunId: async () => "run-newer",
+  });
+  const actor = createActor(runControlWorkerJobMachine, {
+    input: {
+      store,
+      job: { streamId: "1-0", runId: run.runId },
+      workerId: "worker-1",
+      createLeaseToken: () => "lease-1",
+      executeWithLease: async () => undefined,
+      shouldLeavePending: () => false,
+    },
+  });
+  actor.subscribe((snapshot) => states.push(snapshot.value));
+
+  actor.start();
+  const done = await waitFor(actor, (snapshot) => snapshot.status === "done", { timeout: 1_000 });
+  actor.stop();
+
+  assert.equal(done.context.outcome.kind, "acked");
+  assert.equal(done.context.outcome.reason, "stale-job");
+  assert.equal(states.includes("loadingActiveRunId"), true);
+  assert.equal(states.includes("skippingStaleJob"), true);
 });

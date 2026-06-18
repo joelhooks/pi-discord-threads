@@ -2,13 +2,17 @@ import { randomUUID } from "node:crypto";
 import type { AppConfig } from "../config.js";
 import { createProgressEventBus, type ProgressEventBusPort } from "../progress-events.js";
 import type { QueuedRunInput, RunControlExecutionResult, RunControlStorePort, RunJob, RunRecord } from "./types.js";
-import { isTerminalRunStatus } from "./types.js";
+import { runRunControlWorkerJob } from "./worker-machine.js";
 
-class RetryRunLaterError extends Error {
+export class RetryRunLaterError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "RetryRunLaterError";
   }
+}
+
+function isRetryRunLaterError(error: unknown): error is RetryRunLaterError {
+  return error instanceof RetryRunLaterError;
 }
 
 type PendingRunInput = QueuedRunInput & {
@@ -92,47 +96,14 @@ export class RunControlWorker {
   }
 
   private async handleJob(job: RunJob, workerId: string): Promise<void> {
-    const run = await this.store.getRun(job.runId);
-    if (!run) {
-      await this.store.acknowledgeJob(job);
-      return;
-    }
-    if (isTerminalRunStatus(run.status)) {
-      await this.store.acknowledgeJob(job);
-      return;
-    }
-
-    const activeRunId = await this.store.getActiveRunId(run.logicalThreadId);
-    if (activeRunId !== run.runId) {
-      await this.store.appendRunEvent(run.runId, "stale_job_skipped", {
-        logicalThreadId: run.logicalThreadId,
-        activeRunId: activeRunId ?? "",
-        workerId,
-      }).catch(() => undefined);
-      await this.store.acknowledgeJob(job);
-      return;
-    }
-
-    const leaseToken = randomUUID();
-    const claimed = await this.store.claimRunLease(run, workerId, leaseToken);
-    if (!claimed) {
-      await this.store.appendRunEvent(run.runId, "lease_claim_busy", {
-        logicalThreadId: run.logicalThreadId,
-        workerId,
-      }).catch(() => undefined);
-      return;
-    }
-
-    let terminal = false;
-    try {
-      await this.runWithLease(run, leaseToken, workerId);
-      terminal = true;
-    } finally {
-      await this.store.releaseRunLease(run.runId, leaseToken).catch(() => undefined);
-      if (terminal) {
-        await this.store.acknowledgeJob(job);
-      }
-    }
+    await runRunControlWorkerJob({
+      store: this.store,
+      job,
+      workerId,
+      createLeaseToken: randomUUID,
+      executeWithLease: (run, leaseToken, laneWorkerId) => this.runWithLease(run, leaseToken, laneWorkerId),
+      shouldLeavePending: isRetryRunLaterError,
+    });
   }
 
   private async runWithLease(run: RunRecord, leaseToken: string, workerId: string): Promise<void> {

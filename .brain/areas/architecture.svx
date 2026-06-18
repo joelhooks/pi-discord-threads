@@ -55,6 +55,8 @@ Candidate XState surfaces:
 
 Do not turn every pure helper into a machine. Use XState where illegal state combinations, retries, cancellation, resource lifetime, or parallel readiness are the real problem.
 
+2026-06-18: Redis worker job claiming now has `src/run-control/worker-machine.ts` as a first XState slice. It models one stream job through `loadingRun -> validatingRun -> loadingActiveRunId -> claimingLease -> executingWithLease -> release/ack|pending|failed`. The outer worker loop still polls Redis and input/finalization internals remain in `RunControlWorker.runWithLease()`, but claim/ACK/pending decisions are now explicit machine states. Busy finalization now leaves the stream job pending without logging an outside-handler failure.
+
 ## pi-notes boundary
 
 pi-notes renders `.brain/**/*.svx`, auto-imports standard and project-local Brain components, and can route browser Review Batches back to the spawning Pi session when opened through Pi.
