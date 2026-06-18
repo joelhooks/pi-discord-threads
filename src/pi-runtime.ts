@@ -12,9 +12,12 @@ import {
 import type { InlineImageContent } from "./attachments.js";
 import type { AppConfig } from "./config.js";
 import { DISCORD_SYSTEM_PROMPT } from "./discord-system-prompt.js";
+import type { PromptProgress, PromptProgressHandler } from "./progress-events.js";
+import { publishProgressSafely } from "./progress-events.js";
 import type { RegistryPort, ThreadRecord } from "./registry.js";
-import type { RunFeedEvent } from "./run-hud.js";
 import { decideRuntimePromptDisposition, hasVisibleActiveRun, isAssistantLeafContinueError } from "./thread-run-state.js";
+
+export type { PromptProgress, PromptProgressHandler } from "./progress-events.js";
 
 interface ManagedRuntime {
   runtime: AgentSessionRuntime;
@@ -57,21 +60,6 @@ interface PiCompactionResult {
   tokensBefore: number;
   details?: unknown;
 }
-
-export interface PromptProgress {
-  phase: "starting" | "thinking" | "streaming" | "tool" | "compaction" | "retry" | "done";
-  title: string;
-  detail?: string;
-  textPreview?: string;
-  toolName?: string;
-  isError?: boolean;
-  sessionFile?: string;
-  sessionName?: string;
-  elapsedMs?: number;
-  feedEvent?: RunFeedEvent;
-}
-
-export type PromptProgressHandler = (progress: PromptProgress) => void | Promise<void>;
 
 export class PiRuntimeManager {
   private readonly runtimes = new Map<string, ManagedRuntime>();
@@ -739,11 +727,7 @@ export class PiRuntimeManager {
   }
 
   private publishProgress(handler: PromptProgressHandler | undefined, progress: PromptProgress): void {
-    if (!handler) return;
-    void Promise.resolve(handler(progress)).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      console.warn(`progress handler failed: ${message}`);
-    });
+    publishProgressSafely(handler, progress);
   }
 
   private getNewMessageEntryIds(entries: unknown[], beforeCount: number): { userEntryId?: string; assistantEntryId?: string } {

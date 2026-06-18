@@ -32,7 +32,8 @@ import {
 import { DefaultResourceLoader, getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { appendAttachmentContext, type InlineImageContent } from "./attachments.js";
 import type { AppConfig, RunControlRole } from "./config.js";
-import { PiRuntimeManager, type PromptProgress } from "./pi-runtime.js";
+import { PiRuntimeManager } from "./pi-runtime.js";
+import { createProgressEventBus, type PromptProgress } from "./progress-events.js";
 import type { ActiveRunRecord, LinkIngestRecord, RegistryPort, ThreadRecord, ThreadTitleState } from "./registry.js";
 import {
   listWorkspaces,
@@ -2153,6 +2154,7 @@ async function runPromptWithPlaceholder(
     const thread = getThreadChannel(channel);
     if (thread) await maybeRenameThreadForPrompt(thread, record, prompt, options.registry);
     const progress = createProgressUpdater(placeholder, runningRecord, prompt, options.config);
+    const progressEvents = createProgressEventBus(progress.update);
     stopProgress = progress.stop;
     await placeholder.edit(buildWorkingPayload(runningRecord, prompt, {
       phase: "starting",
@@ -2160,7 +2162,7 @@ async function runPromptWithPlaceholder(
       detail: record.sessionFile ? "Rehydrating existing session" : "Creating a durable session",
     }));
 
-    const result = await options.runtimeManager.enqueuePrompt(record, prompt, images, progress.update);
+    const result = await options.runtimeManager.enqueuePrompt(record, prompt, images, progressEvents.publish);
     await stopProgress();
     stopTyping();
     if (result.kind === "queued") {
@@ -2264,13 +2266,14 @@ function buildRunControlRecord(
 
 function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): RunControlWorkerAdapter {
   return {
-    async executeRun(run, onProgress) {
+    async executeRun(run, progressEvents) {
       const record = options.registry.getThread(run.threadId);
       if (!record) throw new Error(`No registry record for run-control thread ${run.threadId}`);
       const channel = await resolvePromptChannel(client, record);
       const placeholder = await fetchPlaceholderMessage(channel, run.placeholderDiscordMessageId);
       let stopTyping: (() => void) | undefined;
       let stopProgress: (() => Promise<void>) | undefined;
+      let unsubscribeProgress: (() => void) | undefined;
       try {
         stopTyping = startTypingIndicator(channel);
         const thread = getThreadChannel(channel);
@@ -2282,16 +2285,14 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
         };
         const progress = createProgressUpdater(placeholder, runningRecord, run.prompt, options.config);
         stopProgress = progress.stop;
-        const combinedProgress = (update: PromptProgress) => {
-          progress.update(update);
-          void Promise.resolve(onProgress(update)).catch(() => undefined);
-        };
+        unsubscribeProgress = progressEvents.subscribe(progress.update);
         await placeholder.edit(buildWorkingPayload(runningRecord, run.prompt, {
           phase: "starting",
           title: "Worker claimed Redis run",
           detail: run.sessionFile ? "Rehydrating existing session" : "Creating a durable session",
         })).catch(() => undefined);
-        const result = await options.runtimeManager.enqueuePrompt(record, run.prompt, run.images ?? [], combinedProgress);
+        const result = await options.runtimeManager.enqueuePrompt(record, run.prompt, run.images ?? [], progressEvents.publish);
+        unsubscribeProgress?.();
         await stopProgress();
         stopTyping();
         if (result.kind === "queued") {
@@ -2300,6 +2301,7 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
         await options.registry.recordMessageEntry(run.sourceDiscordMessageId, result.userEntryId);
         return result;
       } catch (error) {
+        unsubscribeProgress?.();
         await stopProgress?.();
         stopTyping?.();
         throw error;

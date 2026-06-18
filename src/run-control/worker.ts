@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AppConfig } from "../config.js";
-import type { PromptProgress, PromptProgressHandler } from "../pi-runtime.js";
+import { createProgressEventBus, type ProgressEventBusPort } from "../progress-events.js";
 import type { QueuedRunInput, RunControlExecutionResult, RunControlStorePort, RunJob, RunRecord } from "./types.js";
 import { isTerminalRunStatus } from "./types.js";
 
@@ -19,7 +19,7 @@ type PendingRunInput = QueuedRunInput & {
 const MAX_INPUT_APPLY_ATTEMPTS = 30;
 
 export interface RunControlWorkerAdapter {
-  executeRun(run: RunRecord, onProgress: PromptProgressHandler): Promise<RunControlExecutionResult>;
+  executeRun(run: RunRecord, progressEvents: ProgressEventBusPort): Promise<RunControlExecutionResult>;
   finalizeRun(run: RunRecord, result: RunControlExecutionResult): Promise<void>;
   failRun(run: RunRecord, error: Error): Promise<void>;
   applyInput(run: RunRecord, input: QueuedRunInput): Promise<{ queued: boolean }>;
@@ -179,7 +179,7 @@ export class RunControlWorker {
     }, Math.min(1_000, Math.max(250, this.config.runControl.heartbeatMs)));
     inputPump.unref();
 
-    const progressHandler = async (progress: PromptProgress) => {
+    const progressEvents = createProgressEventBus(async (progress) => {
       await this.store.appendRunEvent(run.runId, progress.feedEvent?.type ?? progress.phase, {
         title: progress.title,
         detail: progress.detail,
@@ -187,7 +187,7 @@ export class RunControlWorker {
         isError: progress.isError,
         sessionFile: progress.sessionFile,
       }).catch(() => undefined);
-    };
+    });
 
     try {
       let result: RunControlExecutionResult;
@@ -196,7 +196,7 @@ export class RunControlWorker {
         result = this.resultFromFinalizingRun(run);
       } else {
         await drainInputs();
-        result = await this.adapter.executeRun(run, progressHandler);
+        result = await this.adapter.executeRun(run, progressEvents);
         acceptingInputs = false;
         await this.store.patchRun(run.runId, {
           status: "finalizing",

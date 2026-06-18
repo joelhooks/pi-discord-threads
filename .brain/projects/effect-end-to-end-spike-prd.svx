@@ -355,6 +355,25 @@ Validation:
 - `npm run typecheck` passed.
 - `npm run test:thread-run-state` passed: 6 tests.
 
+### 2026-06-18 Slice 4: ProgressEventBus seam
+
+Extracted progress fan-out into a small domain event bus so Discord HUD updates and Redis run-event appenders subscribe to the same prompt progress stream instead of hand-rolled callback chaining:
+
+- `src/progress-events.ts` owns `PromptProgress`, `PromptProgressHandler`, `ProgressEventBusPort`, and `createProgressEventBus`.
+- `src/pi-runtime.ts` now imports progress types from the seam and still exposes them for compatibility.
+- Direct Discord prompts create a bus with the working-placeholder updater as a subscriber.
+- Run-control workers create a bus with a Redis run-event appender subscriber, then the Discord worker adapter subscribes placeholder updates before executing the Pi prompt.
+- `scripts/progress-event-bus-regression.test.mjs` covers fan-out, subscriber failure isolation, unsubscribe behavior, and the run-control worker wiring that appends Redis run events while the adapter subscribes Discord progress.
+- `package.json` adds `test:progress-event-bus`.
+
+Validation:
+
+- `npm run typecheck` passed.
+- `npm run test:progress-event-bus` passed: 4 tests.
+- `npm run test:thread-run-state` passed: 6 tests.
+- `npm run test:run-queue-service` passed: 6 tests.
+- `npm run brain:check` passed.
+
 ## Tracker mirror plan
 
 Do not publish tracker issues yet. The Brain PRD is enough until Slice 1 and Slice 2 harden the live spike surface.
