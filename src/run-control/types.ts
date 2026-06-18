@@ -63,6 +63,8 @@ export interface RunJob {
   runId: string;
 }
 
+export type FinalizeClaim = "acquired" | "busy" | "done";
+
 export interface RunControlExecutionResult {
   text: string;
   sessionFile: string | undefined;

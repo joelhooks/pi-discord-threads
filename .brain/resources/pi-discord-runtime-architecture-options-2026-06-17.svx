@@ -198,3 +198,31 @@ Deferred intentionally:
 - No Discord handler rewrite.
 - No Redis worker layer yet.
 - Full repo `exactOptionalPropertyTypes` / `noUncheckedIndexedAccess` currently exposes many pre-existing optional-field issues; do that as a separate hardening slice.
+
+## 2026-06-18 run queue service slice
+
+Branch/worktree: `effect-v4-engine-layer` at `../pi-discord-threads-effect-v4-engine`.
+
+Implemented second safe vertical slice:
+
+- Added `RunQueueService` with v4 `Context.Service` around the existing Redis run-control store boundary.
+- Added typed run queue errors: `RunQueueConnectFailed`, `RunQueueOperationFailed`, `RunQueueTimeout`.
+- Added `makeRunQueueService(store, timeoutMs)` for structural store wrapping and cheap fake layers.
+- Added `RedisRunQueueLive` and `RunQueueEngineLive(config)` using `Layer.effect`, `createRunControlRedisClient`, `RunControlStore`, and scoped store close finalizer.
+- Moved `FinalizeClaim` into `src/run-control/types.ts` so the service contract does not import it from the concrete Redis store adapter.
+- Added `scripts/run-queue-service-regression.test.mjs` proving delegation, typed timeout mapping, generic operation-error mapping, missing Redis URL connect-error mapping, and `Layer.mock` substitution.
+
+Validation receipts:
+
+- `npm run typecheck` passed.
+- `npm run test:run-queue-service` passed: 5 tests.
+- `npm run test:engine-layer` passed: 2 tests.
+- `npm run test:thread-run-state` passed: 5 tests.
+- `npm run test:recovery-prompt` passed: 2 tests.
+
+Deferred intentionally:
+
+- `RunControlWorker` still consumes `RunControlStore` directly.
+- Discord run enqueue/active-input paths still use the concrete store directly.
+- No live Redis connection is opened by the new layer unless a caller explicitly provides `RedisRunQueueLive` / `RunQueueEngineLive`.
+- Worker loops/timers are not Effect fibers yet.

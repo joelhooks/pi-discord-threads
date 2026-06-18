@@ -2,6 +2,7 @@ import type { AppConfig } from "../config.js";
 import type { RedisCommandClient } from "./redis-client.js";
 import {
   type ActivePointer,
+  type FinalizeClaim,
   type QueuedRunInput,
   type RunJob,
   type RunRecord,
@@ -9,8 +10,6 @@ import {
 } from "./types.js";
 
 const WORKER_GROUP = "workers";
-
-export type FinalizeClaim = "acquired" | "busy" | "done";
 
 export class RunControlStore {
   readonly keys: RunControlKeys;

@@ -19,7 +19,8 @@
     "smoke:link-ingest-live-discord": "tsx scripts/link-ingest-live-discord-smoke.ts",
     "smoke:recovery-live": "npm run build && tsx scripts/recovery-live-smoke.ts",
     "brain:check": "pi-notes brain check",
-    "test:engine-layer": "npm run build && node --test scripts/effect-engine-layer-regression.test.mjs"
+    "test:engine-layer": "npm run build && node --test scripts/effect-engine-layer-regression.test.mjs",
+    "test:run-queue-service": "npm run build && node --test scripts/run-queue-service-regression.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.78.1",

@@ -40,9 +40,26 @@ export class InvalidExternalPayload extends Schema.TaggedErrorClass<InvalidExter
   },
 ) {}
 
+export class RunQueueConnectFailed extends Data.TaggedError("RunQueueConnectFailed")<{
+  readonly cause: unknown;
+}> {}
+
+export class RunQueueOperationFailed extends Data.TaggedError("RunQueueOperationFailed")<{
+  readonly operation: string;
+  readonly cause: unknown;
+}> {}
+
+export class RunQueueTimeout extends Data.TaggedError("RunQueueTimeout")<{
+  readonly operation: string;
+  readonly timeoutMs: number;
+  readonly cause: unknown;
+}> {}
+
 export type RegistryError =
   | RegistryLoadFailed
   | RegistryWriteFailed
   | RegistryThreadNotFound
   | RegistryLinkIngestNotFound
   | InvalidExternalPayload;
+
+export type RunQueueError = RunQueueConnectFailed | RunQueueOperationFailed | RunQueueTimeout;
