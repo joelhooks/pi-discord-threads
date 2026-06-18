@@ -3,6 +3,7 @@ import test from "node:test";
 import { createActor, waitFor } from "xstate";
 import { defaultConfig } from "../dist/config.js";
 import { RunControlWorker } from "../dist/run-control/worker.js";
+import { runControlLeasedRunMachine } from "../dist/run-control/leased-run-machine.js";
 import { runControlWorkerJobMachine } from "../dist/run-control/worker-machine.js";
 
 const run = {
@@ -190,6 +191,76 @@ test("busy finalization leaves the stream job pending without logging an outside
   assert.equal(releaseCount, 1);
   assert.equal(ackCount, 0);
   assert.deepEqual(errors, []);
+});
+
+test("RunControlLeasedRunMachine exposes execution and finalization as machine state", async () => {
+  const states = [];
+  const calls = [];
+  const store = createStore({
+    readInputsSince: async () => [],
+    patchRun: async (_runId, patch) => {
+      calls.push(patch.status === "finalizing" ? "patch:finalizing" : "patch:finalizeAttemptedAt");
+      return { ...run, ...patch };
+    },
+    acquireFinalize: async () => {
+      calls.push("acquireFinalize");
+      return "acquired";
+    },
+    completeFinalize: async () => {
+      calls.push("completeFinalize");
+      return true;
+    },
+    markTerminal: async (_runId, status) => {
+      calls.push(`markTerminal:${status}`);
+      return { ...run, status };
+    },
+    clearActiveIfMatches: async () => {
+      calls.push("clearActive");
+      return true;
+    },
+  });
+  const adapter = {
+    ...createAdapter(),
+    executeRun: async () => {
+      calls.push("executeRun");
+      return { text: "done", sessionFile: "session.jsonl", userEntryId: "u1", assistantEntryId: "a1" };
+    },
+    finalizeRun: async () => {
+      calls.push("finalizeRun");
+    },
+  };
+  const actor = createActor(runControlLeasedRunMachine, {
+    input: {
+      store,
+      adapter,
+      config: createConfig(),
+      run,
+      leaseToken: "lease-1",
+      workerId: "worker-1",
+      createFinalizeToken: () => "finalize-1",
+      warn: () => undefined,
+    },
+  });
+  actor.subscribe((snapshot) => states.push(JSON.stringify(snapshot.value)));
+
+  actor.start();
+  const done = await waitFor(actor, (snapshot) => snapshot.status === "done", { timeout: 1_000 });
+  actor.stop();
+
+  assert.equal(done.context.outcome.kind, "completed");
+  assert.deepEqual(calls, [
+    "executeRun",
+    "patch:finalizing",
+    "acquireFinalize",
+    "patch:finalizeAttemptedAt",
+    "finalizeRun",
+    "completeFinalize",
+    "markTerminal:succeeded",
+    "clearActive",
+  ]);
+  assert.equal(states.some((state) => state.includes("freshExecution")), true);
+  assert.equal(states.some((state) => state.includes("patchingRunFinalizing")), true);
+  assert.equal(states.some((state) => state.includes("postingSuccessDiscord")), true);
 });
 
 test("RunControlWorkerJobMachine exposes claim-to-execute lifecycle as machine state", async () => {
