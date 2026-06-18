@@ -16,6 +16,7 @@
     "publish-system-prompt": "npm run render-system-prompt && wzrrd publish --file docs/system-prompt-site --slug pi-discord-system-prompt",
     "smoke:capture": "tsx scripts/link-ingest-capture-smoke.ts",
     "smoke:link-ingest-live-discord": "tsx scripts/link-ingest-live-discord-smoke.ts",
+    "smoke:recovery-live": "npm run build && tsx scripts/recovery-live-smoke.ts",
     "brain:check": "pi-notes brain check"
   },
   "dependencies": {

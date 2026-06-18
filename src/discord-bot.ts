@@ -53,7 +53,7 @@ import type { QueuedRunInput, RunControlExecutionResult, RunRecord } from "./run
 import { RunControlWorker, type RunControlWorkerAdapter } from "./run-control/worker.js";
 import { createForkedSessionFile, forkWorkGraph, formatWorkGraphEmbedDescription, formatWorkGraphStatus, rootWorkGraph } from "./work-graph.js";
 import { isBridgeRecoveryPrompt, recoverableInterruptedPrompt } from "./recovery-prompt.js";
-import { STARTUP_RECOVERY_ENV, startupRecoveryEnabled } from "./startup-recovery.js";
+import { startupRecoveryEnabled } from "./startup-recovery.js";
 import { extractFirstUrl, postPreparedLinkIngest, prepareLinkIngest, type LinkIngestSendResult, type PreparedLinkIngest } from "./link-ingest.js";
 import { buildLinkIngestCommandText, linkIngestAcceptedTitle, linkIngestUsage, parsePrefixLinkIngestCommand, type LinkIngestCommandMode } from "./link-ingest-command.js";
 import { startLinkIngestStatusBridge, type StopLinkIngestStatusBridge } from "./link-ingest-status-bridge.js";
@@ -125,12 +125,7 @@ export async function runBot(options: RunBotOptions): Promise<void> {
       if (startupRecoveryEnabled()) {
         await autoResumeInterruptedThreads(client, options);
       } else {
-        const interruptedCount = options.registry.listThreads()
-          .filter((record) => record.status === "interrupted" && record.activeRun?.placeholderDiscordMessageId && record.kind !== "discord-dm-workroom")
-          .length;
-        if (interruptedCount > 0) {
-          console.warn(`startup recovery disabled; not editing/resuming ${interruptedCount} interrupted Discord placeholder(s). Set ${STARTUP_RECOVERY_ENV}=1 to opt in.`);
-        }
+        await reconcileInterruptedThreadPlaceholders(client, options);
       }
     }
   });
@@ -313,6 +308,51 @@ async function autoResumeInterruptedThreads(client: Client, options: RunBotOptio
   }
   if (reconciled > 0) {
     console.log(`reconciled ${reconciled} interrupted Pi thread placeholder(s) without resumable prompts`);
+  }
+}
+
+async function reconcileInterruptedThreadPlaceholders(client: Client, options: RunBotOptions): Promise<void> {
+  const interrupted = options.registry.listThreads()
+    .filter((record) => record.status === "interrupted" && record.activeRun?.placeholderDiscordMessageId && record.kind !== "discord-dm-workroom");
+  if (interrupted.length === 0) return;
+
+  let reconciled = 0;
+  for (const record of interrupted) {
+    try {
+      const channel = await client.channels.fetch(record.threadId);
+      if (!channel || typeof (channel as { isThread?: unknown }).isThread !== "function" || !(channel as { isThread: () => boolean }).isThread()) {
+        continue;
+      }
+      const thread = channel as ThreadChannel;
+      const placeholder = await thread.messages.fetch(record.activeRun?.placeholderDiscordMessageId ?? "");
+
+      const persistedFinal = getPersistedFinalAssistant(record);
+      if (persistedFinal) {
+        const chunks = chunkForDiscord(persistedFinal.text, options.config.render.maxDiscordChars);
+        await sendFinalResponseMessages(thread, record, options.registry, chunks, persistedFinal.entryId);
+        await retireWorkingPlaceholder(placeholder, record);
+        await options.registry.patchThread(record.threadId, { status: "idle", activeRun: undefined }).catch(() => undefined);
+        reconciled++;
+        continue;
+      }
+
+      if (options.config.runControl.enabled && options.runControlStore && record.activeRun?.runId) {
+        await options.runControlStore.markTerminal(record.activeRun.runId, "interrupted", {
+          error: "bridge restarted before Discord received a final answer",
+        }).catch(() => undefined);
+        await options.runControlStore.clearActiveIfMatches(record.threadId, record.activeRun.runId).catch(() => undefined);
+      }
+
+      await placeholder.edit(buildInterruptedRunPayload(record)).catch(() => undefined);
+      reconciled++;
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      console.warn(`failed to reconcile interrupted thread ${record.threadId}: ${text}`);
+    }
+  }
+
+  if (reconciled > 0) {
+    console.log(`reconciled ${reconciled} interrupted Pi thread placeholder(s) without auto-resume`);
   }
 }
 

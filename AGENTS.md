@@ -11,5 +11,6 @@ This repo uses pi-notes for durable project memory and local review surfaces.
 - Put reusable local renderers in `.brain/components/**/*.svelte`.
 - Use the `brain-component-composition` skill before substantial `.brain`, component, or data-backed review work.
 - Browser feedback should be handled as a Review Batch with a receipt, not as vague chat commentary.
+- Commit regularly at logical inflection points. When live daemon work or overlapping dirty files make a normal commit risky, create a checkpoint patch first, then commit the smallest coherent slice as soon as it validates.
 - Run `pi-notes brain check` after Brain changes and the normal project checks after code changes.
 <!-- pi-notes-agent:end -->
