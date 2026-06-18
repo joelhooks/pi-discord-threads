@@ -127,6 +127,33 @@ export async function reconcileRunControl(options: {
     }
   }
 
+  for (const run of runs) {
+    if (isTerminalRunStatus(run.status)) continue;
+    const activeRunId = activePointersByThread.get(run.logicalThreadId)?.runId;
+    if (activeRunId === run.runId) continue;
+    const hasOtherActiveRun = Boolean(activeRunId);
+    issues.push({
+      code: hasOtherActiveRun ? "nonterminal-run-not-active" : "nonterminal-run-without-active-pointer",
+      severity: "warn",
+      runId: run.runId,
+      logicalThreadId: run.logicalThreadId,
+      threadId: run.threadId,
+      message: hasOtherActiveRun
+        ? `Run ${run.runId} is ${run.status}, but active pointer ${run.logicalThreadId} references ${activeRunId}.`
+        : `Run ${run.runId} is ${run.status}, but ${run.logicalThreadId} has no active pointer.`,
+      action: apply ? "mark run interrupted" : "would mark run interrupted",
+    });
+    if (apply) {
+      await store.markTerminal(run.runId, "interrupted", {
+        error: hasOtherActiveRun
+          ? `reconciled non-active ${run.status} run; active pointer references ${activeRunId}`
+          : `reconciled non-active ${run.status} run with no active pointer`,
+        placeholderRetiredAt: checkedAt,
+      });
+      applied.push(`marked non-active run ${run.runId} interrupted`);
+    }
+  }
+
   const nonTerminalRunsByThread = new Map<string, RunRecord[]>();
   for (const run of runs) {
     if (isTerminalRunStatus(run.status)) continue;
