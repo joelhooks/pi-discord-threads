@@ -1,0 +1,218 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { defaultConfig } from "../dist/config.js";
+import { RunControlStore } from "../dist/run-control/store.js";
+
+function createRun(id, status = "queued") {
+  const now = new Date(0).toISOString();
+  return {
+    runId: id,
+    logicalThreadId: "thread-1",
+    threadId: "thread-1",
+    kind: "discord-thread",
+    status,
+    sourceDiscordMessageId: `source-${id}`,
+    placeholderDiscordMessageId: `placeholder-${id}`,
+    prompt: `prompt ${id}`,
+    promptPreview: `prompt ${id}`,
+    cwd: process.cwd(),
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+class FakeRedis {
+  strings = new Map();
+  hashes = new Map();
+  streams = [];
+  commands = [];
+  failJobXadd = false;
+
+  async sendCommand(args) {
+    this.commands.push(args);
+    const [command] = args;
+    if (command === "EVAL") return this.eval(args);
+    if (command === "GET") return this.strings.get(args[1]) ?? null;
+    if (command === "HGETALL") {
+      const hash = this.hashes.get(args[1]) ?? new Map();
+      return [...hash.entries()].flat();
+    }
+    if (command === "XADD") {
+      const id = `${this.streams.length + 1}-0`;
+      this.streams.push({ key: args[1], id, args });
+      return id;
+    }
+    throw new Error(`unexpected command: ${args.join(" ")}`);
+  }
+
+  async close() {}
+  destroy() {}
+
+  eval(args) {
+    const script = args[1];
+    if (script.includes("'leaseToken'")) {
+      const activeKey = args[3];
+      const leaseKey = args[4];
+      const runKey = args[5];
+      const runId = args[6];
+      const leaseToken = args[7];
+      const status = args[9];
+      const workerId = args[10];
+      const startedAt = args[11];
+      const updatedAt = args[12];
+      const expectedCurrentStatus = args[13];
+      if (this.strings.get(activeKey) !== runId) return 0;
+      const hash = this.hashes.get(runKey) ?? new Map();
+      const currentStatus = hash.get("status");
+      if (currentStatus !== expectedCurrentStatus) return 0;
+      if (currentStatus !== "queued" && currentStatus !== "running" && currentStatus !== "finalizing") return 0;
+      if (this.strings.has(leaseKey)) return 0;
+      this.strings.set(leaseKey, leaseToken);
+      hash.set("status", status);
+      hash.set("workerId", workerId);
+      hash.set("leaseToken", leaseToken);
+      hash.set("startedAt", startedAt);
+      hash.set("updatedAt", updatedAt);
+      this.hashes.set(runKey, hash);
+      return 1;
+    }
+    if (script.includes("return {'enqueued'")) {
+      const activeKey = args[3];
+      const runKey = args[4];
+      const jobsKey = args[5];
+      const runId = args[6];
+      const active = this.strings.get(activeKey);
+      if (active) return ["busy", active];
+      this.strings.set(activeKey, runId);
+      const hash = new Map();
+      for (let i = 7; i < args.length; i += 2) {
+        hash.set(args[i], args[i + 1]);
+      }
+      this.hashes.set(runKey, hash);
+      if (this.failJobXadd) {
+        this.strings.delete(activeKey);
+        this.hashes.delete(runKey);
+        return ["error", "WRONGTYPE Operation against a key holding the wrong kind of value"];
+      }
+      const jobId = `${this.streams.length + 1}-0`;
+      this.streams.push({ key: jobsKey, id: jobId, args: ["XADD", jobsKey, "*", "runId", runId] });
+      return ["enqueued", runId, jobId];
+    }
+    if (script.includes("redis.call('GET', KEYS[1]) == ARGV[1]")) {
+      const key = args[3];
+      const expected = args[4];
+      if (this.strings.get(key) === expected) {
+        this.strings.delete(key);
+        return 1;
+      }
+      return 0;
+    }
+    throw new Error("unexpected EVAL script");
+  }
+}
+
+function createStore(fake = new FakeRedis()) {
+  const config = defaultConfig();
+  config.runControl.enabled = true;
+  return { store: new RunControlStore(fake, config), fake };
+}
+
+test("tryEnqueueRun creates active pointer, run hash, and job atomically", async () => {
+  const { store, fake } = createStore();
+  const run = createRun("run-1");
+
+  const result = await store.tryEnqueueRun(run);
+
+  assert.deepEqual(result, { enqueued: true, run });
+  assert.equal(fake.strings.get("pi-discord-threads:thread:thread-1:active"), "run-1");
+  assert.equal(fake.hashes.get("pi-discord-threads:runs:run-1").get("status"), "queued");
+  assert.deepEqual(fake.streams.map((entry) => entry.key), [
+    "pi-discord-threads:run:jobs",
+    "pi-discord-threads:run:events",
+  ]);
+  assert.equal(fake.commands.filter((args) => args[0] === "EVAL").length, 1);
+});
+
+test("tryEnqueueRun cleans active state when the atomic job append fails", async () => {
+  const fake = new FakeRedis();
+  fake.failJobXadd = true;
+  const { store } = createStore(fake);
+  const run = createRun("run-poison");
+
+  await assert.rejects(() => store.tryEnqueueRun(run), /Redis enqueue failed/);
+
+  assert.equal(fake.strings.has("pi-discord-threads:thread:thread-1:active"), false);
+  assert.equal(fake.hashes.has("pi-discord-threads:runs:run-poison"), false);
+  assert.equal(fake.streams.length, 0);
+});
+
+test("tryEnqueueRun rejects a live active pointer without creating a second job", async () => {
+  const { store, fake } = createStore();
+  const first = createRun("run-1");
+  const second = createRun("run-2");
+
+  await store.tryEnqueueRun(first);
+  const result = await store.tryEnqueueRun(second);
+
+  assert.deepEqual(result, { enqueued: false, activeRunId: "run-1" });
+  assert.equal(fake.hashes.has("pi-discord-threads:runs:run-2"), false);
+  assert.equal(fake.streams.filter((entry) => entry.key === "pi-discord-threads:run:jobs").length, 1);
+});
+
+test("finalizing active pointer is not cleared or queueable", async () => {
+  const { store, fake } = createStore();
+  const run = createRun("run-finalizing", "finalizing");
+  fake.strings.set("pi-discord-threads:thread:thread-1:active", run.runId);
+  fake.hashes.set("pi-discord-threads:runs:run-finalizing", new Map(Object.entries({
+    ...run,
+    imagesJson: "[]",
+    resultText: "already answered",
+  })));
+
+  const queueable = await store.getQueueableActiveRunId("thread-1");
+
+  assert.equal(queueable, undefined);
+  assert.equal(fake.strings.get("pi-discord-threads:thread:thread-1:active"), run.runId);
+});
+
+test("claimRunLease atomically verifies the active pointer before taking the lease", async () => {
+  const { store, fake } = createStore();
+  const run = createRun("run-claim");
+  await store.tryEnqueueRun(run);
+
+  fake.strings.set("pi-discord-threads:thread:thread-1:active", "run-newer");
+  const staleClaim = await store.claimRunLease(run, "worker-1", "token-stale");
+  assert.equal(staleClaim, false);
+  assert.equal(fake.strings.has("pi-discord-threads:leases:run:run-claim"), false);
+  assert.equal(fake.hashes.get("pi-discord-threads:runs:run-claim").get("status"), "queued");
+
+  fake.strings.set("pi-discord-threads:thread:thread-1:active", "run-claim");
+  fake.hashes.get("pi-discord-threads:runs:run-claim").set("status", "succeeded");
+  const terminalRaceClaim = await store.claimRunLease(run, "worker-1", "token-terminal");
+  assert.equal(terminalRaceClaim, false);
+  assert.equal(fake.strings.has("pi-discord-threads:leases:run:run-claim"), false);
+
+  fake.hashes.get("pi-discord-threads:runs:run-claim").set("status", "queued");
+  const liveClaim = await store.claimRunLease(run, "worker-1", "token-live");
+  assert.equal(liveClaim, true);
+  assert.equal(fake.strings.get("pi-discord-threads:leases:run:run-claim"), "token-live");
+  assert.equal(fake.hashes.get("pi-discord-threads:runs:run-claim").get("status"), "running");
+  assert.equal(fake.hashes.get("pi-discord-threads:runs:run-claim").get("workerId"), "worker-1");
+});
+
+test("tryEnqueueRun clears stale terminal active pointer and retries", async () => {
+  const { store, fake } = createStore();
+  const terminal = createRun("run-old", "succeeded");
+  fake.strings.set("pi-discord-threads:thread:thread-1:active", "run-old");
+  fake.hashes.set("pi-discord-threads:runs:run-old", new Map(Object.entries({
+    ...terminal,
+    imagesJson: "[]",
+  })));
+
+  const next = createRun("run-next");
+  const result = await store.tryEnqueueRun(next);
+
+  assert.deepEqual(result, { enqueued: true, run: next });
+  assert.equal(fake.strings.get("pi-discord-threads:thread:thread-1:active"), "run-next");
+  assert.equal(fake.hashes.get("pi-discord-threads:runs:run-next").get("status"), "queued");
+});

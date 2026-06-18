@@ -40,13 +40,31 @@ test("idle thread records cannot retain stale activeRun metadata", async () => {
   }
 });
 
+test("queued thread records keep activeRun metadata without pretending to run", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-discord-registry-lifecycle-"));
+  try {
+    const registry = new Registry(join(dir, "registry.json"));
+    await registry.load();
+    const queued = await registry.upsertThread({
+      threadId: "thread-2",
+      cwd: dir,
+      status: "queued",
+      activeRun,
+    });
+    assert.equal(queued.status, "queued");
+    assert.equal(queued.activeRun?.placeholderDiscordMessageId, activeRun.placeholderDiscordMessageId);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("interrupted thread records keep activeRun recovery metadata", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pi-discord-registry-lifecycle-"));
   try {
     const registry = new Registry(join(dir, "registry.json"));
     await registry.load();
     const interrupted = await registry.upsertThread({
-      threadId: "thread-2",
+      threadId: "thread-3",
       cwd: dir,
       status: "interrupted",
       activeRun,

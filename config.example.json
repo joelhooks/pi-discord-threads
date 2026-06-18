@@ -79,6 +79,7 @@
     "heartbeatMs": 10000,
     "staleRunMs": 600000,
     "reconcileIntervalMs": 60000,
-    "commandTimeoutMs": 5000
+    "commandTimeoutMs": 5000,
+    "maxConcurrentRuns": 4
   }
 }

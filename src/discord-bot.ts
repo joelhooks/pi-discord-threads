@@ -2208,9 +2208,14 @@ async function enqueueRunControlPrompt(
   const run = buildRunControlRecord(record, sourceDiscordId, placeholder.id, prompt, images);
   const result = await store.tryEnqueueRun(run);
   if (!result.enqueued) {
+    const queueableRunId = await store.getQueueableActiveRunId(record.threadId);
+    if (!queueableRunId) {
+      await placeholder.delete().catch(() => placeholder.edit(buildFinalizingBusyPayload()).then(() => undefined).catch(() => undefined));
+      return;
+    }
     const intent = parseQueueIntent(prompt);
     await store.appendInput({
-      runId: result.activeRunId,
+      runId: queueableRunId,
       logicalThreadId: record.threadId,
       mode: intent.mode,
       text: intent.text,
@@ -2218,22 +2223,18 @@ async function enqueueRunControlPrompt(
       sourceDiscordMessageId: sourceDiscordId,
       createdAt: new Date().toISOString(),
     });
-    const pending = await store.countInputsForRun(record.threadId, result.activeRunId).catch(() => 0);
+    const pending = await store.countInputsForRun(record.threadId, queueableRunId).catch(() => 0);
     await placeholder.delete().catch(() => placeholder.edit(buildQueuedPayload(intent.mode, pending)).then(() => undefined).catch(() => undefined));
     return;
   }
 
   const activeRun = buildActiveRunRecord(sourceDiscordId, placeholder.id, prompt, record.sessionFile, run.runId);
-  const runningRecord: ThreadRecord = { ...record, status: "running", activeRun };
+  const queuedRecord: ThreadRecord = { ...record, status: "queued", activeRun };
   await options.registry.patchThread(record.threadId, {
-    status: "running",
+    status: "queued",
     activeRun,
   });
-  await placeholder.edit(buildWorkingPayload(runningRecord, prompt, {
-    phase: "starting",
-    title: "Queued in Redis run control",
-    detail: record.sessionFile ? "Worker will rehydrate existing session" : "Worker will create a durable session",
-  })).catch(() => undefined);
+  await placeholder.edit(buildQueuedRunPayload(queuedRecord)).catch(() => undefined);
 }
 
 function buildRunControlRecord(
@@ -2281,8 +2282,14 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
         const runningRecord: ThreadRecord = {
           ...record,
           status: "running",
-          activeRun: record.activeRun ?? buildActiveRunRecord(run.sourceDiscordMessageId, run.placeholderDiscordMessageId, run.prompt, run.sessionFile, run.runId),
+          activeRun: record.activeRun?.runId === run.runId
+            ? record.activeRun
+            : buildActiveRunRecord(run.sourceDiscordMessageId, run.placeholderDiscordMessageId, run.prompt, run.sessionFile, run.runId),
         };
+        await options.registry.patchThread(record.threadId, {
+          status: "running",
+          activeRun: runningRecord.activeRun,
+        }).catch(() => undefined);
         const progress = createProgressUpdater(placeholder, runningRecord, run.prompt, options.config);
         stopProgress = progress.stop;
         unsubscribeProgress = progressEvents.subscribe(progress.update);
@@ -2291,7 +2298,7 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
           title: "Worker claimed Redis run",
           detail: run.sessionFile ? "Rehydrating existing session" : "Creating a durable session",
         })).catch(() => undefined);
-        const result = await options.runtimeManager.enqueuePrompt(record, run.prompt, run.images ?? [], progressEvents.publish);
+        const result = await options.runtimeManager.enqueuePrompt(runningRecord, run.prompt, run.images ?? [], progressEvents.publish);
         unsubscribeProgress?.();
         await stopProgress();
         stopTyping();
@@ -2663,6 +2670,31 @@ function buildQueuedPayload(mode: "steer" | "followUp", pendingCount: number): R
     embeds: [],
     components: [],
   };
+}
+
+function buildFinalizingBusyPayload(): RichPayload {
+  return {
+    content: "Previous turn is finalizing. Send this again in a moment if it does not post automatically.",
+    embeds: [],
+    components: [],
+  };
+}
+
+function buildQueuedRunPayload(record: ThreadRecord): RichPayload {
+  return buildHudCardPayload(record, {
+    tone: "warning",
+    stateLabel: "queued",
+    now: "Waiting for a run-control worker to claim this turn.",
+    signals: "not active yet; no Pi turn is running for this card",
+    progress: [
+      "✓ run accepted by Redis",
+      "→ waiting for worker claim",
+      "· live events start after claim",
+    ],
+    next: "A worker will switch this card to active when it claims the lease.",
+    footer: "final answer posts as a fresh reply below",
+    expectedMessageId: record.activeRun?.placeholderDiscordMessageId,
+  });
 }
 
 function buildErrorPayload(record: ThreadRecord, error: string): RichPayload {

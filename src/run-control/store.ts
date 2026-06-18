@@ -11,6 +11,58 @@ import {
 
 const WORKER_GROUP = "workers";
 
+const ATOMIC_ENQUEUE_RUN_SCRIPT = `
+local active = redis.call('GET', KEYS[1])
+if active then
+  return {'busy', active}
+end
+redis.call('SET', KEYS[1], ARGV[1])
+for i = 2, #ARGV, 2 do
+  local hset = redis.pcall('HSET', KEYS[2], ARGV[i], ARGV[i + 1])
+  if type(hset) == 'table' and hset['err'] then
+    redis.call('DEL', KEYS[1])
+    redis.call('DEL', KEYS[2])
+    return {'error', hset['err']}
+  end
+end
+local jobId = redis.pcall('XADD', KEYS[3], '*', 'runId', ARGV[1])
+if type(jobId) == 'table' and jobId['err'] then
+  redis.call('DEL', KEYS[1])
+  redis.call('DEL', KEYS[2])
+  return {'error', jobId['err']}
+end
+return {'enqueued', ARGV[1], jobId}
+`;
+
+const CLAIM_RUN_LEASE_SCRIPT = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+local status = redis.call('HGET', KEYS[3], 'status')
+if status ~= ARGV[8] then
+  return 0
+end
+if status ~= 'queued' and status ~= 'running' and status ~= 'finalizing' then
+  return 0
+end
+local claimed = redis.call('SET', KEYS[2], ARGV[2], 'NX', 'PX', ARGV[3])
+if not ((type(claimed) == 'table' and claimed['ok'] == 'OK') or claimed == 'OK') then
+  return 0
+end
+local hset = redis.pcall('HSET', KEYS[3],
+  'status', ARGV[4],
+  'workerId', ARGV[5],
+  'leaseToken', ARGV[2],
+  'startedAt', ARGV[6],
+  'updatedAt', ARGV[7]
+)
+if type(hset) == 'table' and hset['err'] then
+  redis.call('DEL', KEYS[2])
+  return {'error', hset['err']}
+end
+return 1
+`;
+
 export class RunControlStore {
   readonly keys: RunControlKeys;
 
@@ -36,27 +88,39 @@ export class RunControlStore {
   }
 
   async tryEnqueueRun(run: RunRecord): Promise<{ enqueued: true; run: RunRecord } | { enqueued: false; activeRunId: string }> {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const activeKey = this.keys.active(run.logicalThreadId);
-      const setReply = await this.command(["SET", activeKey, run.runId, "NX"]);
-      if (setReply !== "OK") {
-        const activeRunId = await this.getActiveRunId(run.logicalThreadId);
-        if (activeRunId && await this.shouldRejectActivePointer(activeRunId)) {
-          await this.clearActiveIfMatches(run.logicalThreadId, activeRunId).catch(() => undefined);
-          continue;
-        }
-        return { enqueued: false, activeRunId: activeRunId ?? "unknown" };
-      }
+    const runFields = runRecordToHash(run);
+    const hashArgs: string[] = [];
+    for (const [field, value] of Object.entries(runFields)) {
+      if (value === undefined) continue;
+      hashArgs.push(field, value);
+    }
 
-      try {
-        await this.hset(this.keys.run(run.runId), runRecordToHash(run));
-        await this.command(["XADD", this.keys.jobs, "*", "runId", run.runId]);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const reply = await this.command([
+        "EVAL",
+        ATOMIC_ENQUEUE_RUN_SCRIPT,
+        "3",
+        this.keys.active(run.logicalThreadId),
+        this.keys.run(run.runId),
+        this.keys.jobs,
+        run.runId,
+        ...hashArgs,
+      ]);
+      const [status, activeRunId] = parseEvalArray(reply);
+      if (status === "enqueued") {
         await this.appendRunEvent(run.runId, "queued", { logicalThreadId: run.logicalThreadId, threadId: run.threadId });
         return { enqueued: true, run };
-      } catch (error) {
-        await this.clearActiveIfMatches(run.logicalThreadId, run.runId).catch(() => undefined);
-        throw error;
       }
+      if (status === "error") {
+        throw new Error(`Redis enqueue failed for ${run.runId}: ${activeRunId || "unknown error"}`);
+      }
+
+      const currentActiveRunId = activeRunId || await this.getActiveRunId(run.logicalThreadId);
+      if (currentActiveRunId && await this.shouldRejectActivePointer(currentActiveRunId)) {
+        await this.clearActiveIfMatches(run.logicalThreadId, currentActiveRunId).catch(() => undefined);
+        continue;
+      }
+      return { enqueued: false, activeRunId: currentActiveRunId ?? "unknown" };
     }
 
     const activeRunId = await this.getActiveRunId(run.logicalThreadId);
@@ -199,10 +263,12 @@ export class RunControlStore {
   async getQueueableActiveRunId(logicalThreadId: string): Promise<string | undefined> {
     const activeRunId = await this.getActiveRunId(logicalThreadId);
     if (!activeRunId) return undefined;
-    if (await this.shouldRejectActivePointer(activeRunId)) {
+    const run = await this.getRun(activeRunId);
+    if (!run || isTerminalRunStatus(run.status)) {
       await this.clearActiveIfMatches(logicalThreadId, activeRunId).catch(() => undefined);
       return undefined;
     }
+    if (run.status === "finalizing") return undefined;
     return activeRunId;
   }
 
@@ -218,24 +284,29 @@ export class RunControlStore {
   }
 
   async claimRunLease(run: RunRecord, workerId: string, leaseToken: string): Promise<boolean> {
-    const reply = await this.command([
-      "SET",
-      this.keys.runLease(run.runId),
-      leaseToken,
-      "NX",
-      "PX",
-      String(this.config.runControl.leaseTtlMs),
-    ]);
-    if (reply !== "OK") return false;
-
     const now = new Date().toISOString();
-    await this.hset(this.keys.run(run.runId), runRecordToHash({
-      status: run.status === "finalizing" ? "finalizing" : "running",
-      workerId,
+    const result = await this.command([
+      "EVAL",
+      CLAIM_RUN_LEASE_SCRIPT,
+      "3",
+      this.keys.active(run.logicalThreadId),
+      this.keys.runLease(run.runId),
+      this.keys.run(run.runId),
+      run.runId,
       leaseToken,
-      startedAt: run.startedAt ?? now,
-      updatedAt: now,
-    }));
+      String(this.config.runControl.leaseTtlMs),
+      run.status === "finalizing" ? "finalizing" : "running",
+      workerId,
+      run.startedAt ?? now,
+      now,
+      run.status,
+    ]);
+    const claimResult = parseEvalArray(result);
+    if (claimResult[0] === "error") {
+      throw new Error(`Redis lease claim failed for ${run.runId}: ${claimResult[1] || "unknown error"}`);
+    }
+    if (Number(result) !== 1 && claimResult[0] !== "1") return false;
+
     await this.appendRunEvent(run.runId, "running", { logicalThreadId: run.logicalThreadId, workerId });
     return true;
   }
@@ -347,7 +418,7 @@ export class RunControlStore {
 
   private async shouldRejectActivePointer(runId: string): Promise<boolean> {
     const run = await this.getRun(runId);
-    return !run || run.status === "finalizing" || isTerminalRunStatus(run.status);
+    return !run || isTerminalRunStatus(run.status);
   }
 
   private async keysMatching(pattern: string): Promise<string[]> {
@@ -460,6 +531,7 @@ function runRecordToHash(record: Partial<RunRecord>): Record<string, string | un
     updatedAt: record.updatedAt,
     startedAt: record.startedAt,
     finalizedAt: record.finalizedAt,
+    finalizeAttemptedAt: record.finalizeAttemptedAt,
     placeholderRetiredAt: record.placeholderRetiredAt,
     error: record.error,
   };
@@ -489,6 +561,7 @@ function runRecordFromHash(hash: Record<string, string>): RunRecord {
     updatedAt: hash.updatedAt,
     startedAt: hash.startedAt || undefined,
     finalizedAt: hash.finalizedAt || undefined,
+    finalizeAttemptedAt: hash.finalizeAttemptedAt || undefined,
     placeholderRetiredAt: hash.placeholderRetiredAt || undefined,
     error: hash.error || undefined,
   };
@@ -511,6 +584,10 @@ function jobFromStreamEntries(entries: Array<{ id: string; fields: Record<string
   const first = entries[0];
   const runId = first?.fields.runId;
   return first && runId ? { streamId: first.id, runId } : undefined;
+}
+
+function parseEvalArray(reply: unknown): string[] {
+  return Array.isArray(reply) ? reply.map(valueToString) : [valueToString(reply)];
 }
 
 function parseXReadReply(reply: unknown): Array<{ stream: string; entries: Array<{ id: string; fields: Record<string, string> }> }> {

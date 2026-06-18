@@ -27,7 +27,7 @@ export interface RunControlWorkerAdapter {
 
 export class RunControlWorker {
   private stopped = false;
-  private loopPromise: Promise<void> | undefined;
+  private loopPromises: Promise<void>[] = [];
 
   constructor(
     private readonly store: RunControlStorePort,
@@ -37,36 +37,41 @@ export class RunControlWorker {
   ) {}
 
   start(): void {
-    if (this.loopPromise) return;
+    if (this.loopPromises.length > 0) return;
     this.stopped = false;
-    this.loopPromise = this.loop().catch((error) => {
-      const text = error instanceof Error ? error.message : String(error);
-      console.error(`run-control worker stopped unexpectedly: ${text}`);
+    const concurrency = Math.max(1, Math.floor(this.config.runControl.maxConcurrentRuns));
+    this.loopPromises = Array.from({ length: concurrency }, (_, index) => {
+      const laneWorkerId = concurrency === 1 ? this.workerId : `${this.workerId}:${index + 1}`;
+      return this.loop(laneWorkerId).catch((error) => {
+        const text = error instanceof Error ? error.message : String(error);
+        console.error(`run-control worker ${laneWorkerId} stopped unexpectedly: ${text}`);
+      });
     });
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
-    await this.loopPromise?.catch(() => undefined);
+    await Promise.all(this.loopPromises.map((promise) => promise.catch(() => undefined)));
+    this.loopPromises = [];
   }
 
-  private async loop(): Promise<void> {
+  private async loop(workerId: string): Promise<void> {
     await this.ensureConsumerGroupWithRetry();
     if (this.stopped) return;
-    console.log(`run-control worker ${this.workerId} listening for Redis jobs`);
+    console.log(`run-control worker ${workerId} listening for Redis jobs`);
     while (!this.stopped) {
-      const job = await this.store.dequeueJob(this.workerId, 1_000).catch((error) => {
+      const job = await this.store.dequeueJob(workerId, 1_000).catch((error) => {
         const text = error instanceof Error ? error.message : String(error);
-        console.warn(`run-control dequeue failed: ${text}`);
+        console.warn(`run-control dequeue failed for ${workerId}: ${text}`);
         return undefined;
       });
       if (!job) {
-        await this.store.recordWorkerIdle(this.workerId).catch(() => undefined);
+        await this.store.recordWorkerIdle(workerId).catch(() => undefined);
         continue;
       }
-      await this.handleJob(job).catch((error) => {
+      await this.handleJob(job, workerId).catch((error) => {
         const text = error instanceof Error ? error.message : String(error);
-        console.error(`run-control job ${job.runId} failed outside handler: ${text}`);
+        console.error(`run-control job ${job.runId} failed outside handler on ${workerId}: ${text}`);
       });
     }
   }
@@ -86,7 +91,7 @@ export class RunControlWorker {
     }
   }
 
-  private async handleJob(job: RunJob): Promise<void> {
+  private async handleJob(job: RunJob, workerId: string): Promise<void> {
     const run = await this.store.getRun(job.runId);
     if (!run) {
       await this.store.acknowledgeJob(job);
@@ -97,16 +102,30 @@ export class RunControlWorker {
       return;
     }
 
-    const leaseToken = randomUUID();
-    const claimed = await this.store.claimRunLease(run, this.workerId, leaseToken);
-    if (!claimed) {
+    const activeRunId = await this.store.getActiveRunId(run.logicalThreadId);
+    if (activeRunId !== run.runId) {
+      await this.store.appendRunEvent(run.runId, "stale_job_skipped", {
+        logicalThreadId: run.logicalThreadId,
+        activeRunId: activeRunId ?? "",
+        workerId,
+      }).catch(() => undefined);
       await this.store.acknowledgeJob(job);
+      return;
+    }
+
+    const leaseToken = randomUUID();
+    const claimed = await this.store.claimRunLease(run, workerId, leaseToken);
+    if (!claimed) {
+      await this.store.appendRunEvent(run.runId, "lease_claim_busy", {
+        logicalThreadId: run.logicalThreadId,
+        workerId,
+      }).catch(() => undefined);
       return;
     }
 
     let terminal = false;
     try {
-      await this.runWithLease(run, leaseToken);
+      await this.runWithLease(run, leaseToken, workerId);
       terminal = true;
     } finally {
       await this.store.releaseRunLease(run.runId, leaseToken).catch(() => undefined);
@@ -116,13 +135,13 @@ export class RunControlWorker {
     }
   }
 
-  private async runWithLease(run: RunRecord, leaseToken: string): Promise<void> {
+  private async runWithLease(run: RunRecord, leaseToken: string, workerId: string): Promise<void> {
     let lastInputId = "0-0";
     const pendingInputs: PendingRunInput[] = [];
     let acceptingInputs = run.status !== "finalizing";
 
     const heartbeat = setInterval(() => {
-      void this.store.heartbeatRunLease(run.runId, leaseToken, this.workerId).catch((error) => {
+      void this.store.heartbeatRunLease(run.runId, leaseToken, workerId).catch((error) => {
         const text = error instanceof Error ? error.message : String(error);
         console.warn(`run-control heartbeat failed for ${run.runId}: ${text}`);
       });
@@ -238,6 +257,21 @@ export class RunControlWorker {
 
     const finalizedAt = new Date().toISOString();
     if (claim === "acquired") {
+      if (run.finalizeAttemptedAt) {
+        const error = new Error("Previous Discord finalization attempt is uncertain; refusing to post a duplicate final answer");
+        await this.adapter.failRun(run, error).catch((failError) => {
+          const text = failError instanceof Error ? failError.message : String(failError);
+          console.warn(`run-control failed to edit uncertain-finalization placeholder for ${run.runId}: ${text}`);
+        });
+        await this.store.markTerminal(run.runId, "failed", {
+          error: error.message,
+          placeholderRetiredAt: finalizedAt,
+        });
+        await this.store.completeFinalize(run.runId, finalizeToken);
+        await this.store.clearActiveIfMatches(run.logicalThreadId, run.runId);
+        return;
+      }
+      await this.store.patchRun(run.runId, { finalizeAttemptedAt: finalizedAt }, { preserveTerminal: true });
       await this.adapter.finalizeRun(run, result);
       await this.store.completeFinalize(run.runId, finalizeToken);
     }

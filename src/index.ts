@@ -210,7 +210,7 @@ async function doctor(configPath: string, config: AppConfig): Promise<void> {
   console.log(`workspaces: ${Object.keys(config.pi.workspaces).length}`);
   console.log(`attachments: ${config.attachments.enabled ? "enabled" : "disabled"}, maxBytes=${config.attachments.maxBytes}`);
   console.log(`linkIngest: ${config.linkIngest.enabled ? "enabled" : "disabled"}, url=${config.linkIngest.inngestUrl}, eventKeyEnv=${config.linkIngest.eventKeyEnv ?? "(none)"}, eventKeySecret=${config.linkIngest.eventKeySecretName ?? "(none)"}, signingKeyEnv=${config.linkIngest.signingKeyEnv ?? "(none)"}, signingKeySecret=${config.linkIngest.signingKeySecretName ?? "(none)"}, statusBridge=${config.linkIngest.statusBridgeEnabled ? "enabled" : "disabled"}`);
-  console.log(`runControl: ${config.runControl.enabled ? "enabled" : "disabled"}, roles=${config.runControl.roles.join(",")}, keyPrefix=${config.runControl.keyPrefix}`);
+  console.log(`runControl: ${config.runControl.enabled ? "enabled" : "disabled"}, roles=${config.runControl.roles.join(",")}, keyPrefix=${config.runControl.keyPrefix}, maxConcurrentRuns=${config.runControl.maxConcurrentRuns}`);
   console.log(`runQueueEngine: ${config.runControl.enabled ? RUN_QUEUE_ENGINE_NAME : "disabled"}`);
   console.log(`runControlWorkerId: ${getRunControlWorkerId(config)}`);
   const redisHealth = await checkRunControlRedisHealth(config);

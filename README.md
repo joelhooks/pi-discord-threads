@@ -118,7 +118,7 @@ Live run HUD narration is controlled under `render.hud`. It defaults to `openai-
 
 Thread title evaluation is controlled under `render.threadTitles`. It defaults to `openai-codex/gpt-5.4-mini` and runs as a post-turn online Pi hook after turn 2, then every 8 completed turns. The evaluator proposes titles only; deterministic bridge guardrails decide whether to call Discord `thread.setName()`.
 
-Redis run control is configured under `runControl` and is **disabled by default**. When enabled, ingress writes jobs, active-thread pointers, leases, queued steer/follow-up input, and finalization guards to Redis. Redis commands are bounded by `runControl.commandTimeoutMs` so a blackholed TCP forward fails fast instead of wedging the bridge. The process can run `bot`, `worker`, and `reconcile` roles together or separately:
+Redis run control is configured under `runControl` and is **disabled by default**. When enabled, ingress atomically writes the active-thread pointer, run hash, and job stream entry before showing a queued Discord card. The card only switches to active after a worker claims the run lease. Redis commands are bounded by `runControl.commandTimeoutMs` so a blackholed TCP forward fails fast instead of wedging the bridge. `runControl.maxConcurrentRuns` controls worker lanes across different threads while Redis preserves one active run per logical thread. The process can run `bot`, `worker`, and `reconcile` roles together or separately:
 
 ```bash
 pi-discord-threads start --roles bot,worker,reconcile
@@ -202,6 +202,7 @@ npm run publish-system-prompt
 - Pi session JSONL is the durable source of truth.
 - Runtime instances are lazy and disposed after idle TTL.
 - Redis run control, when enabled, owns in-flight run coordination; Pi JSONL remains canonical history.
+- Run-control HUD cards distinguish queued from running: queued means waiting for worker claim, running means a worker owns a live lease.
 - Run control uses at-least-once execution with idempotent finalization rather than exactly-once promises.
 - `/pi fork` creates a child Discord thread and, when possible, a true Pi forked session with `parentSession` lineage.
 - `/tree` is a future command that should navigate the current session in-place.

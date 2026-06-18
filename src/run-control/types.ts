@@ -43,6 +43,7 @@ export interface RunRecord {
   updatedAt: string;
   startedAt?: string;
   finalizedAt?: string;
+  finalizeAttemptedAt?: string;
   placeholderRetiredAt?: string;
   error?: string;
 }

@@ -49,7 +49,7 @@ export interface ThreadRecord {
   workspaceName?: string;
   sessionName?: string;
   extensionPaths?: string[];
-  status: "idle" | "running" | "error" | "locked" | "interrupted";
+  status: "idle" | "queued" | "running" | "error" | "locked" | "interrupted";
   activeRun?: ActiveRunRecord;
   titleState?: ThreadTitleState;
   workGraph?: WorkGraphMetadata;
@@ -317,7 +317,7 @@ export class Registry implements RegistryPort {
 }
 
 function normalizeThreadLifecycle(record: ThreadRecord): ThreadRecord {
-  if (record.status === "running" || record.status === "interrupted") return record;
+  if (record.status === "queued" || record.status === "running" || record.status === "interrupted") return record;
   const { activeRun: _activeRun, ...withoutActiveRun } = record;
   return withoutActiveRun;
 }

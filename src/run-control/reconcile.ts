@@ -36,6 +36,7 @@ export async function reconcileRunControl(options: {
   const runs = await store.listRuns();
   const runsById = new Map(runs.map((run) => [run.runId, run]));
   const activePointers = await store.listActivePointers();
+  const activePointersByThread = new Map(activePointers.map((pointer) => [pointer.logicalThreadId, pointer]));
 
   for (const run of runs) {
     if ((run.status === "running" || run.status === "finalizing") && await isRunLeaseExpired(store, run)) {
@@ -46,13 +47,8 @@ export async function reconcileRunControl(options: {
         logicalThreadId: run.logicalThreadId,
         threadId: run.threadId,
         message: `Run ${run.runId} is ${run.status} but has no live worker lease.`,
-        action: apply ? "mark interrupted and clear active pointer" : "would mark interrupted/reclaimable",
+        action: "leave pending for worker XAUTOCLAIM recovery",
       });
-      if (apply) {
-        await store.markTerminal(run.runId, "interrupted", { error: "reconciler: worker lease expired" });
-        await store.clearActiveIfMatches(run.logicalThreadId, run.runId);
-        applied.push(`marked run ${run.runId} interrupted`);
-      }
     }
 
     if (isTerminalRunStatus(run.status) && run.placeholderDiscordMessageId && !run.placeholderRetiredAt) {
@@ -131,16 +127,37 @@ export async function reconcileRunControl(options: {
     }
   }
 
+  const nonTerminalRunsByThread = new Map<string, RunRecord[]>();
+  for (const run of runs) {
+    if (isTerminalRunStatus(run.status)) continue;
+    const existing = nonTerminalRunsByThread.get(run.logicalThreadId) ?? [];
+    existing.push(run);
+    nonTerminalRunsByThread.set(run.logicalThreadId, existing);
+  }
+  for (const [logicalThreadId, liveRuns] of nonTerminalRunsByThread.entries()) {
+    if (liveRuns.length <= 1) continue;
+    const activeRunId = activePointersByThread.get(logicalThreadId)?.runId;
+    issues.push({
+      code: "multiple-nonterminal-runs",
+      severity: "warn",
+      runId: activeRunId,
+      logicalThreadId,
+      threadId: liveRuns.find((run) => run.runId === activeRunId)?.threadId ?? liveRuns[0]?.threadId,
+      message: `Logical thread ${logicalThreadId} has ${liveRuns.length} non-terminal Redis runs (${liveRuns.map((run) => `${run.runId}:${run.status}`).join(", ")}).`,
+      action: "manual cleanup recommended; worker will only execute the active pointer run",
+    });
+  }
+
   for (const record of registry.listThreads()) {
-    if (record.status !== "running") continue;
-    const activeRunId = activePointers.find((pointer) => pointer.logicalThreadId === record.threadId)?.runId;
+    if (record.status !== "queued" && record.status !== "running") continue;
+    const activeRunId = activePointersByThread.get(record.threadId)?.runId;
     if (!activeRunId) {
       issues.push({
-        code: "registry-running-without-redis-active",
+        code: "registry-live-without-redis-active",
         severity: "warn",
         threadId: record.threadId,
         logicalThreadId: record.threadId,
-        message: `Registry thread ${record.threadId} is running but has no matching Redis active run.`,
+        message: `Registry thread ${record.threadId} is ${record.status} but has no matching Redis active run.`,
         action: apply ? "mark registry thread interrupted" : "would mark registry thread interrupted",
       });
       if (apply) {
@@ -151,6 +168,31 @@ export async function reconcileRunControl(options: {
             : undefined,
         });
         applied.push(`marked registry thread ${record.threadId} interrupted`);
+      }
+      continue;
+    }
+
+    const run = runsById.get(activeRunId);
+    if (!run || isTerminalRunStatus(run.status)) continue;
+    const desiredStatus = run.status === "queued" ? "queued" : "running";
+    const activeRunMismatch = record.activeRun?.runId !== run.runId;
+    if (record.status !== desiredStatus || activeRunMismatch) {
+      issues.push({
+        code: "registry-live-run-mismatch",
+        severity: "warn",
+        runId: run.runId,
+        threadId: record.threadId,
+        logicalThreadId: record.threadId,
+        message: `Registry thread ${record.threadId} says ${record.status}/${record.activeRun?.runId ?? "no-active-run"}, but Redis active run ${run.runId} is ${run.status}.`,
+        action: apply ? `sync registry to ${desiredStatus}` : `would sync registry to ${desiredStatus}`,
+      });
+      if (apply) {
+        await registry.patchThread(record.threadId, {
+          status: desiredStatus,
+          activeRun: activeRunFromRun(run),
+          sessionFile: run.sessionFile ?? record.sessionFile,
+        });
+        applied.push(`synced registry thread ${record.threadId} to ${desiredStatus} run ${run.runId}`);
       }
     }
   }
@@ -199,6 +241,24 @@ export function startRunControlReconcileLoop(options: {
   interval.unref();
   void runOnce().catch(() => undefined);
   return () => clearInterval(interval);
+}
+
+const ACTIVE_RUN_PROMPT_LIMIT = 24_000;
+
+function activeRunFromRun(run: RunRecord) {
+  const prompt = run.prompt.length > ACTIVE_RUN_PROMPT_LIMIT
+    ? `${run.prompt.slice(0, ACTIVE_RUN_PROMPT_LIMIT)}\n\n[truncated by pi-discord-threads active-run recovery metadata]`
+    : run.prompt;
+  return {
+    runId: run.runId,
+    sourceDiscordMessageId: run.sourceDiscordMessageId,
+    placeholderDiscordMessageId: run.placeholderDiscordMessageId,
+    prompt,
+    promptPreview: run.promptPreview,
+    startedAt: run.startedAt ?? run.createdAt,
+    updatedAt: run.updatedAt,
+    sessionFile: run.sessionFile,
+  };
 }
 
 async function isRunLeaseExpired(store: RunControlStorePort, run: RunRecord): Promise<boolean> {
