@@ -90,6 +90,13 @@ export type RuntimePromptDisposition =
   | { kind: "start" }
   | { kind: "queue"; mode: "steer" | "followUp"; reason: "runtime-streaming" | "registry-running" };
 
+export function hasVisibleActiveRun(input: {
+  registryStatus?: ThreadRecord["status"];
+  hasRegistryActiveRun?: boolean;
+}): boolean {
+  return input.registryStatus === "running" && input.hasRegistryActiveRun === true;
+}
+
 export function decideRuntimePromptDisposition(input: {
   registryStatus?: ThreadRecord["status"];
   hasRegistryActiveRun?: boolean;
@@ -97,10 +104,10 @@ export function decideRuntimePromptDisposition(input: {
   requestedMode?: "steer" | "followUp";
 }): RuntimePromptDisposition {
   const mode = input.requestedMode ?? "steer";
-  if (input.runtimeStreaming) {
+  if (input.runtimeStreaming && hasVisibleActiveRun(input)) {
     return { kind: "queue", mode, reason: "runtime-streaming" };
   }
-  if (input.registryStatus === "running" && input.hasRegistryActiveRun) {
+  if (hasVisibleActiveRun(input)) {
     return { kind: "queue", mode, reason: "registry-running" };
   }
   return { kind: "start" };

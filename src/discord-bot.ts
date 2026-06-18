@@ -2520,7 +2520,7 @@ function buildHudCardPayload(record: ThreadRecord, options: {
       textDisplayComponent(nowLines.join("\n")),
       textDisplayComponent(["**Progress**", ...progress.map((item) => truncateForComponent(item, 260))].join("\n")),
       textDisplayComponent(statusBlock),
-      ...(options.inputText === false ? [] : [textDisplayComponent(options.inputText ?? "**Input**\nSend a message to steer this turn.\nFollow-up queue requires ESC first, then send it.")]),
+      ...(options.inputText === false ? [] : [textDisplayComponent(options.inputText ?? "**Input**\nSend a message to steer this turn.\nPrefix with `follow-up:` to queue after the current turn.")]),
       textDisplayComponent(`-# ${truncateForComponent(options.footer, 280)}`),
     ])],
   };

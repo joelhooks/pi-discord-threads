@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createActor } from "xstate";
-import { decideRuntimePromptDisposition, threadRunMachine } from "../dist/thread-run-state.js";
+import { decideRuntimePromptDisposition, hasVisibleActiveRun, threadRunMachine } from "../dist/thread-run-state.js";
 
 test("running thread prompt queues follow-up instead of starting duplicate run", () => {
   const actor = createActor(threadRunMachine).start();
@@ -22,16 +22,22 @@ test("startup reconcile makes interrupted runs visible without auto-resume", () 
   assert.equal(actor.getSnapshot().value, "interruptedVisible");
 });
 
-test("runtime streaming is the hard queue signal", () => {
-  assert.deepEqual(decideRuntimePromptDisposition({ runtimeStreaming: true, requestedMode: "followUp" }), {
+test("runtime streaming queues only when Discord has a visible active run", () => {
+  assert.deepEqual(decideRuntimePromptDisposition({ registryStatus: "running", hasRegistryActiveRun: true, runtimeStreaming: true, requestedMode: "followUp" }), {
     kind: "queue",
     mode: "followUp",
     reason: "runtime-streaming",
   });
 });
 
-test("idle runtime starts even when registry has no active run", () => {
-  assert.deepEqual(decideRuntimePromptDisposition({ registryStatus: "idle", hasRegistryActiveRun: false, runtimeStreaming: false }), {
+test("untracked streaming runtime does not swallow fresh input", () => {
+  assert.deepEqual(decideRuntimePromptDisposition({ registryStatus: "idle", hasRegistryActiveRun: false, runtimeStreaming: true, requestedMode: "followUp" }), {
     kind: "start",
   });
+});
+
+test("visible active run requires running status and activeRun metadata", () => {
+  assert.equal(hasVisibleActiveRun({ registryStatus: "running", hasRegistryActiveRun: true }), true);
+  assert.equal(hasVisibleActiveRun({ registryStatus: "idle", hasRegistryActiveRun: true }), false);
+  assert.equal(hasVisibleActiveRun({ registryStatus: "interrupted", hasRegistryActiveRun: true }), false);
 });

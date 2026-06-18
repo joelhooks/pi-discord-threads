@@ -14,7 +14,7 @@ import type { AppConfig } from "./config.js";
 import { DISCORD_SYSTEM_PROMPT } from "./discord-system-prompt.js";
 import type { Registry, ThreadRecord } from "./registry.js";
 import type { RunFeedEvent } from "./run-hud.js";
-import { decideRuntimePromptDisposition } from "./thread-run-state.js";
+import { decideRuntimePromptDisposition, hasVisibleActiveRun } from "./thread-run-state.js";
 
 interface ManagedRuntime {
   runtime: AgentSessionRuntime;
@@ -96,10 +96,19 @@ export class PiRuntimeManager {
   }
 
   async queueMessageForThreadIfActive(thread: ThreadRecord, text: string, mode: "steer" | "followUp" = "steer", images: InlineImageContent[] = []): Promise<QueueMessageResult> {
+    const visibleActiveRun = hasVisibleActiveRun({
+      registryStatus: thread.status,
+      hasRegistryActiveRun: Boolean(thread.activeRun),
+    });
     const existing = this.runtimes.get(thread.threadId);
-    if (existing) return this.queueMessageOnSession(existing.runtime.session, text, mode, images);
+    if (existing) {
+      if (!visibleActiveRun && existing.runtime.session.isStreaming) {
+        await this.abortUntrackedRuntime(thread.threadId, existing);
+      }
+      return visibleActiveRun ? this.queueMessageOnSession(existing.runtime.session, text, mode, images) : { queued: false };
+    }
 
-    if (!thread.sessionFile) return { queued: false };
+    if (!visibleActiveRun || !thread.sessionFile) return { queued: false };
     const managed = await this.getOrCreateRuntime(thread);
     const result = await this.queueMessageOnSession(managed.runtime.session, text, mode, images);
     if (!result.queued) this.scheduleDispose(thread.threadId, managed);
@@ -228,9 +237,10 @@ export class PiRuntimeManager {
     const beforeAssistantCount = countAssistantMessages(session.messages);
     let assistantText = "";
 
+    const latestThread = this.registry.getThread(thread.threadId) ?? thread;
     const disposition = decideRuntimePromptDisposition({
-      registryStatus: thread.status,
-      hasRegistryActiveRun: Boolean(thread.activeRun),
+      registryStatus: latestThread.status,
+      hasRegistryActiveRun: Boolean(latestThread.activeRun),
       runtimeStreaming: session.isStreaming,
       requestedMode: "followUp",
     });
@@ -678,6 +688,11 @@ export class PiRuntimeManager {
     this.runtimes.delete(threadId);
     if (managed.disposeTimer) clearTimeout(managed.disposeTimer);
     await managed.runtime.dispose();
+  }
+
+  private async abortUntrackedRuntime(threadId: string, managed: ManagedRuntime): Promise<void> {
+    await managed.runtime.session.abort().catch(() => undefined);
+    await this.disposeThread(threadId).catch(() => undefined);
   }
 
   private async reloadRuntimeAuth(managed: ManagedRuntime): Promise<void> {

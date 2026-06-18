@@ -191,7 +191,7 @@ export class Registry {
   }): Promise<ThreadRecord> {
     const now = new Date().toISOString();
     const existing = this.data.threads[input.threadId];
-    const record: ThreadRecord = {
+    const record = normalizeThreadLifecycle({
       threadId: input.threadId,
       kind: input.kind ?? existing?.kind,
       guildId: input.guildId ?? existing?.guildId,
@@ -208,7 +208,7 @@ export class Registry {
       workGraph: input.workGraph ?? existing?.workGraph ?? rootWorkGraph(input.threadId),
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
-    };
+    });
     this.data.threads[input.threadId] = record;
     await this.save();
     return record;
@@ -217,13 +217,13 @@ export class Registry {
   async patchThread(threadId: string, patch: Partial<Omit<ThreadRecord, "threadId" | "createdAt">>): Promise<ThreadRecord> {
     const existing = this.data.threads[threadId];
     if (!existing) throw new Error(`No thread registered for ${threadId}`);
-    const record: ThreadRecord = {
+    const record = normalizeThreadLifecycle({
       ...existing,
       ...patch,
       threadId,
       createdAt: existing.createdAt,
       updatedAt: new Date().toISOString(),
-    };
+    });
     this.data.threads[threadId] = record;
     await this.save();
     return record;
@@ -284,18 +284,24 @@ export class Registry {
   }
 }
 
+function normalizeThreadLifecycle(record: ThreadRecord): ThreadRecord {
+  if (record.status === "running" || record.status === "interrupted") return record;
+  const { activeRun: _activeRun, ...withoutActiveRun } = record;
+  return withoutActiveRun;
+}
+
 function normalizeThreads(threads: Record<string, ThreadRecord>): Record<string, ThreadRecord> {
   const normalized: Record<string, ThreadRecord> = {};
   for (const [threadId, record] of Object.entries(threads)) {
     const normalizedThreadId = record.threadId ?? threadId;
-    normalized[threadId] = {
+    normalized[threadId] = normalizeThreadLifecycle({
       ...record,
       threadId: normalizedThreadId,
       kind: record.kind ?? (normalizedThreadId.startsWith("dm:") ? "discord-dm-workroom" : "discord-thread"),
       status: record.status ?? "idle",
       titleState: normalizeTitleState(record.titleState),
       workGraph: record.workGraph ?? rootWorkGraph(normalizedThreadId),
-    };
+    });
   }
   return normalized;
 }
