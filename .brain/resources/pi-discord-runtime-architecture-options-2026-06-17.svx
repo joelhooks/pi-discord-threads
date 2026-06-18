@@ -1,0 +1,173 @@
+---
+title: "Pi Discord Runtime Architecture Options"
+type: resource
+status: draft
+created_at: "2026-06-17"
+privacy: private
+tags:
+  - pi-discord-threads
+  - flue
+  - effect
+  - convex
+  - inngest
+  - redis
+  - postgres
+---
+
+# Pi Discord Runtime Architecture Options
+
+Comparison for the whole `pi-discord-threads` project, not just `/pi capture`.
+
+## Source mirrors
+
+- Flue source mirror: `.agent_sources/github.com/withastro/flue`
+- Effect source mirror: `.agent_sources/github.com/Effect-TS/effect`
+
+Both are shallow agent-source mirrors and ignored from git.
+
+## Current constraints
+
+`pi-discord-threads` is a Discord Gateway bridge around Pi coding-agent sessions. Discord is the operator surface, Pi JSONL is conversation truth, the local registry is Discord projection truth, Redis run control is optional and disabled by default, and Inngest handles out-of-phase capture/status work.
+
+Local infra context:
+
+- These services are agent-accessible capability surfaces, not just application backend choices.
+- Executor is installed as the distributed service-access layer on Flagg. Treat it as a tool/execution surface for agents to reach local services with scoped access, receipts, and service boundaries instead of handing models raw network credentials.
+- Central Postgres exists and is the best candidate for durable bridge state if JSON registry stops being enough.
+- Local Convex is running on Central Postgres with Garage S3 on `three-body`; it is better as an operator/realtime/app data surface than as the daemon's first internal lock/queue store.
+- Garage is canonical S3 for durable blobs/artifacts, not a queue or coordination substrate.
+- Typesense should stay a derived search/index projection, not source of truth.
+- Inngest is already the right durable worker plane for out-of-phase capture, scheduled jobs, and multi-step background work.
+- Redis is useful for active-run coordination, leases, and ephemeral streams, but current Flagg Central Redis instability means it should not be the only durable source of truth until the substrate is stable.
+
+## Option summary
+
+### Current custom TypeScript
+
+Best for preserving Discord Gateway behavior, Pi SDK semantics, live HUD, ESC/steer/follow-up, thread creation, and existing LaunchAgent operation. Weakness is hand-rolled lifecycle and persistence semantics.
+
+### Effect inside current bridge
+
+Best incremental reliability move. Use Effect around process lifecycle, resources, retries/timeouts, typed errors, and service boundaries while keeping the existing Pi/Discord semantics.
+
+Good seams: config/secrets, registry/Postgres adapter, Redis/Inngest clients, `PiRuntimeManager`, `RunControlWorker`, and status bridge lifecycle.
+
+### Flue
+
+Best if the project becomes a general agent app framework with addressable agents, workflows, sandboxes, channels, durable session persistence, and run/event streams.
+
+Mismatch: Flue's Discord package is HTTP interactions, not Discord Gateway thread-message streaming. Flue workflows are finite and recorded but not resumable; durable agents are the stronger Flue primitive. Inngest still wins for durable multi-step background workflows.
+
+### Flue + Effect
+
+Best for a larger platform redesign: Flue owns agent/session/workflow harness semantics, Effect owns application service layers and infra reliability.
+
+Risk: two frameworks and two lifecycle models. Only viable if boundaries are strict: Flue for agent runtime, Effect for typed app services and external side effects.
+
+## Recommendation
+
+Do not full-rewrite `pi-discord-threads` into Flue today.
+
+Think in layers:
+
+```text
+Discord operator surface
+  -> agent runtime: current Pi bridge now; possible Flue sidecars/spikes
+  -> service access: Executor + MCP/HTTP/tool wrappers
+  -> durable planes: Postgres, Convex/Garage, Inngest, Redis, Typesense
+  -> reliability shell: Effect around long-lived resources and failure policy
+```
+
+The sharper path is:
+
+1. Keep current Gateway bridge semantics.
+2. Add Executor-backed service tools so agents can reach local Convex, Garage/S3, Typesense, Inngest, Postgres, and Redis through scoped operations instead of raw ambient access.
+3. Move durable bridge state from JSON registry toward Postgres when needed.
+4. Use Effect at infrastructure/lifecycle seams.
+5. Keep Inngest for out-of-phase capture and scheduled worker flows.
+6. Use Convex/Garage for operator surfaces, artifacts, and review data, not active-run locks.
+7. Treat Flue as a sidecar/spike for new finite or addressable agent workflows, especially where its session persistence, sandboxes, MCP/tool support, and run streams replace custom glue.
+
+If Flue proves valuable, gradually route specific new surfaces through it rather than replacing the Discord bridge all at once.
+
+## Effect engine decomposition
+
+Use Effect as the reliability shell around the bridge engine, not as a rewrite of every helper.
+
+Target shape:
+
+```text
+AppRuntime
+  AppConfigService
+  SecretService
+  DiscordGatewayService
+  PiSessionService
+  RegistryService
+  RunQueueService
+  RunWorkerService
+  ProgressEventBus
+  RenderService
+  LinkIngestStatusBridge
+  ExecutorToolGateway
+```
+
+Rules:
+
+- Keep domain models plain and typed: `ThreadRecord`, `RunRecord`, `PromptResult`, `RunEvent`, `LinkIngestRecord`.
+- Use branded IDs for `ThreadId`, `RunId`, `DiscordMessageId`, `SessionFile`, and `LogicalThreadId` before adding more stringly glue.
+- Put side effects behind services: Discord REST/Gateway, Pi SDK sessions, Redis, Postgres/registry, Inngest, secrets, Executor service access.
+- Use v4 scoped layer semantics for long-lived resources: `Layer.effect` construction runs in the layer scope; acquire clients inside that effect and register cleanup with `Scope.addFinalizer`, or use `Effect.acquireRelease` where it fits. Launch the whole daemon layer with `Layer.launch` so interruption closes the layer scope.
+- Use typed tagged errors at boundaries: config missing, secret lease failed, Discord send failed, Pi runtime failed, Redis timeout, registry conflict, finalization busy.
+- Provide layers once at the process entrypoint. Do not scatter dependency construction inside handlers.
+- Keep pure renderers and parsers mostly outside Effect until they need validation, structured errors, or services.
+- Treat each lifecycle loop as an explicit state machine or Effect fiber: startup, connected, degraded, draining, stopped.
+
+First extraction order:
+
+1. Extract `RegistryService` interface from JSON registry without changing storage.
+2. Extract `RunQueueService` from Redis store/client with typed timeout errors and test doubles.
+3. Extract `PiSessionService` from `PiRuntimeManager`, split runtime cache from prompt execution.
+4. Extract `ProgressEventBus` so Discord HUD, run-control events, and logs consume the same domain events.
+5. Wrap process startup/shutdown in `AppRuntime` with scoped layers and one shutdown path.
+
+Avoid first:
+
+- A giant `Engine` class.
+- Rewriting all Discord handlers into Effect at once.
+- Replacing Inngest with Effect workflows.
+- Letting Effect methods return hidden `R` dependencies; dependencies should come from layers.
+
+## Latest Effect + type-safety bar
+
+Source check: npm dist-tags verified on 2026-06-17: `effect@latest` is `3.21.3`; `effect@beta` is `4.0.0-beta.84`. The local source mirror at `.agent_sources/github.com/Effect-TS/effect` has been intentionally updated to the v4 beta source from `https://github.com/Effect-TS/effect-smol`, tag `effect@4.0.0-beta.84`, commit `d11b2b5f2b4646983d4bb7b52bfc0de1a5ad17e2`. The v4 beta source uses `Context.Service`, `Layer.effect`, `Layer.launch`, `Schema.TaggedErrorClass`, `Data.TaggedError`, `Config`, scoped layer construction, and `effect/unstable/*` packages. Do not mix v3 stable docs with v4 beta implementation advice.
+
+Idiomatic v4 implementation shape:
+
+- Define services with `class Foo extends Context.Service<Foo, Shape>()("pi-discord/Foo") {}`.
+- Implement service methods with named `Effect.fn("Foo.method")` for traceable operation boundaries.
+- Build live adapters with `Layer.effect(Service, Effect.gen(...))`.
+- Acquire resources during layer construction and register finalizers with `Scope.addFinalizer` or `Effect.acquireRelease`.
+- Use `Layer.mergeAll` / `Layer.provide` to assemble the graph and `Layer.launch` for the daemon process.
+- Use `Data.TaggedError` for internal domain errors; use `Schema.TaggedErrorClass` when the error itself is schema-backed or crosses a boundary.
+- Decode every dirty external input with `Schema.decodeUnknownEffect` before it enters the domain.
+- Put beta-only usage behind adapter modules so v4 churn stays local.
+
+Pocock-level type safety means the compiler makes invalid runtime states hard or impossible to express:
+
+- Branded domain IDs, not raw strings: `ThreadId`, `RunId`, `DiscordMessageId`, `DiscordChannelId`, `SessionFile`, `LogicalThreadId`, `WorkspaceName`, `ExecutorServiceId`.
+- Schema-backed external boundaries: config JSON, Discord payloads, Redis hash/stream records, Inngest status events, Executor tool responses, and future Postgres rows decode through `Schema` before becoming domain values.
+- Tagged unions for lifecycle states: run status, Pi session status, bridge status, link-ingest status, worker status. No boolean soup like `isRunning` + `closed` + `terminal`.
+- Tagged errors for expected failures; defects are only programmer bugs. Boundary errors keep useful fields and can be matched with `catchTag` / `catchTags`.
+- Service interfaces return `Effect<Success, DomainError, never>` from methods. Dependencies enter through `Layer`, not through method `R` leakage.
+- Every long-lived resource has an acquire/release owner and a test layer.
+
+Final-product assertions:
+
+1. `npm run typecheck` passes with strict TS settings and no `any` in new engine modules except narrow interop shims.
+2. Effect source mirror/API check is documented in the PR or Brain receipt; v4 advice is grounded in `.agent_sources/github.com/Effect-TS/effect` from `effect-smol`, not stale v3 docs.
+3. Engine modules import from typed domain/services, not directly from `discord.js`, `redis`, `inngest`, or Pi SDK outside adapter layers.
+4. Contract tests prove invalid external payloads fail at decode: Redis records, Inngest events, config, and Executor responses.
+5. Lifecycle tests prove resource cleanup: Redis closes, Inngest connection closes, Pi runtimes dispose, worker fibers interrupt, intervals do not leak.
+6. State-machine tests cover run transitions: queued -> running -> finalizing -> succeeded/failed/interrupted, plus duplicate finalization and stale active-pointer cleanup.
+7. Adapter swap test proves JSON registry can be replaced by a fake/Postgres adapter without touching Discord handlers or Pi prompt execution.
+8. `npm test` or the chosen test command includes Effect-based unit tests for services and integration tests for the Redis worker using test doubles or a disposable local Redis.

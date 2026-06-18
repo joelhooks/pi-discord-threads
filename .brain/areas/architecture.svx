@@ -1,0 +1,23 @@
+# Architecture
+
+System shape and runtime boundaries for Pi Discord Threads.
+
+## Shape
+
+Capture the project architecture here as it becomes clear.
+
+## Runtime boundaries
+
+List durable process, data, UI, and agent boundaries here.
+
+## Effect architecture evaluation
+
+2026-06-17: `pi-discord-threads` does not currently use Effect. The local Effect source mirror for evaluation is at `.agent_sources/github.com/Effect-TS/effect` and is ignored from git.
+
+Effect is a good fit for reliability-heavy daemon seams: process lifecycle, Discord/Inngest/Redis resource scopes, retries/timeouts, typed errors, dependency injection, and test clocks/fakes. It is not worth pulling into tiny command aliases or pure parsing/formatting helpers.
+
+Recommendation: do not rewrite the bridge wholesale. If the tool keeps growing, adopt Effect at the edge-to-core seams first: `run-control`, `link-ingest-status-bridge`, `SecretResolver`/config, and `PiRuntimeManager` lifecycle. Keep Discord handlers thin and keep simple pure functions plain TypeScript.
+
+## pi-notes boundary
+
+pi-notes renders `.brain/**/*.svx`, auto-imports standard and project-local Brain components, and can route browser Review Batches back to the spawning Pi session when opened through Pi.

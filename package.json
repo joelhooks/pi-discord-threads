@@ -13,7 +13,8 @@
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "render-system-prompt": "npm run build && node scripts/render-system-prompt.mjs",
-    "publish-system-prompt": "npm run render-system-prompt && wzrrd publish --file docs/system-prompt-site --slug pi-discord-system-prompt"
+    "publish-system-prompt": "npm run render-system-prompt && wzrrd publish --file docs/system-prompt-site --slug pi-discord-system-prompt",
+    "brain:check": "pi-notes brain check"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.78.1",
