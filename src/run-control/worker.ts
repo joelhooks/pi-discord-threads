@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AppConfig } from "../config.js";
 import type { PromptProgress, PromptProgressHandler } from "../pi-runtime.js";
-import type { RunControlStore } from "./store.js";
-import type { QueuedRunInput, RunControlExecutionResult, RunJob, RunRecord } from "./types.js";
+import type { QueuedRunInput, RunControlExecutionResult, RunControlStorePort, RunJob, RunRecord } from "./types.js";
 import { isTerminalRunStatus } from "./types.js";
 
 class RetryRunLaterError extends Error {
@@ -31,7 +30,7 @@ export class RunControlWorker {
   private loopPromise: Promise<void> | undefined;
 
   constructor(
-    private readonly store: RunControlStore,
+    private readonly store: RunControlStorePort,
     private readonly adapter: RunControlWorkerAdapter,
     private readonly config: AppConfig,
     private readonly workerId: string,

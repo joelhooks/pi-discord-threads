@@ -48,8 +48,7 @@ import { DISCORD_SYSTEM_PROMPT_URL } from "./discord-system-prompt.js";
 import { chunkForDiscord, stripBotMention, stripCommandPrefix, summarizeForThreadName } from "./render.js";
 import { fallbackHudFrame, RunHudNarrator, type RunHudFrame } from "./run-hud.js";
 import { evaluateThreadTitle, normalizeTitle } from "./thread-title-evaluator.js";
-import type { RunControlStore } from "./run-control/store.js";
-import type { QueuedRunInput, RunControlExecutionResult, RunRecord } from "./run-control/types.js";
+import type { QueuedRunInput, RunControlExecutionResult, RunControlStorePort, RunRecord } from "./run-control/types.js";
 import { RunControlWorker, type RunControlWorkerAdapter } from "./run-control/worker.js";
 import { createForkedSessionFile, forkWorkGraph, formatWorkGraphEmbedDescription, formatWorkGraphStatus, rootWorkGraph } from "./work-graph.js";
 import { isBridgeRecoveryPrompt, recoverableInterruptedPrompt } from "./recovery-prompt.js";
@@ -64,7 +63,7 @@ interface RunBotOptions {
   allowedUserIds: string[];
   registry: Registry;
   runtimeManager: PiRuntimeManager;
-  runControlStore?: RunControlStore;
+  runControlStore?: RunControlStorePort;
   runControlRoles?: RunControlRole[];
   runControlWorkerId?: string;
   runControlStopReconcileLoop?: () => void;
