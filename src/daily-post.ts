@@ -4,6 +4,8 @@ import { dirname, join } from "node:path";
 
 import type { AppConfig } from "./config.js";
 import { expandPath } from "./config.js";
+import { resolveContextChannelDefault, resolveCwdInput } from "./cwd.js";
+import { Registry } from "./registry.js";
 
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 const PUBLIC_THREAD = 11;
@@ -20,6 +22,9 @@ interface DailyPostRequest {
   readonly attemptDir: string;
   readonly content: string;
   readonly threadId?: string;
+  readonly cwd?: string;
+  readonly workspaceName?: string;
+  readonly sessionName?: string;
 }
 
 interface DailyThreadRecord {
@@ -41,28 +46,60 @@ interface DailyThreadRegistry {
 interface DiscordChannel {
   readonly id: string;
   readonly name?: string;
+  readonly guild_id?: string;
 }
 
 interface DiscordMessage {
   readonly id: string;
   readonly channel_id?: string;
+  readonly guild_id?: string;
 }
 
 export interface DailyPostResult {
   readonly ok: boolean;
   readonly channelId: string;
+  readonly guildId?: string;
   readonly threadId?: string;
   readonly messageId?: string;
+  readonly threadUrl?: string;
+  readonly messageUrl?: string;
   readonly threadName: string;
   readonly createdThread?: boolean;
+  readonly registeredSession?: boolean;
+  readonly cwd?: string;
+  readonly workspaceName?: string;
+  readonly sessionName?: string;
   readonly error?: string;
 }
 
 const registryPath = (config: AppConfig): string =>
   join(config.dataDir, "daily-threads.json");
 
+const piRegistryPath = (config: AppConfig): string =>
+  join(config.dataDir, "registry.json");
+
 const threadKey = (request: DailyPostRequest): string =>
   `${request.channelId}:${request.localDate}`;
+
+const firstConfiguredGuildId = (config: AppConfig): string | undefined =>
+  config.discord.guildIds.length === 1 ? config.discord.guildIds[0] : undefined;
+
+const discordChannelUrl = (
+  guildId: string | undefined,
+  channelId: string | undefined
+): string | undefined =>
+  guildId && channelId
+    ? `https://discord.com/channels/${guildId}/${channelId}`
+    : undefined;
+
+const discordMessageUrl = (
+  guildId: string | undefined,
+  channelId: string | undefined,
+  messageId: string | undefined
+): string | undefined =>
+  guildId && channelId && messageId
+    ? `https://discord.com/channels/${guildId}/${channelId}/${messageId}`
+    : undefined;
 
 const readJson = async <A>(path: string): Promise<A | undefined> => {
   if (!existsSync(path)) return undefined;
@@ -141,6 +178,9 @@ const decodeRequest = (value: unknown): DailyPostRequest => {
     attemptDir,
     content,
     ...(request.threadId ? { threadId: request.threadId } : {}),
+    ...(request.cwd ? { cwd: request.cwd } : {}),
+    ...(request.workspaceName ? { workspaceName: request.workspaceName } : {}),
+    ...(request.sessionName ? { sessionName: request.sessionName } : {}),
   };
 };
 
@@ -217,6 +257,53 @@ const sendMessageWithUnarchive = async (
   }
 };
 
+const resolveDailySessionContext = async (
+  config: AppConfig,
+  request: DailyPostRequest
+): Promise<{
+  readonly cwd: string;
+  readonly workspaceName?: string;
+  readonly sessionName: string;
+}> => {
+  const channelContext = await resolveContextChannelDefault(
+    request.channelId,
+    undefined,
+    config
+  );
+  const workspaceName = request.workspaceName ?? channelContext?.workspaceName;
+  const cwd = request.cwd
+    ? await resolveCwdInput(request.cwd, config.pi.defaultCwd)
+    : (channelContext?.cwd ?? config.pi.defaultCwd);
+  return {
+    cwd,
+    ...(workspaceName ? { workspaceName } : {}),
+    sessionName: request.sessionName ?? request.threadName,
+  };
+};
+
+const registerDailyThreadSession = async (
+  config: AppConfig,
+  request: DailyPostRequest,
+  threadId: string
+): Promise<{
+  readonly cwd: string;
+  readonly workspaceName?: string;
+  readonly sessionName: string;
+}> => {
+  const context = await resolveDailySessionContext(config, request);
+  const registry = new Registry(piRegistryPath(config));
+  await registry.load();
+  await registry.upsertThread({
+    threadId,
+    parentChannelId: request.channelId,
+    cwd: context.cwd,
+    ...(context.workspaceName ? { workspaceName: context.workspaceName } : {}),
+    sessionName: context.sessionName,
+    status: "idle",
+  });
+  return context;
+};
+
 export async function postDailyMessage(options: {
   readonly config: AppConfig;
   readonly token: string;
@@ -229,12 +316,14 @@ export async function postDailyMessage(options: {
   const existing = registry.threads[key];
   let threadId = request.threadId ?? existing?.threadId;
   let threadName = existing?.threadName ?? request.threadName;
+  let guildId = firstConfiguredGuildId(options.config);
   let createdThread = false;
 
   if (!threadId) {
     const thread = await createThread(options.token, request);
     threadId = thread.id;
     threadName = thread.name ?? request.threadName;
+    guildId = thread.guild_id ?? guildId;
     createdThread = true;
   }
 
@@ -250,9 +339,11 @@ export async function postDailyMessage(options: {
     const thread = await createThread(options.token, request);
     threadId = thread.id;
     threadName = thread.name ?? request.threadName;
+    guildId = thread.guild_id ?? guildId;
     createdThread = true;
     message = await sendMessage(options.token, threadId, request.content);
   }
+  guildId = message.guild_id ?? guildId;
 
   const now = new Date().toISOString();
   registry.threads[key] = {
@@ -266,13 +357,31 @@ export async function postDailyMessage(options: {
     updatedAt: now,
   };
   await saveRegistry(options.config, registry);
+  const sessionContext = await registerDailyThreadSession(
+    options.config,
+    request,
+    threadId
+  );
 
   return {
     ok: true,
     channelId: request.channelId,
+    ...(guildId ? { guildId } : {}),
     threadId,
     messageId: message.id,
+    ...(discordChannelUrl(guildId, threadId)
+      ? { threadUrl: discordChannelUrl(guildId, threadId) }
+      : {}),
+    ...(discordMessageUrl(guildId, threadId, message.id)
+      ? { messageUrl: discordMessageUrl(guildId, threadId, message.id) }
+      : {}),
     threadName,
     createdThread,
+    registeredSession: true,
+    cwd: sessionContext.cwd,
+    ...(sessionContext.workspaceName
+      ? { workspaceName: sessionContext.workspaceName }
+      : {}),
+    sessionName: sessionContext.sessionName,
   };
 }

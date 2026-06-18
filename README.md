@@ -8,7 +8,7 @@ Portable local Discord bridge for durable Pi coding-agent sessions.
 - `/pi workspace name:<workspace>` or `!pi workspace <workspace>` creates a thread rooted in a configured workspace cwd.
 - `/pi compose` opens a multi-line prompt modal; active run messages include only a minimal ESC button.
 - Message context menu `Ask Pi about message` starts a Pi thread from a selected Discord message.
-- Messages inside a registered Discord thread continue that Pi session.
+- Messages inside a registered Discord thread continue that Pi session. Daily SHITRAT date threads are registered too, so replying in the daily thread resumes an agent instead of leaving a static log dump.
 - Bot DMs can be wired to a single-user Personal Workroom prototype through config, disabled by default.
 - Pi skills behave normally, including model auto-invocation. Discord slash equivalent is `/pi skill name:<skill>`.
 - Local secrets are leased from `secrets`; values are never printed.
@@ -77,7 +77,7 @@ Workspace aliases are configured under `pi.workspaces`:
 }
 ```
 
-Discord context-channel defaults are configured under `discord.contextChannels`. They apply only when creating a new/unmapped Pi thread from that Discord channel or one of its child threads. Explicit `cwd`, `/pi workspace`, compose-modal workspace, and existing thread registry records still win.
+Discord context-channel defaults are configured under `discord.contextChannels`. They apply when creating a new/unmapped Pi thread from that Discord channel, one of its child threads, or a `daily-post` date thread. Explicit `cwd`, `/pi workspace`, compose-modal workspace, and existing thread registry records still win.
 
 ```json
 {

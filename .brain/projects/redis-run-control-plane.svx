@@ -88,6 +88,10 @@ Relevant `joelclaw.com/api/docs` source pointers found during planning:
   - channel `1511863050058072225` defaults to workspace `aihero`, cwd `~/Code/badass-courses/aihero-support`.
   - channel `1512114398313844936` defaults to workspace `pi-discord-threads`, cwd `~/Code/joelhooks/pi-discord-threads`.
   - channel `1512114189634637864` defaults to workspace `dark-wizard`, cwd `~/Code/joelhooks/dark-wizard`.
+  - channel `1515842131456163851` defaults to workspace `dark-wizard`, cwd `~/Code/joelhooks/dark-wizard`.
+  - channel `1516113100263391232` defaults to workspace `pi-notes`, cwd `~/Code/joelhooks/pi-notes`.
+  - channel `1516911080973140149` defaults to workspace `course-builder`, cwd `~/Code/badass-courses/course-builder`.
+  - channel `1516956047536029796` defaults to workspace `joelclaw-central`, cwd `~/Code/joelhooks/joelclaw-central`; use this channel for `joelclaw-central` plus adjacent joelclaw repos.
 
 ## LaunchAgent / Keychain Audit Notes
 
