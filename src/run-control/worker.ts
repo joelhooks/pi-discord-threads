@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createActor, waitFor, type ActorRefFrom } from "xstate";
 import type { AppConfig } from "../config.js";
+import { formatUnknownError } from "../error-format.js";
 import type { ProgressEventBusPort } from "../progress-events.js";
 import { isRetryRunLaterError } from "./errors.js";
 import { runRunControlLeasedRun } from "./leased-run-machine.js";
@@ -56,8 +57,7 @@ export class RunControlWorker {
       const done = waitFor(actor, (snapshot) => snapshot.status === "done")
         .then(() => undefined)
         .catch((error) => {
-          const text = error instanceof Error ? error.message : String(error);
-          console.error(`run-control worker ${laneWorkerId} stopped unexpectedly: ${text}`);
+          console.error(`run-control worker ${laneWorkerId} stopped unexpectedly: ${formatUnknownError(error)}`);
         })
         .finally(() => actor.stop());
       actor.start();

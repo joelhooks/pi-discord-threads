@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import type { AppConfig } from "../config.js";
+import { formatUnknownError } from "../error-format.js";
 import type { RegistryPort } from "../registry.js";
 import { isTerminalRunStatus, type RunControlStorePort, type RunRecord } from "./types.js";
 
@@ -278,8 +279,7 @@ export function startRunControlReconcileLoop(options: {
       await runOnce();
     } catch (error) {
       if (stopped) return;
-      const text = error instanceof Error ? error.message : String(error);
-      console.warn(`run-control reconcile loop failed: ${text}`);
+      console.warn(`run-control reconcile loop failed: ${formatUnknownError(error)}`);
     }
   };
   const interval = setInterval(() => void runOnceLogged(), options.config.runControl.reconcileIntervalMs);

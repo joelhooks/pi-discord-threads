@@ -28,6 +28,7 @@ import {
 import { DefaultResourceLoader, getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { appendAttachmentContext, type InlineImageContent } from "./attachments.js";
 import type { AppConfig, RunControlRole } from "./config.js";
+import { formatUnknownError } from "./error-format.js";
 import type { PiRuntimePort } from "./pi-runtime.js";
 import { createProgressEventBus } from "./progress-events.js";
 import type { ActiveRunRecord, LinkIngestRecord, RegistryPort, ThreadRecord } from "./registry.js";
@@ -157,8 +158,7 @@ export function startBot(options: RunBotOptions): BotRuntimeHandle {
             registry: options.registry,
           });
         } catch (error) {
-          const text = error instanceof Error ? error.message : String(error);
-          console.warn(`link ingest status bridge unavailable: ${text}`);
+          console.warn(`link ingest status bridge unavailable: ${formatUnknownError(error)}`);
         }
         if (startupRecoveryEnabled()) {
           await autoResumeInterruptedThreads(client, options);
@@ -208,7 +208,7 @@ export function startBot(options: RunBotOptions): BotRuntimeHandle {
       if (interaction.commandName !== "pi") return;
       await handlePiInteraction(interaction, options, allowedUsers);
     } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
+      const text = formatUnknownError(error);
       console.error(`interaction failed: ${text}`);
       if (interaction.isChatInputCommand()) {
         await safeInteractionReply(interaction, `Pi bridge error: ${text}`);
@@ -223,7 +223,7 @@ export function startBot(options: RunBotOptions): BotRuntimeHandle {
     try {
       await handleMessage(message, client, options, allowedUsers);
     } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
+      const text = formatUnknownError(error);
       console.error(`message handling failed: ${text}`);
       if (!message.author.bot) {
         await safeReply(message, `Pi bridge error: ${text}`);

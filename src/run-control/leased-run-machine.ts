@@ -1,5 +1,6 @@
 import { createActor, waitFor, assign, fromCallback, fromPromise, setup } from "xstate";
 import type { AppConfig } from "../config.js";
+import { formatUnknownError } from "../error-format.js";
 import { createProgressEventBus, type ProgressEventBusPort } from "../progress-events.js";
 import type { FinalizeClaim, QueuedRunInput, RunControlExecutionResult, RunControlStorePort, RunRecord } from "./types.js";
 import { RetryRunLaterError } from "./errors.js";
@@ -70,7 +71,8 @@ function errorFrom(event: unknown): unknown {
 }
 
 function normalizeError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
+  if (error instanceof Error && error.message.trim()) return error;
+  return new Error(formatUnknownError(error));
 }
 
 function resultFromFinalizingRun(run: RunRecord): RunControlExecutionResult {
@@ -115,8 +117,7 @@ async function drainInputs(context: RunControlLeasedRunMachineContext): Promise<
     }
 
     const applied = await context.adapter.applyInput(context.run, input).catch((error) => {
-      const text = error instanceof Error ? error.message : String(error);
-      context.warn(`run-control input ${input.inputId ?? "unknown"} failed for ${context.run.runId}: ${text}`);
+      context.warn(`run-control input ${input.inputId ?? "unknown"} failed for ${context.run.runId}: ${formatUnknownError(error)}`);
       return { queued: false };
     });
     if (applied.queued) {
@@ -158,8 +159,7 @@ export const runControlLeasedRunMachine = setup({
     heartbeat: fromCallback<RunControlLeasedRunMachineEvent, RunControlLeasedRunMachineContext>(({ input }) => {
       const heartbeat = setInterval(() => {
         void input.store.heartbeatRunLease(input.run.runId, input.leaseToken, input.workerId).catch((error) => {
-          const text = error instanceof Error ? error.message : String(error);
-          input.warn(`run-control heartbeat failed for ${input.run.runId}: ${text}`);
+          input.warn(`run-control heartbeat failed for ${input.run.runId}: ${formatUnknownError(error)}`);
         });
       }, input.config.runControl.heartbeatMs);
       heartbeat.unref();
@@ -212,15 +212,13 @@ export const runControlLeasedRunMachine = setup({
     editUncertainFailurePlaceholder: fromPromise<void, RunControlLeasedRunMachineContext>(async ({ input }) => {
       const error = duplicateFinalizationError();
       await input.adapter.failRun(input.run, error).catch((failError) => {
-        const text = failError instanceof Error ? failError.message : String(failError);
-        input.warn(`run-control failed to edit uncertain-finalization placeholder for ${input.run.runId}: ${text}`);
+        input.warn(`run-control failed to edit uncertain-finalization placeholder for ${input.run.runId}: ${formatUnknownError(failError)}`);
       });
     }),
     editFailurePlaceholder: fromPromise<void, RunControlLeasedRunMachineContext>(async ({ input }) => {
       const error = normalizeError(input.lastError);
       await input.adapter.failRun(input.run, error).catch((failError) => {
-        const text = failError instanceof Error ? failError.message : String(failError);
-        input.warn(`run-control failed to edit error placeholder for ${input.run.runId}: ${text}`);
+        input.warn(`run-control failed to edit error placeholder for ${input.run.runId}: ${formatUnknownError(failError)}`);
       });
     }),
     completeFinalize: fromPromise<void, RunControlLeasedRunMachineContext>(async ({ input }) => {
@@ -261,8 +259,7 @@ export const runControlLeasedRunMachine = setup({
     }),
     warnInputDrainFailure: ({ context, event }) => {
       const error = errorFrom(event);
-      const text = error instanceof Error ? error.message : String(error);
-      context.warn(`run-control input drain failed for ${context.run.runId}: ${text}`);
+      context.warn(`run-control input drain failed for ${context.run.runId}: ${formatUnknownError(error)}`);
     },
     rememberPersistedResult: assign({
       result: ({ context }) => resultFromFinalizingRun(context.run),

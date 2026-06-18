@@ -1,4 +1,5 @@
 import { createActor, waitFor, assign, fromPromise, setup } from "xstate";
+import { formatUnknownError } from "../error-format.js";
 import type { RunControlStorePort, RunJob, RunRecord } from "./types.js";
 import { isTerminalRunStatus } from "./types.js";
 
@@ -41,7 +42,8 @@ function errorFrom(event: unknown): unknown {
 }
 
 function normalizeError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
+  if (error instanceof Error && error.message.trim()) return error;
+  return new Error(formatUnknownError(error));
 }
 
 function requireRun(context: RunControlWorkerJobMachineContext): RunRecord {

@@ -1,4 +1,5 @@
 import { assign, fromPromise, setup } from "xstate";
+import { formatUnknownError } from "../error-format.js";
 import type { RunControlStorePort, RunJob, RunRecord } from "./types.js";
 import { runRunControlWorkerJob } from "./worker-machine.js";
 
@@ -35,10 +36,6 @@ function outputFrom<T>(event: unknown): T {
 
 function errorFrom(event: unknown): unknown {
   return (event as ErrorEvent).error;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -102,14 +99,14 @@ export const runControlWorkerLaneMachine = setup({
       context.log(`run-control worker ${context.workerId} listening for Redis jobs`);
     },
     warnEnsureConsumerGroupFailure: ({ context, event }) => {
-      context.warn(`run-control ensure consumer group failed; retrying in ${context.retryDelayMs}ms: ${errorText(errorFrom(event))}`);
+      context.warn(`run-control ensure consumer group failed; retrying in ${context.retryDelayMs}ms: ${formatUnknownError(errorFrom(event))}`);
     },
     warnDequeueFailure: ({ context, event }) => {
-      context.warn(`run-control dequeue failed for ${context.workerId}: ${errorText(errorFrom(event))}`);
+      context.warn(`run-control dequeue failed for ${context.workerId}: ${formatUnknownError(errorFrom(event))}`);
     },
     reportOutsideHandlerFailure: ({ context, event }) => {
       const runId = context.job?.runId ?? "unknown";
-      context.error(`run-control job ${runId} failed outside handler on ${context.workerId}: ${errorText(errorFrom(event))}`);
+      context.error(`run-control job ${runId} failed outside handler on ${context.workerId}: ${formatUnknownError(errorFrom(event))}`);
     },
   },
   guards: {

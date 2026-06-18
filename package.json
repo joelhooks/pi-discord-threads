@@ -20,6 +20,7 @@
     "test:registry-lifecycle": "npm run build && node --test scripts/registry-lifecycle-regression.test.mjs",
     "test:run-control-store": "npm run build && node --test scripts/run-control-store-regression.test.mjs",
     "test:run-control-worker": "npm run build && node --test scripts/run-control-worker-regression.test.mjs",
+    "test:run-control-redis-client": "npm run build && node --test scripts/run-control-redis-client-regression.test.mjs",
     "test:run-control-reconcile": "npm run build && node --test scripts/run-control-reconcile-regression.test.mjs",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
