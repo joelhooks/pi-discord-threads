@@ -14,11 +14,14 @@
     "start": "node dist/index.js",
     "render-system-prompt": "npm run build && node scripts/render-system-prompt.mjs",
     "publish-system-prompt": "npm run render-system-prompt && wzrrd publish --file docs/system-prompt-site --slug pi-discord-system-prompt",
+    "smoke:capture": "tsx scripts/link-ingest-capture-smoke.ts",
+    "smoke:link-ingest-live-discord": "tsx scripts/link-ingest-live-discord-smoke.ts",
     "brain:check": "pi-notes brain check"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^0.78.1",
     "discord.js": "^14.18.0",
+    "inngest": "^4.4.0",
     "redis": "^5.12.1",
     "typebox": "^1.1.38"
   },

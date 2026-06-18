@@ -41,6 +41,22 @@ export interface ThreadTitleConfig {
   minRenameIntervalMs: number;
 }
 
+export interface LinkIngestConfig {
+  enabled: boolean;
+  inngestUrl: string;
+  eventKeyEnv?: string;
+  eventKeySecretName?: string;
+  eventKeyLeaseTtl: string;
+  signingKeyEnv?: string;
+  signingKeySecretName?: string;
+  signingKeyLeaseTtl: string;
+  statusBridgeEnabled: boolean;
+  defaultVisibility: string;
+  defaultSite: string;
+  wzrrdCandidate: boolean;
+  requestTimeoutMs: number;
+}
+
 export interface AppConfig {
   dataDir: string;
   discord: {
@@ -79,6 +95,7 @@ export interface AppConfig {
     allowedContentTypePrefixes: string[];
     allowedExtensions: string[];
   };
+  linkIngest: LinkIngestConfig;
   runControl: RunControlConfig;
 }
 
@@ -159,6 +176,21 @@ export function defaultConfig(): AppConfig {
         ".pdf",
       ],
     },
+    linkIngest: {
+      enabled: true,
+      inngestUrl: "http://127.0.0.1:8288",
+      eventKeyEnv: "INNGEST_EVENT_KEY",
+      eventKeySecretName: "inngest_event_key",
+      eventKeyLeaseTtl: "12h",
+      signingKeyEnv: "INNGEST_SIGNING_KEY",
+      signingKeySecretName: "inngest_signing_key",
+      signingKeyLeaseTtl: "12h",
+      statusBridgeEnabled: true,
+      defaultVisibility: "private",
+      defaultSite: "joelclaw",
+      wzrrdCandidate: false,
+      requestTimeoutMs: 10_000,
+    },
     runControl: {
       enabled: false,
       redisUrlEnv: "REDIS_URL",
@@ -200,6 +232,10 @@ function mergeConfig(base: AppConfig, partial: Partial<AppConfig>): AppConfig {
     attachments: {
       ...base.attachments,
       ...(partial.attachments ?? {}),
+    },
+    linkIngest: {
+      ...base.linkIngest,
+      ...(partial.linkIngest ?? {}),
     },
     runControl: {
       ...base.runControl,
@@ -265,6 +301,7 @@ export function normalizeConfig(config: AppConfig): AppConfig {
       allowedContentTypePrefixes: [...new Set(config.attachments.allowedContentTypePrefixes.map((value) => value.trim()).filter(Boolean))],
       allowedExtensions: [...new Set(config.attachments.allowedExtensions.map((value) => value.trim().toLowerCase()).filter(Boolean))],
     },
+    linkIngest: normalizeLinkIngest(config.linkIngest),
     runControl: normalizeRunControl(config.runControl),
   };
 }
@@ -336,6 +373,27 @@ function normalizeRunControl(runControl: RunControlConfig | undefined): RunContr
     staleRunMs,
     reconcileIntervalMs: clampNumber(merged.reconcileIntervalMs, 5_000, 60 * 60_000, defaults.reconcileIntervalMs),
     commandTimeoutMs: clampNumber(merged.commandTimeoutMs, 1_000, 60_000, defaults.commandTimeoutMs),
+  };
+}
+
+function normalizeLinkIngest(linkIngest: LinkIngestConfig | undefined): LinkIngestConfig {
+  const defaults = defaultConfig().linkIngest;
+  const merged = { ...defaults, ...(linkIngest ?? {}) };
+  const inngestUrl = (merged.inngestUrl || defaults.inngestUrl).trim().replace(/\/+$/u, "");
+  return {
+    enabled: merged.enabled !== false,
+    inngestUrl: inngestUrl || defaults.inngestUrl,
+    eventKeyEnv: merged.eventKeyEnv?.trim() || defaults.eventKeyEnv,
+    eventKeySecretName: merged.eventKeySecretName?.trim() || undefined,
+    eventKeyLeaseTtl: merged.eventKeyLeaseTtl?.trim() || defaults.eventKeyLeaseTtl,
+    signingKeyEnv: merged.signingKeyEnv?.trim() || defaults.signingKeyEnv,
+    signingKeySecretName: merged.signingKeySecretName?.trim() || undefined,
+    signingKeyLeaseTtl: merged.signingKeyLeaseTtl?.trim() || defaults.signingKeyLeaseTtl,
+    statusBridgeEnabled: merged.statusBridgeEnabled !== false,
+    defaultVisibility: merged.defaultVisibility?.trim() || defaults.defaultVisibility,
+    defaultSite: merged.defaultSite?.trim() || defaults.defaultSite,
+    wzrrdCandidate: merged.wzrrdCandidate === true,
+    requestTimeoutMs: clampNumber(merged.requestTimeoutMs, 1_000, 120_000, defaults.requestTimeoutMs),
   };
 }
 

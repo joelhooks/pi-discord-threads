@@ -1,0 +1,252 @@
+---
+title: "Link Ingest Discord Surface"
+kind: project
+status: active
+created: 2026-06-17
+updated: 2026-06-18
+area: architecture
+privacy: private
+tags:
+  - pi-discord-threads
+  - joelclaw
+  - inngest
+  - link-ingest
+---
+
+# Link Ingest Discord Surface
+
+## Outcome
+
+Add the first explicit Discord surface for joelclaw link ingest without turning random Discord links into automatic captures.
+
+## Decision
+
+`pi-discord-threads` stays the operator surface. It detects explicit ingest/capture commands, creates or reuses a Discord thread, sends a `link/ingest.requested` event to Central Inngest, and records the Discord mention to source mapping in the local registry.
+
+Bare or lightly annotated URLs stay in-phase as ordinary Pi thread input. Explicit commands are out-of-phase source capture requests: `/pi ingest`, `!pi ingest`, and `/pi capture`. The `/pi capture url:<url> note:<optional>` alias is operator-facing wording only; it reuses the ingest payload and does not inherit active workstream context unless the note says so.
+
+It does not download media, transcribe audio, scrape articles, scrape X, summarize, or write `.brain` capture pages. Those are worker responsibilities.
+
+## Implementation receipt
+
+Added:
+
+- `/pi ingest url:<url> note:<optional>`
+- `/pi capture url:<url> note:<optional>`
+- `!pi ingest <url> [note]`
+- `linkIngest` config:
+  - `enabled`
+  - `inngestUrl`
+  - `eventKeyEnv`
+  - `eventKeySecretName`
+  - `signingKeyEnv`
+  - `signingKeySecretName`
+  - `statusBridgeEnabled`
+  - `defaultVisibility`
+  - `defaultSite`
+  - `wzrrdCandidate`
+  - `requestTimeoutMs`
+- `src/link-ingest.ts` for URL extraction, URL normalization, `sourceId`, `mentionId`, event payload construction, and Event API POST.
+- `src/link-ingest-status-bridge.ts` for Inngest Connect status events back to Discord threads.
+- `Registry.linkIngests` for local Discord mention to source mapping.
+- `Registry.linkIngests[*].statusUpdates` for idempotent posted status receipts.
+
+The emitted event shape is:
+
+```text
+link/ingest.requested
+v=2026-06-17.1
+id=link-ingest:discord:<guildId>:<channelId>:<messageOrInteractionId>
+sourceId=sha256(normalizedUrl)
+mentionId=discord:<guildId>:<channelId>:<messageOrInteractionId>
+```
+
+## Verification
+
+Passed locally:
+
+```sh
+npm run typecheck
+npm run build
+npm run brain:check
+npx tsx -e "<prepareLinkIngest smoke>"
+node dist/index.js doctor --config ~/.config/pi-discord-threads/config.json
+node dist/index.js install-launch-agent --config ~/.config/pi-discord-threads/config.json --restart
+```
+
+Smoke output confirmed:
+
+- event name: `link/ingest.requested`
+- schema version: `2026-06-17.1`
+- source ID length: `64`
+- mention ID: `discord:g:c:m`
+- normalized URL: `https://www.youtube.com/watch?v=abc123`
+- extracted context: `this is interesting`
+- Central Inngest API reachable on `127.0.0.1:8288`.
+- Local `secrets` now has `inngest_event_key`, copied from `/Users/Shared/joelclaw/etc/inngest/inngest.env` without printing the value.
+- LaunchAgent `com.joelhooks.pi-discord-threads` restarted and is running from `/Users/joel/Code/joelhooks/pi-discord-threads/dist/index.js`.
+
+2026-06-17 status bridge receipt:
+
+- Added `inngest@4.4.0`.
+- Added `link/ingest.accepted` and `link/ingest.classified` Connect consumers inside the existing Discord bot process.
+- Added `source/archive.completed`, `video/metadata.completed`, `article/extract.completed`, `source/transcript.completed`, `source/summary.completed`, `capture/item.ready`, and `capture/item.failed` Connect consumers inside the existing Discord bot process.
+- Seeded local `inngest_signing_key` from Central Inngest env without printing the value.
+- Verified isolated live-Inngest status bridge smoke with a fake Discord client and temp registry; it posted one fake status and persisted `statusUpdates`.
+- Rebuilt and restarted LaunchAgent `com.joelhooks.pi-discord-threads`.
+- `daemon.log` showed `link ingest status bridge connected to Central Inngest` and `Sent WORKER_READY`.
+- `doctor` reported `statusBridge=enabled`, `eventKeySecret=inngest_event_key`, and `signingKeySecret=inngest_signing_key`.
+
+Current status events handled:
+
+```text
+link/ingest.accepted
+link/ingest.classified
+source/archive.completed
+video/metadata.completed
+video/media.completed
+video/audio-transcript.completed
+article/extract.completed
+x/snapshot.completed
+source/transcript.completed
+source/summary.completed
+capture/item.ready
+capture/index.completed
+capture/item.failed
+```
+
+The bridge posts one Discord status per logical event/mention and records the Discord message ID in the local registry.
+
+2026-06-17 failure bridge receipt:
+
+- Added `capture/item.failed` status handling.
+- Failure embeds show `failed step`, `reason`, optional error details, Brain path, and manifest path.
+- The local registry already supported `failed`, so no registry shape change was needed.
+- The Central live smoke used a synthetic non-Discord mention, so it verified event delivery and Brain state but did not post into a real Discord thread.
+
+2026-06-17 transcript bridge receipt:
+
+- Added `source/transcript.completed` status handling.
+- Transcript embeds show `transcriptStatus`, text path, VTT path when available, metadata path, word count, and degraded reason/error when captions are unavailable.
+- Extended the local registry status union with `transcript_processed` so posted transcript receipts survive restarts.
+
+2026-06-17 capture alias receipt:
+
+- Added `/pi capture url:<url> note:<optional>` as a slash-command alias for the existing link ingest event path.
+- Reused `sendLinkIngest`/`prepareLinkIngest`; no new capture pipeline or event name.
+- Kept `!pi ingest <url> [note]` as the only prefix fallback ingest command so bare URLs remain normal in-phase Pi input.
+- Removed the raw `mentionId` field from accepted Discord embeds to avoid surfacing Discord internal IDs in operator status.
+- Added `npm run smoke:capture` coverage for capture with and without a note, existing prefix ingest, and bare URL non-command routing.
+
+Verification passed:
+
+```sh
+npm run smoke:capture
+npm run typecheck
+npm run build
+npm run brain:check
+git diff --check
+```
+
+## Remaining work
+
+- Run one human-authored Discord `/pi ingest` or `!pi ingest` drop from Joel's Discord client. The operator smoke now proves real Discord thread/status posting, but it bypasses Discord's slash interaction UI because bots cannot synthesize user slash commands.
+- Promote the capture asset root to shared Central storage.
+- Continue DS4 summary tuning from Central's real URL proofs, then confirm the same behavior through a human-authored Discord ingest.
+- Use Central's approval-gated `pnpm capture:wzrrd:prepare` path when Joel chooses the first capture to publish.
+
+2026-06-18 projection status update:
+
+- Central now owns the wzrrd/public projection preparation path.
+- Projection reads `.brain/data/capture-index/index.jsonl`.
+- Public export requires a ready capture with `visibility=public` or `wzrrdCandidate=true`, plus `.brain/data/capture-approvals/<sourceId>.json` approving `target=wzrrd`.
+- The Discord surface does not publish captures directly; it should surface status and can later help collect explicit approval.
+
+2026-06-17 X status bridge receipt:
+
+- Added `x/snapshot.completed` status handling.
+- Extended the local registry status union with `x_snapshot` so posted X receipts survive restarts.
+- X embeds show `xStatus`, author/user fields, post ID, text path, metadata path, Brain path, manifest path, and degraded reason/error when present.
+- Rebuilt and restarted LaunchAgent `com.joelhooks.pi-discord-threads`.
+- `daemon.log` showed `link ingest status bridge connected to Central Inngest` and `Sent WORKER_READY`.
+
+Verification passed:
+
+```sh
+npm run typecheck
+npm run build
+node dist/index.js install-launch-agent --config ~/.config/pi-discord-threads/config.json --start --restart
+```
+
+2026-06-18 live Discord status smoke and race hardening receipt:
+
+- Hardened slash and prefix ingest paths to prepare the event payload, record the local `mentionId -> threadId` mapping, then post to Central Inngest. Event-send failures now leave `send_failed` records instead of disappearing after thread creation.
+- Hardened the status bridge to recover a minimal link-ingest registry record from Central status events when a status arrives before the local mapping exists.
+- Added guarded smoke script `npm run smoke:link-ingest-live-discord -- --execute`.
+- The smoke refuses to post to Discord without `--execute`.
+- The live smoke posted a command-shaped seed message into the configured `joelclaw-central` Discord channel, created a real Discord thread, sent `link/ingest.requested` to Central Inngest, and waited for the live status bridge to persist the worker status updates.
+- Live smoke receipt:
+  - run ID: `live-discord-smoke-017c6195-06af-4de2-b634-f2ec5dfe9114`
+  - channel ID: `1516956047536029796`
+  - thread ID: `1516961675482501282`
+  - seed message ID: `1516961675482501282`
+  - source ID: `3db7ea080b68c32aa68a82e0b8ef1e9b8a541b93ef089a420230949db5edb349`
+  - mention ID: `discord:901878581569925140:1516956047536029796:1516961675482501282`
+  - Inngest event ID: `01KVC1T7PB9H48TVAHW4MM60F2`
+  - registry status: `indexed`
+  - persisted status updates: `7`
+  - status events: `link/ingest.accepted`, `link/ingest.classified`, `source/archive.completed`, `article/extract.completed`, `source/summary.completed`, `capture/item.ready`, `capture/index.completed`
+  - Brain manifest: `/Users/joel/Code/joelhooks/dark-wizard/.brain/data/captures/3db7ea080b68c32aa68a82e0b8ef1e9b8a541b93ef089a420230949db5edb349.json`
+  - Brain page: `/Users/joel/Code/joelhooks/dark-wizard/.brain/resources/captures/example-com-3db7ea080b68.svx`
+
+Verification passed:
+
+```sh
+npm run typecheck
+npm run smoke:capture
+npm run build
+npm run smoke:link-ingest-live-discord
+npm run smoke:link-ingest-live-discord -- --execute
+node dist/index.js install-launch-agent --config ~/.config/pi-discord-threads/config.json --restart
+```
+
+2026-06-17 runtime stabilization receipt:
+
+- After the final restart, the daemon repeatedly auto-resumed one recursive interrupted recovery turn in thread `1516944639289069669`.
+- Backed up `/Users/joel/.local/share/pi-discord-threads/registry.json` to `/Users/joel/.local/share/pi-discord-threads/registry.json.pre-link-ingest-stabilize-20260618T000129Z.bak`.
+- Cleared only that thread's poisoned `activeRun` and set it back to `idle`.
+- Restarted LaunchAgent `com.joelhooks.pi-discord-threads`.
+- Verified the daemon reached `state = running`, the status bridge sent `WORKER_READY`, stderr stayed quiet across an 8-second window, and the registry had no active interrupted run left to auto-resume.
+
+2026-06-17 media status bridge receipt:
+
+- Added `video/media.completed` status handling.
+- Added `video/audio-transcript.completed` status handling.
+- Extended the local registry status union with `video_media` and `audio_transcript`.
+- Media embeds show `mediaStatus`, media path, info path, thumbnail path, byte count, Brain path, manifest path, and degraded reason/error when present.
+- Audio transcript embeds show `audioTranscriptStatus`, transcript path, metadata path, word/char counts, and missing tool/degraded reason when present.
+- Rebuilt and restarted LaunchAgent `com.joelhooks.pi-discord-threads`.
+
+Verification passed:
+
+```sh
+npm run typecheck
+npm run build
+node dist/index.js install-launch-agent --config ~/.config/pi-discord-threads/config.json --start --restart
+```
+
+2026-06-17 capture index status bridge receipt:
+
+- Added `capture/index.completed` status handling.
+- Extended the local registry status union with `indexed` so posted index receipts survive restarts.
+- Index embeds show `indexStatus`, per-item path, aggregate JSON path, JSONL path, document count, search-text byte count, Brain path, and manifest path.
+- Rebuilt and restarted LaunchAgent `com.joelhooks.pi-discord-threads`.
+- `daemon.log` showed `link ingest status bridge connected to Central Inngest` and `Sent WORKER_READY`.
+
+Verification passed:
+
+```sh
+npm run typecheck
+npm run build
+node dist/index.js install-launch-agent --config ~/.config/pi-discord-threads/config.json --start --restart
+```

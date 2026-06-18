@@ -81,6 +81,40 @@ export const piCommand = new SlashCommandBuilder()
   )
   .addSubcommand((subcommand) =>
     subcommand
+      .setName("ingest")
+      .setDescription("Send a link to the joelclaw Inngest capture pipeline")
+      .addStringOption((option) =>
+        option
+          .setName("url")
+          .setDescription("YouTube, X, article, repo, or media URL to ingest")
+          .setRequired(true),
+      )
+      .addStringOption((option) =>
+        option
+          .setName("note")
+          .setDescription("Optional context for why this link matters")
+          .setRequired(false),
+      ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("capture")
+      .setDescription("Capture a standalone durable source without active thread context")
+      .addStringOption((option) =>
+        option
+          .setName("url")
+          .setDescription("YouTube, X, article, repo, or media URL to capture")
+          .setRequired(true),
+      )
+      .addStringOption((option) =>
+        option
+          .setName("note")
+          .setDescription("Optional standalone capture note")
+          .setRequired(false),
+      ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
       .setName("sessions")
       .setDescription("List recent Discord ↔ Pi session mappings"),
   )

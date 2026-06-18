@@ -33,7 +33,7 @@ import { DefaultResourceLoader, getAgentDir, SessionManager } from "@earendil-wo
 import { appendAttachmentContext, type InlineImageContent } from "./attachments.js";
 import type { AppConfig, RunControlRole } from "./config.js";
 import { PiRuntimeManager, type PromptProgress } from "./pi-runtime.js";
-import { Registry, type ActiveRunRecord, type ThreadRecord, type ThreadTitleState } from "./registry.js";
+import { Registry, type ActiveRunRecord, type LinkIngestRecord, type ThreadRecord, type ThreadTitleState } from "./registry.js";
 import {
   listWorkspaces,
   parseLeadingCwdFlag,
@@ -54,6 +54,9 @@ import { RunControlWorker, type RunControlWorkerAdapter } from "./run-control/wo
 import { createForkedSessionFile, forkWorkGraph, formatWorkGraphEmbedDescription, formatWorkGraphStatus, rootWorkGraph } from "./work-graph.js";
 import { isBridgeRecoveryPrompt, recoverableInterruptedPrompt } from "./recovery-prompt.js";
 import { STARTUP_RECOVERY_ENV, startupRecoveryEnabled } from "./startup-recovery.js";
+import { extractFirstUrl, postPreparedLinkIngest, prepareLinkIngest, type LinkIngestSendResult, type PreparedLinkIngest } from "./link-ingest.js";
+import { buildLinkIngestCommandText, linkIngestAcceptedTitle, linkIngestUsage, parsePrefixLinkIngestCommand, type LinkIngestCommandMode } from "./link-ingest-command.js";
+import { startLinkIngestStatusBridge, type StopLinkIngestStatusBridge } from "./link-ingest-status-bridge.js";
 
 interface RunBotOptions {
   config: AppConfig;
@@ -79,6 +82,7 @@ export async function runBot(options: RunBotOptions): Promise<void> {
   const botIngressEnabled = roles.includes("bot");
   let runControlWorker: RunControlWorker | undefined;
   let stopAsyncSubagentBridge: (() => void) | undefined;
+  let stopLinkIngestStatusBridge: StopLinkIngestStatusBridge | undefined;
   const client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
@@ -108,10 +112,25 @@ export async function runBot(options: RunBotOptions): Promise<void> {
     }
     if (botIngressEnabled) {
       stopAsyncSubagentBridge = startAsyncSubagentResultBridge(client, options);
+      try {
+        stopLinkIngestStatusBridge = await startLinkIngestStatusBridge({
+          client,
+          config: options.config,
+          registry: options.registry,
+        });
+      } catch (error) {
+        const text = error instanceof Error ? error.message : String(error);
+        console.warn(`link ingest status bridge unavailable: ${text}`);
+      }
       if (startupRecoveryEnabled()) {
         await autoResumeInterruptedThreads(client, options);
       } else {
-        await reconcileInterruptedThreadPlaceholders(client, options);
+        const interruptedCount = options.registry.listThreads()
+          .filter((record) => record.status === "interrupted" && record.activeRun?.placeholderDiscordMessageId && record.kind !== "discord-dm-workroom")
+          .length;
+        if (interruptedCount > 0) {
+          console.warn(`startup recovery disabled; not editing/resuming ${interruptedCount} interrupted Discord placeholder(s). Set ${STARTUP_RECOVERY_ENV}=1 to opt in.`);
+        }
       }
     }
   });
@@ -179,6 +198,7 @@ export async function runBot(options: RunBotOptions): Promise<void> {
     console.log(`received ${signal}, shutting down...`);
     options.runControlStopReconcileLoop?.();
     stopAsyncSubagentBridge?.();
+    await stopLinkIngestStatusBridge?.();
     await runControlWorker?.stop();
     await options.runControlStore?.close();
     await options.runtimeManager.disposeAll();
@@ -293,51 +313,6 @@ async function autoResumeInterruptedThreads(client: Client, options: RunBotOptio
   }
   if (reconciled > 0) {
     console.log(`reconciled ${reconciled} interrupted Pi thread placeholder(s) without resumable prompts`);
-  }
-}
-
-async function reconcileInterruptedThreadPlaceholders(client: Client, options: RunBotOptions): Promise<void> {
-  const interrupted = options.registry.listThreads()
-    .filter((record) => record.status === "interrupted" && record.activeRun?.placeholderDiscordMessageId && record.kind !== "discord-dm-workroom");
-  if (interrupted.length === 0) return;
-
-  let reconciled = 0;
-  for (const record of interrupted) {
-    try {
-      const channel = await client.channels.fetch(record.threadId);
-      if (!channel || typeof (channel as { isThread?: unknown }).isThread !== "function" || !(channel as { isThread: () => boolean }).isThread()) {
-        continue;
-      }
-      const thread = channel as ThreadChannel;
-      const placeholder = await thread.messages.fetch(record.activeRun?.placeholderDiscordMessageId ?? "");
-
-      const persistedFinal = getPersistedFinalAssistant(record);
-      if (persistedFinal) {
-        const chunks = chunkForDiscord(persistedFinal.text, options.config.render.maxDiscordChars);
-        await sendFinalResponseMessages(thread, record, options.registry, chunks, persistedFinal.entryId);
-        await retireWorkingPlaceholder(placeholder, record);
-        await options.registry.patchThread(record.threadId, { status: "idle", activeRun: undefined }).catch(() => undefined);
-        reconciled++;
-        continue;
-      }
-
-      if (options.config.runControl.enabled && options.runControlStore && record.activeRun?.runId) {
-        await options.runControlStore.markTerminal(record.activeRun.runId, "interrupted", {
-          error: "bridge restarted before Discord received a final answer",
-        }).catch(() => undefined);
-        await options.runControlStore.clearActiveIfMatches(record.threadId, record.activeRun.runId).catch(() => undefined);
-      }
-
-      await placeholder.edit(buildInterruptedRunPayload(record)).catch(() => undefined);
-      reconciled++;
-    } catch (error) {
-      const text = error instanceof Error ? error.message : String(error);
-      console.warn(`failed to reconcile interrupted thread ${record.threadId}: ${text}`);
-    }
-  }
-
-  if (reconciled > 0) {
-    console.log(`reconciled ${reconciled} interrupted Pi thread placeholder(s) without auto-resume`);
   }
 }
 
@@ -640,6 +615,14 @@ async function handlePiInteraction(
 
   if (subcommand === "workspaces") {
     await interaction.reply(buildWorkspaceListPayload(options.config));
+    return;
+  }
+
+  if (subcommand === "ingest" || subcommand === "capture") {
+    const mode = subcommand as LinkIngestCommandMode;
+    const url = interaction.options.getString("url", true);
+    const note = interaction.options.getString("note");
+    await ingestLinkInteraction(interaction, options, buildLinkIngestCommandText({ url, note }), mode);
     return;
   }
 
@@ -1366,6 +1349,12 @@ async function handleMessage(
     return;
   }
 
+  const linkIngestCommand = parsePrefixLinkIngestCommand(content);
+  if (linkIngestCommand) {
+    await ingestLinkMessage(message, options, linkIngestCommand.text, linkIngestCommand.mode);
+    return;
+  }
+
   const workspaceCommand = parseWorkspaceCommand(content);
   if (workspaceCommand) {
     await handleWorkspaceMessage(message, options, workspaceCommand.name, workspaceCommand.prompt);
@@ -1509,6 +1498,163 @@ async function handleWorkspaceMessage(
   });
 }
 
+async function ingestLinkInteraction(
+  interaction: ChatInputCommandInteraction,
+  options: RunBotOptions,
+  text: string,
+  mode: LinkIngestCommandMode,
+): Promise<void> {
+  const channel = interaction.channel;
+  if (!interaction.inGuild() || !channel) {
+    await replyEphemeral(interaction, `Use \`/pi ${mode}\` in a server channel or thread.`);
+    return;
+  }
+  if (!extractFirstUrl(text)) {
+    await replyEphemeral(interaction, `No URL found. Use \`${linkIngestUsage(mode)}\`.`);
+    return;
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  const thread = channel.isThread()
+    ? (channel as ThreadChannel)
+    : await createThreadFromChannelObject(channel, text, linkIngestThreadTitle(text, mode), "Create joelclaw link ingest thread");
+  const prepared = prepareLinkIngest({
+    text,
+    origin: {
+      guildId: interaction.guildId ?? undefined,
+      channelId: channel.id,
+      threadId: thread.id,
+      interactionId: interaction.id,
+      authorId: interaction.user.id,
+    },
+    config: options.config.linkIngest,
+  });
+  await recordLinkIngest(options, prepared, thread.id, channel.id, interaction.guildId ?? undefined, undefined, interaction.id, interaction.user.id);
+  let result: LinkIngestSendResult;
+  try {
+    const posted = await postPreparedLinkIngest({
+      prepared,
+      config: options.config.linkIngest,
+    });
+    result = { ...prepared, ...posted };
+    await recordLinkIngest(options, result, thread.id, channel.id, interaction.guildId ?? undefined, undefined, interaction.id, interaction.user.id);
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    await recordLinkIngest(options, prepared, thread.id, channel.id, interaction.guildId ?? undefined, undefined, interaction.id, interaction.user.id, {
+      status: "send_failed",
+      error: text,
+    });
+    throw error;
+  }
+  const status = await thread.send(buildLinkIngestAcceptedPayload(result, mode));
+  await options.registry.recordMessage({
+    discordMessageId: status.id,
+    threadId: thread.id,
+    direction: "assistant",
+    createdAt: new Date().toISOString(),
+  });
+  await interaction.editReply(`${linkIngestAcceptedTitle(mode)} in <#${thread.id}>.\nsourceId: \`${result.sourceId}\``);
+}
+
+async function ingestLinkMessage(message: Message, options: RunBotOptions, text: string, mode: LinkIngestCommandMode = "ingest"): Promise<void> {
+  if (!message.inGuild()) {
+    await safeReply(message, "Use `ingest` in a server channel or thread.");
+    return;
+  }
+  if (!extractFirstUrl(text)) {
+    await safeReply(message, "No URL found. Use `ingest https://...`.");
+    return;
+  }
+
+  const thread = message.channel.isThread()
+    ? (message.channel as ThreadChannel)
+    : await createThreadFromMessage(message, linkIngestThreadTitle(text, mode), "Create joelclaw link ingest thread");
+  if (!thread) return;
+
+  const prepared = prepareLinkIngest({
+    text,
+    origin: {
+      guildId: message.guildId ?? undefined,
+      channelId: message.channel.id,
+      threadId: thread.id,
+      messageId: message.id,
+      authorId: message.author.id,
+    },
+    config: options.config.linkIngest,
+  });
+  await recordLinkIngest(options, prepared, thread.id, message.channel.id, message.guildId ?? undefined, message.id, undefined, message.author.id);
+  let result: LinkIngestSendResult;
+  try {
+    const posted = await postPreparedLinkIngest({
+      prepared,
+      config: options.config.linkIngest,
+    });
+    result = { ...prepared, ...posted };
+    await recordLinkIngest(options, result, thread.id, message.channel.id, message.guildId ?? undefined, message.id, undefined, message.author.id);
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    await recordLinkIngest(options, prepared, thread.id, message.channel.id, message.guildId ?? undefined, message.id, undefined, message.author.id, {
+      status: "send_failed",
+      error: text,
+    });
+    throw error;
+  }
+  const status = await thread.send(buildLinkIngestAcceptedPayload(result, mode));
+  await options.registry.recordMessage({
+    discordMessageId: status.id,
+    threadId: thread.id,
+    direction: "assistant",
+    createdAt: new Date().toISOString(),
+  });
+}
+
+async function recordLinkIngest(
+  options: RunBotOptions,
+  result: PreparedLinkIngest | LinkIngestSendResult,
+  threadId: string,
+  channelId: string,
+  guildId: string | undefined,
+  discordMessageId: string | undefined,
+  interactionId: string | undefined,
+  authorId: string | undefined,
+  patch?: {
+    status?: LinkIngestRecord["status"];
+    error?: string;
+  },
+): Promise<void> {
+  const now = new Date().toISOString();
+  await options.registry.upsertLinkIngest({
+    sourceId: result.sourceId,
+    mentionId: result.mentionId,
+    eventId: result.eventId,
+    eventName: "link/ingest.requested",
+    url: result.url,
+    normalizedUrl: result.normalizedUrl,
+    threadId,
+    channelId,
+    ...(guildId ? { guildId } : {}),
+    ...(discordMessageId ? { discordMessageId } : {}),
+    ...(interactionId ? { interactionId } : {}),
+    ...(authorId ? { authorId } : {}),
+    status: patch?.status ?? "accepted",
+    ...("inngestEventIds" in result ? { inngestEventIds: result.inngestEventIds } : {}),
+    ...(patch?.error ? { error: patch.error } : {}),
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+function linkIngestThreadTitle(text: string, mode: LinkIngestCommandMode = "ingest"): string {
+  const found = extractFirstUrl(text);
+  if (!found) return `${mode} link`;
+  try {
+    const url = new URL(found.url);
+    return `${mode} ${url.hostname.replace(/^www\./iu, "")}`;
+  } catch {
+    return `${mode} link`;
+  }
+}
+
 function isAllowedInteraction(
   interaction: ChatInputCommandInteraction,
   config: AppConfig,
@@ -1575,7 +1721,11 @@ function isAllowedMessage(message: Message, config: AppConfig, allowedUsers: Set
   return true;
 }
 
-async function createThreadFromMessage(message: Message, prompt: string): Promise<ThreadChannel | undefined> {
+async function createThreadFromMessage(
+  message: Message,
+  prompt: string,
+  reason = "Create durable Pi session thread",
+): Promise<ThreadChannel | undefined> {
   if (!message.inGuild()) {
     await safeReply(message, "DM support is not implemented yet. Send this in a server channel or thread.");
     return undefined;
@@ -1589,7 +1739,7 @@ async function createThreadFromMessage(message: Message, prompt: string): Promis
   const thread = await message.startThread({
     name: summarizeForThreadName(prompt),
     autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
-    reason: "Create durable Pi session thread",
+    reason,
   });
   return thread;
 }
@@ -1617,6 +1767,7 @@ async function createThreadFromChannelObject(
   channel: unknown,
   prompt: string,
   title?: string,
+  reason = "Create durable Pi session thread",
 ): Promise<ThreadChannel> {
   const candidate = channel as {
     type?: ChannelType;
@@ -1635,7 +1786,7 @@ async function createThreadFromChannelObject(
   return candidate.threads.create({
     name: title ? summarizeForThreadName(title) : summarizeForThreadName(prompt),
     autoArchiveDuration: ThreadAutoArchiveDuration.OneDay,
-    reason: "Create durable Pi session thread",
+    reason,
   });
 }
 
@@ -1805,8 +1956,45 @@ async function queueIfActiveForMessage(
 ): Promise<boolean> {
   const queued = await queueIfActive(record, prompt, options, images, message.id);
   if (!queued.queued) return false;
-  await message.react(queued.mode === "followUp" ? "🕓" : "🧭").catch(() => undefined);
+  const mode = queued.mode ?? "steer";
+  await message.react(queuedInputReactionForMode(mode)).catch(() => undefined);
+  const queuedViaRunControl = Boolean(options.config.runControl.enabled && options.runControlStore);
+  if (!queuedViaRunControl) {
+    await markQueuedMessageAccepted(message, mode);
+  }
   return true;
+}
+
+const QUEUED_INPUT_ACCEPTED_REACTION = "✅";
+
+function queuedInputReactionForMode(mode: "steer" | "followUp"): string {
+  return mode === "followUp" ? "🕓" : "🧭";
+}
+
+async function markQueuedMessageAccepted(message: Message, mode: "steer" | "followUp"): Promise<void> {
+  const accepted = await message.react(QUEUED_INPUT_ACCEPTED_REACTION)
+    .then(() => true)
+    .catch(() => false);
+  if (!accepted) return;
+
+  const queuedReaction = queuedInputReactionForMode(mode);
+  const ownQueuedReaction = message.reactions.cache.find((reaction) => reaction.emoji.name === queuedReaction);
+  await ownQueuedReaction?.users.remove().catch(() => undefined);
+}
+
+async function markQueuedRunInputAccepted(
+  client: Client,
+  run: RunRecord,
+  input: QueuedRunInput,
+  options: RunBotOptions,
+): Promise<void> {
+  if (!input.sourceDiscordMessageId) return;
+  const record = options.registry.getThread(run.threadId);
+  if (!record) return;
+  const channel = await resolvePromptChannel(client, record);
+  const message = await fetchPromptChannelMessage(channel, input.sourceDiscordMessageId).catch(() => undefined);
+  if (!message) return;
+  await markQueuedMessageAccepted(message, input.mode);
 }
 
 function parseQueueIntent(prompt: string): { text: string; mode: "steer" | "followUp" } {
@@ -1848,8 +2036,7 @@ function buildRecoveryPrompt(record: ThreadRecord, prompt: string): string {
 
   const activeRun = record.activeRun;
   const interruptedAt = activeRun?.interruptedAt ?? record.updatedAt;
-  const recoverablePrompt = recoverableInterruptedPrompt(activeRun?.prompt);
-  const interruptedPrompt = recoverablePrompt && !isRecoveryIntent(recoverablePrompt) ? recoverablePrompt : undefined;
+  const interruptedPrompt = recoverableInterruptedPrompt(activeRun?.prompt);
   const userPrompt = prompt.trim() || "continue";
   const wantsContinuation = isRecoveryIntent(userPrompt);
 
@@ -2094,7 +2281,11 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
       await placeholder.edit(buildErrorPayload(record, error.message));
     },
     async applyInput(run, input) {
-      return options.runtimeManager.queueMessageDuringActive(run.threadId, input.text, input.mode, input.images ?? []);
+      const applied = await options.runtimeManager.queueMessageDuringActive(run.threadId, input.text, input.mode, input.images ?? []);
+      if (applied.queued) {
+        await markQueuedRunInputAccepted(client, run, input, options).catch(() => undefined);
+      }
+      return applied;
     },
   };
 }
@@ -2118,10 +2309,14 @@ function isPromptChannelLike(value: unknown): value is PromptChannel {
   return Boolean(channel && typeof channel.send === "function" && typeof channel.sendTyping === "function");
 }
 
-async function fetchPlaceholderMessage(channel: PromptChannel, messageId: string): Promise<Message> {
+async function fetchPromptChannelMessage(channel: PromptChannel, messageId: string): Promise<Message> {
   const withMessages = channel as PromptChannel & { messages?: { fetch(messageId: string): Promise<Message> } };
   if (!withMessages.messages) throw new Error("Prompt channel cannot fetch Discord messages");
   return withMessages.messages.fetch(messageId);
+}
+
+async function fetchPlaceholderMessage(channel: PromptChannel, messageId: string): Promise<Message> {
+  return fetchPromptChannelMessage(channel, messageId);
 }
 
 async function sendFinalResponseMessages(
@@ -2252,7 +2447,7 @@ function buildHudCardPayload(record: ThreadRecord, options: {
     "**Now**",
     truncateForComponent(options.now, 650),
     options.signals ? `-# ${truncateForComponent(options.signals, 360)}` : undefined,
-  ].filter((line): line is string => Boolean(line));
+  ].filter(Boolean) as string[];
   const statusBlock = options.risk
     ? `**Watch**\n${truncateForComponent(options.risk, 650)}`
     : `**Next**\n${truncateForComponent(options.next ?? "continuing", 650)}`;
@@ -2378,6 +2573,23 @@ function buildWorkspaceReadyPayload(record: ThreadRecord): RichPayload {
   };
 }
 
+function buildLinkIngestAcceptedPayload(result: LinkIngestSendResult, mode: LinkIngestCommandMode = "ingest"): MessageCreateOptions {
+  return {
+    embeds: [
+      new EmbedBuilder()
+        .setColor(0x57f287)
+        .setTitle(linkIngestAcceptedTitle(mode))
+        .setDescription("Central Inngest has the standalone capture request. Processing status should come back to this thread as the worker path lands.")
+        .addFields(
+          { name: "URL", value: truncateForEmbed(result.normalizedUrl, 900) },
+          { name: "sourceId", value: inlineCode(result.sourceId) },
+          { name: "event", value: inlineCode("link/ingest.requested") },
+        )
+        .setTimestamp(new Date()),
+    ],
+  };
+}
+
 function buildDonePayload(_record: ThreadRecord, _sessionFile: string | undefined, firstChunk: string | undefined): RichPayload {
   return {
     content: firstChunk ?? "(no assistant text produced)",
@@ -2413,19 +2625,19 @@ function buildErrorPayload(record: ThreadRecord, error: string): RichPayload {
 
 function buildInterruptedRunPayload(record: ThreadRecord): RichPayload {
   const activeRun = record.activeRun;
-  const promptPreview = isBridgeRecoveryPrompt(activeRun?.prompt)
-    ? "bridge recovery prompt suppressed"
-    : activeRun?.promptPreview || "not recorded";
+  const promptPreview = activeRun?.promptPreview && !isBridgeRecoveryPrompt(activeRun.prompt)
+    ? activeRun.promptPreview
+    : "not recorded; use durable session history";
   return buildHudCardPayload(record, {
     tone: "interrupted",
     stateLabel: "interrupted",
     now: "Bridge restarted before Discord received a final answer.",
+    signals: "terminal card; no live Pi turn is running",
     progress: [
       "⚠ run interrupted by bridge restart",
       `· request: ${promptPreview}`,
       `· session: ${record.sessionFile ?? activeRun?.sessionFile ?? "not created yet"}`,
     ],
-    signals: "terminal card; no live Pi turn is running",
     risk: "Send `continue` in this thread to recover from durable session history, or send a new prompt to continue from there.",
     footer: "ESC disabled because this run is already terminal",
     abortDisabled: true,
@@ -2854,6 +3066,19 @@ async function sendDebugInteraction(interaction: ChatInputCommandInteraction, op
       },
       render: options.config.render,
       attachments: options.config.attachments,
+      linkIngest: {
+        enabled: options.config.linkIngest.enabled,
+        inngestUrl: options.config.linkIngest.inngestUrl,
+        eventKeyEnv: options.config.linkIngest.eventKeyEnv,
+        eventKeySecretName: options.config.linkIngest.eventKeySecretName,
+        signingKeyEnv: options.config.linkIngest.signingKeyEnv,
+        signingKeySecretName: options.config.linkIngest.signingKeySecretName,
+        statusBridgeEnabled: options.config.linkIngest.statusBridgeEnabled,
+        defaultVisibility: options.config.linkIngest.defaultVisibility,
+        defaultSite: options.config.linkIngest.defaultSite,
+        wzrrdCandidate: options.config.linkIngest.wzrrdCandidate,
+        requestTimeoutMs: options.config.linkIngest.requestTimeoutMs,
+      },
     },
     registry: {
       threadCount: options.registry.listThreads().length,
@@ -3117,9 +3342,10 @@ function helpText(prefix: string): string {
     `- Slash: \`/pi ask prompt:<prompt>\` creates/continues a durable Pi session.`,
     `- Slash: \`/pi skill name:<skill> args:<optional>\` invokes a Pi skill as \`/skill:name\`.`,
     `- Slash: \`/pi workspace name:<workspace> prompt:<optional>\` creates a thread rooted in a configured workspace.`,
+    `- Slash: \`/pi ingest url:<url> note:<optional>\` and \`/pi capture url:<url> note:<optional>\` send explicit out-of-phase source captures.`,
     `- Slash: \`/aih-triage\` starts the standard AI Hero fresh support triage run in the aihero workspace.`,
     `- Slash: \`/pi status\`, \`/pi debug\`, \`/pi reload\`, \`/pi compact\`, \`/pi esc\`, \`/pi abort\`, \`/pi help\`.`,
-    `- Prefix fallback: \`${prefix} <prompt>\`, \`${prefix} workspace <name> [prompt]\`, \`${prefix} status\`, \`${prefix} reload\`, \`${prefix} compact [instructions]\`, \`${prefix} esc\`, \`${prefix} help\`.`,
+    `- Prefix fallback: \`${prefix} <prompt>\`, \`${prefix} workspace <name> [prompt]\`, \`${prefix} ingest <url> [note]\`, \`${prefix} status\`, \`${prefix} reload\`, \`${prefix} compact [instructions]\`, \`${prefix} esc\`, \`${prefix} help\`.`,
     "- In a registered thread, normal messages continue the Pi session; while active they queue as steering messages.",
     "- In DM, normal messages continue the configured Personal Workroom prototype.",
     "- Pi skills work normally in messages; Discord slash equivalent is `/pi skill`",

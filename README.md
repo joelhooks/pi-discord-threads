@@ -11,6 +11,7 @@ Portable local Discord bridge for durable Pi coding-agent sessions.
 - Messages inside a registered Discord thread continue that Pi session. Daily SHITRAT date threads are registered too, so replying in the daily thread resumes an agent instead of leaving a static log dump.
 - Bot DMs can be wired to a single-user Personal Workroom prototype through config, disabled by default.
 - Pi skills behave normally, including model auto-invocation. Discord slash equivalent is `/pi skill name:<skill>`.
+- Link ingest has explicit out-of-phase paths: `/pi ingest url:<url>`, `/pi capture url:<url> note:<optional>`, or `!pi ingest <url> [note]` sends `link/ingest.requested` to Central Inngest and records the Discord ↔ source mapping locally.
 - Local secrets are leased from `secrets`; values are never printed.
 - Registry stores `discord_thread_id -> pi_session_file` and message-to-entry IDs when available.
 - Run status uses a native Discord HUD with an LLM narrator while running; final answers are posted as fresh Discord messages so thread notifications fire.
@@ -91,6 +92,28 @@ Discord context-channel defaults are configured under `discord.contextChannels`.
 
 Attachment ingestion is controlled under `attachments` with an enabled flag, maximum byte size, content-type prefixes, and extension allowlist. Defaults accept common text, image, audio, video, and PDF uploads up to 25 MB; use `"*"` in `allowedContentTypePrefixes` if you intentionally want to accept every file type.
 
+Link ingest is controlled under `linkIngest`. It is explicit-only; the bridge does not auto-capture random URLs from normal conversation. Bare or lightly annotated URLs stay in-phase as normal Pi thread messages. `/pi capture url:<url> note:<optional>` is a human-facing alias for a standalone durable source capture; it reuses the same `link/ingest.requested` pipeline as `/pi ingest` and does not inherit active thread/workstream context unless the note says so. The event key and signing key come from env vars or configured local secret names, not from committed config. The status bridge listens for Central Inngest `link/ingest.accepted` and `link/ingest.classified` events and posts them back into the originating Discord thread.
+
+```json
+{
+  "linkIngest": {
+    "enabled": true,
+    "inngestUrl": "http://127.0.0.1:8288",
+    "eventKeyEnv": "INNGEST_EVENT_KEY",
+    "eventKeySecretName": "inngest_event_key",
+    "eventKeyLeaseTtl": "12h",
+    "signingKeyEnv": "INNGEST_SIGNING_KEY",
+    "signingKeySecretName": "inngest_signing_key",
+    "signingKeyLeaseTtl": "12h",
+    "statusBridgeEnabled": true,
+    "defaultVisibility": "private",
+    "defaultSite": "joelclaw",
+    "wzrrdCandidate": false,
+    "requestTimeoutMs": 10000
+  }
+}
+```
+
 Live run HUD narration is controlled under `render.hud`. It defaults to `openai-codex/gpt-5.5` and updates only the active placeholder message. When the run completes, the bridge posts the final answer as a fresh Discord message and retires the placeholder.
 
 Thread title evaluation is controlled under `render.threadTitles`. It defaults to `openai-codex/gpt-5.4-mini` and runs as a post-turn online Pi hook after turn 2, then every 8 completed turns. The evaluator proposes titles only; deterministic bridge guardrails decide whether to call Discord `thread.setName()`.
@@ -114,6 +137,8 @@ Slash commands:
 /pi skill name:<skill> args:<optional> cwd:<optional>   invoke a Pi skill as /skill:name
 /pi workspace name:<optional> prompt:<optional>         create a workspace-rooted thread; no name shows a picker
 /pi workspaces                                          list configured workspace aliases
+/pi ingest url:<url> note:<optional>                    send a link to joelclaw's Inngest capture pipeline
+/pi capture url:<url> note:<optional>                   capture a standalone durable source via the same pipeline
 /pi sessions                                            list recent Discord ↔ Pi session mappings
 /pi resume session:<session> prompt:<optional>          resume a recent Pi session, with autocomplete
 /pi fork prompt:<optional>                              create a child thread with a true Pi fork when a source session file exists
@@ -141,6 +166,7 @@ Prefix fallback:
 !pi <prompt>                         create a Discord thread + durable Pi session
 !pi --cwd @Code/project <prompt>     create a session rooted in that cwd
 !pi workspace <workspace> [prompt]   create a workspace-rooted thread; without prompt it waits for the next message
+!pi ingest <url> [note]              send a link to joelclaw's Inngest capture pipeline
 !pi status                           show the current thread mapping
 !pi reload                           reload Pi resources for the current thread session
 !pi compact [instructions]           compact the current thread session context

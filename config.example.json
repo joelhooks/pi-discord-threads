@@ -55,6 +55,21 @@
       ".pdf"
     ]
   },
+  "linkIngest": {
+    "enabled": true,
+    "inngestUrl": "http://127.0.0.1:8288",
+    "eventKeyEnv": "INNGEST_EVENT_KEY",
+    "eventKeySecretName": "inngest_event_key",
+    "eventKeyLeaseTtl": "12h",
+    "signingKeyEnv": "INNGEST_SIGNING_KEY",
+    "signingKeySecretName": "inngest_signing_key",
+    "signingKeyLeaseTtl": "12h",
+    "statusBridgeEnabled": true,
+    "defaultVisibility": "private",
+    "defaultSite": "joelclaw",
+    "wzrrdCandidate": false,
+    "requestTimeoutMs": 10000
+  },
   "runControl": {
     "enabled": false,
     "redisUrlEnv": "REDIS_URL",

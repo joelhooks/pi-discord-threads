@@ -65,14 +65,49 @@ export interface MessageRecord {
   createdAt: string;
 }
 
+export interface LinkIngestRecord {
+  sourceId: string;
+  mentionId: string;
+  eventId: string;
+  eventName: "link/ingest.requested";
+  url: string;
+  normalizedUrl: string;
+  threadId: string;
+  channelId: string;
+  guildId?: string;
+  discordMessageId?: string;
+  interactionId?: string;
+  authorId?: string;
+  status: "accepted" | "classified" | "archived" | "video_metadata" | "video_media" | "audio_transcript" | "article_extracted" | "x_snapshot" | "transcript_processed" | "summarized" | "ready" | "indexed" | "failed" | "send_failed";
+  statusUpdates?: Record<string, LinkIngestStatusUpdateRecord>;
+  inngestEventIds?: string[];
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LinkIngestStatusUpdateRecord {
+  statusKey: string;
+  eventName: string;
+  sourceId: string;
+  mentionId: string;
+  status: "accepted" | "classified" | "archived" | "video_metadata" | "video_media" | "audio_transcript" | "article_extracted" | "x_snapshot" | "transcript_processed" | "summarized" | "ready" | "indexed" | "failed";
+  discordMessageId: string;
+  brainPath?: string;
+  manifestPath?: string;
+  sourceType?: string;
+  postedAt: string;
+}
+
 export interface RegistryData {
   version: 1;
   threads: Record<string, ThreadRecord>;
   messages: Record<string, MessageRecord>;
+  linkIngests: Record<string, LinkIngestRecord>;
 }
 
 export class Registry {
-  private data: RegistryData = { version: 1, threads: {}, messages: {} };
+  private data: RegistryData = { version: 1, threads: {}, messages: {}, linkIngests: {} };
   private loaded = false;
   private saveQueue: Promise<void> = Promise.resolve();
 
@@ -81,7 +116,7 @@ export class Registry {
   async load(): Promise<void> {
     if (!existsSync(this.filePath)) {
       await mkdir(dirname(this.filePath), { recursive: true });
-      this.data = { version: 1, threads: {}, messages: {} };
+      this.data = { version: 1, threads: {}, messages: {}, linkIngests: {} };
       this.loaded = true;
       await this.save();
       return;
@@ -93,6 +128,7 @@ export class Registry {
       version: 1,
       threads: normalizeThreads(parsed.threads ?? {}),
       messages: parsed.messages ?? {},
+      linkIngests: normalizeLinkIngests(parsed.linkIngests ?? {}),
     };
     this.loaded = true;
   }
@@ -208,6 +244,44 @@ export class Registry {
   getMessage(discordMessageId: string): MessageRecord | undefined {
     return this.data.messages[discordMessageId];
   }
+
+  async upsertLinkIngest(record: LinkIngestRecord): Promise<void> {
+    const existing = this.data.linkIngests[record.mentionId];
+    this.data.linkIngests[record.mentionId] = {
+      ...existing,
+      ...record,
+      createdAt: existing?.createdAt ?? record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+    await this.save();
+  }
+
+  getLinkIngest(mentionId: string): LinkIngestRecord | undefined {
+    return this.data.linkIngests[mentionId];
+  }
+
+  listLinkIngests(): LinkIngestRecord[] {
+    return Object.values(this.data.linkIngests);
+  }
+
+  getLinkIngestStatusUpdate(mentionId: string, statusKey: string): LinkIngestStatusUpdateRecord | undefined {
+    return this.data.linkIngests[mentionId]?.statusUpdates?.[statusKey];
+  }
+
+  async recordLinkIngestStatusUpdate(update: LinkIngestStatusUpdateRecord): Promise<void> {
+    const existing = this.data.linkIngests[update.mentionId];
+    if (!existing) throw new Error(`No link ingest registered for ${update.mentionId}`);
+    this.data.linkIngests[update.mentionId] = {
+      ...existing,
+      status: update.status,
+      statusUpdates: {
+        ...(existing.statusUpdates ?? {}),
+        [update.statusKey]: update,
+      },
+      updatedAt: update.postedAt,
+    };
+    await this.save();
+  }
 }
 
 function normalizeThreads(threads: Record<string, ThreadRecord>): Record<string, ThreadRecord> {
@@ -246,6 +320,44 @@ function normalizeTitleState(state: ThreadTitleState | undefined): ThreadTitleSt
     lastSuggestedTitle: state.lastSuggestedTitle,
     recentTurns,
   };
+}
+
+function normalizeLinkIngests(records: Record<string, LinkIngestRecord>): Record<string, LinkIngestRecord> {
+  const normalized: Record<string, LinkIngestRecord> = {};
+  for (const [mentionId, record] of Object.entries(records)) {
+    if (!record?.sourceId || !record?.mentionId || !record?.url) continue;
+    normalized[mentionId] = {
+      ...record,
+      eventName: "link/ingest.requested",
+      status: normalizeLinkIngestStatus(record.status),
+      statusUpdates: normalizeLinkIngestStatusUpdates(record.statusUpdates),
+      createdAt: record.createdAt ?? record.updatedAt ?? new Date(0).toISOString(),
+      updatedAt: record.updatedAt ?? record.createdAt ?? new Date(0).toISOString(),
+    };
+  }
+  return normalized;
+}
+
+function normalizeLinkIngestStatus(status: string | undefined): LinkIngestRecord["status"] {
+  if (status === "classified" || status === "archived" || status === "video_metadata" || status === "video_media" || status === "audio_transcript" || status === "article_extracted" || status === "x_snapshot" || status === "transcript_processed" || status === "summarized" || status === "ready" || status === "indexed" || status === "failed" || status === "send_failed") return status;
+  return "accepted";
+}
+
+function normalizeLinkIngestStatusUpdates(
+  updates: Record<string, LinkIngestStatusUpdateRecord> | undefined,
+): Record<string, LinkIngestStatusUpdateRecord> | undefined {
+  if (!updates || typeof updates !== "object") return undefined;
+  const normalized: Record<string, LinkIngestStatusUpdateRecord> = {};
+  for (const [statusKey, update] of Object.entries(updates)) {
+    if (!update?.eventName || !update.sourceId || !update.mentionId || !update.discordMessageId) continue;
+    normalized[statusKey] = {
+      ...update,
+      statusKey,
+      status: update.status === "classified" || update.status === "archived" || update.status === "video_metadata" || update.status === "video_media" || update.status === "audio_transcript" || update.status === "article_extracted" || update.status === "x_snapshot" || update.status === "transcript_processed" || update.status === "summarized" || update.status === "ready" || update.status === "indexed" || update.status === "failed" ? update.status : "accepted",
+      postedAt: update.postedAt ?? new Date(0).toISOString(),
+    };
+  }
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 function rootWorkGraph(threadId: string): WorkGraphMetadata {
