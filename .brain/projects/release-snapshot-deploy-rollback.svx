@@ -1,0 +1,259 @@
+---
+title: "Release Snapshot Deploy/Rollback PRD"
+type: "project"
+status: "active"
+created_at: "2026-06-19"
+tags:
+  - prd
+  - deploy
+  - rollback
+  - discord
+  - run-control
+---
+
+# Release Snapshot Deploy/Rollback PRD
+
+## Problem
+
+`pi-discord-threads` is becoming useful enough that deploying by hand-editing/building/restarting the repo `dist/` is too raw. The bridge now has Redis run-control, final-answer outbox protection, and recovery semantics, but the deploy surface is still operator folklore:
+
+- build in the repo
+- hope the current `dist/` matches the intended commit
+- restart the LaunchAgent
+- if it goes sideways, rebuild/revert manually
+
+That is fine for tiny local hacking. It is not fine for a bot that may be carrying live Discord/Pi sessions.
+
+## Desired outcome
+
+Joel can deploy the local Discord bridge freely, even while runs are active, with two guarantees:
+
+1. **Zero lost work:** restart/deploy must rely on Redis run-control, leases, and final-answer outbox recovery so active work is reclaimed, pending, finalized, or explicitly reported unsafe. It should not silently orphan work.
+2. **Fast release rollback:** every deploy has a release snapshot containing the built artifact and exact private config copy needed to flip back to a known commit/build/config bundle quickly.
+
+This is not a generalized deployment platform. It is a dev/operator feature for Joel's local rig.
+
+## Terms
+
+- **Release snapshot:** a local immutable-ish record of one runnable build/config bundle.
+- **Running-session deploy:** a deploy/restart that may happen while Redis run-control has queued/running/finalizing work. A brief Discord Gateway reconnect gap is acceptable if work recovers cleanly.
+- **Release rollback:** flip back to a previous build/config bundle and restart. This is not a Git rollback and not a Redis state rollback.
+- **Current release:** the release directory the LaunchAgent should run.
+
+## Non-goals
+
+- True zero-downtime Discord Gateway handoff.
+- Blue/green duplicate bot ingress.
+- Redis/database state rollback.
+- Full source checkout snapshots.
+- Snapshotting `node_modules` in V1.
+- LaunchAgent restart/deploy/rollback behavior in the first implementation slice.
+- Turning this into a generic deploy framework.
+
+## Source receipts
+
+- `.brain/projects/redis-run-control-plane.svx` — run-control invariants, running-session deploy target, snapshot rollback target, prior art.
+- `.brain/resources/pi-discord-threads-architecture-review.svx` — current architecture direction: Redis owns active run coordination; Effect owns resource seams; Discord is visible operator surface.
+- `src/launch-agent.ts` — current LaunchAgent writes a plist pointing at resolved `dist/index.js`; restart is `bootout`/`kickstart` and guarded against restarting from inside the daemon process tree.
+- `src/index.ts` — current CLI command dispatch, doctor output, LaunchAgent commands.
+- `src/config.ts` — current command union and `config.dataDir` default.
+- `package.json` — build/test scripts and package metadata.
+- Prior art:
+  - Capistrano release dirs + `current` symlink + rollback: https://capistranorb.com/documentation/getting-started/rollbacks/
+  - Heroku release = build artifact + config vars + append-only ledger: https://devcenter.heroku.com/articles/releases
+  - Kubernetes rollout history/readiness/undo ideas: https://www.bluematador.com/blog/kubernetes-deployments-rolling-update-configuration
+
+## Operator workflows
+
+### Slice 1: snapshot current build
+
+```sh
+node dist/index.js release snapshot --config ~/.config/pi-discord-threads/config.json
+```
+
+Expected behavior:
+
+1. Refuse by default if the worktree is dirty.
+2. Allow dirty snapshots only with explicit `--allow-dirty`.
+3. Ensure `dist/` exists; later slices may choose to build before snapshot, but V1 snapshot should not hide a missing build.
+4. Create `config.dataDir/releases/<release-id>/`.
+5. Copy:
+   - `dist/`
+   - `package.json`
+   - `package-lock.json`
+   - exact private config file for rollback
+6. Write `manifest.json` with safe metadata.
+7. Append one JSON line to `config.dataDir/releases/ledger.jsonl`.
+8. Print the release id and path.
+
+### Slice 1: list snapshots
+
+```sh
+node dist/index.js release list --config ~/.config/pi-discord-threads/config.json
+```
+
+Expected behavior:
+
+- Print newest-first releases from the ledger.
+- Show release id, commit, branch, dirty flag, created timestamp, config path, and whether build/config artifacts exist.
+- Never print secrets or full config contents.
+
+### Later: deploy
+
+```sh
+node dist/index.js release deploy --config ~/.config/pi-discord-threads/config.json
+```
+
+Expected behavior later:
+
+1. Create a release snapshot.
+2. Run doctor/preflight.
+3. Flip `releases/current` to the selected release.
+4. Restart/kickstart LaunchAgent.
+5. Run doctor/postflight.
+6. If postflight cannot prove active-run safety, automatically rollback to previous release and show evidence.
+
+### Later: rollback
+
+```sh
+node dist/index.js release rollback <sha-or-release-id> --config ~/.config/pi-discord-threads/config.json
+```
+
+Expected behavior later:
+
+1. Resolve the requested release.
+2. Flip `releases/current` back.
+3. Restore exact private config copy.
+4. Restart/kickstart LaunchAgent.
+5. Run doctor/postflight.
+6. Append rollback event to the ledger.
+
+## Implementation shape
+
+### Files likely affected in slice 1
+
+- `src/config.ts`
+  - add `release` command parsing and subcommand/options shape.
+- `src/index.ts`
+  - dispatch `release snapshot` and `release list`.
+- new `src/release-snapshots.ts`
+  - filesystem layout, manifest writing, config copy, ledger append/read, redaction helpers.
+- new regression script, likely `scripts/release-snapshot-regression.test.mjs`.
+- `package.json`
+  - add `test:release-snapshot`.
+
+### Release directory layout
+
+```txt
+<config.dataDir>/releases/
+  ledger.jsonl
+  current -> <release-id>        # later deploy/rollback slice
+  <release-id>/
+    manifest.json
+    config.json                  # exact private rollback copy; local-only
+    package.json
+    package-lock.json
+    dist/
+      index.js
+      ...
+```
+
+### Manifest V1 fields
+
+```json
+{
+  "version": 1,
+  "releaseId": "20260619T153000Z-8a21bbe",
+  "createdAt": "2026-06-19T15:30:00.000Z",
+  "commit": "8a21bbe...",
+  "shortCommit": "8a21bbe",
+  "branch": "main",
+  "dirty": false,
+  "allowDirty": false,
+  "nodeVersion": "v24.16.0",
+  "buildCommand": "npm run build",
+  "configPath": "/Users/joel/.config/pi-discord-threads/config.json",
+  "configSummary": {
+    "dataDir": "/Users/joel/.local/share/pi-discord-threads",
+    "runControlEnabled": true,
+    "roles": ["bot", "worker", "reconcile"],
+    "keyPrefix": "pi-discord-threads"
+  },
+  "artifacts": {
+    "dist": true,
+    "packageJson": true,
+    "packageLock": true,
+    "config": true
+  }
+}
+```
+
+The manifest must not include Discord tokens, secret values, full config JSON, or anything leased from `agent-secrets`.
+
+## Decisions already made
+
+- Use project-local CLI commands, not an external shell script.
+- Store release snapshots under `config.dataDir`, not in the repo.
+- Include exact private config snapshot for rollback.
+- Redact config in manifest/list output.
+- Refuse dirty worktree by default; allow only with `--allow-dirty`.
+- First slice is snapshot/list only. No LaunchAgent mutation yet.
+- Do not call this true zero downtime. The target is zero lost work + fast rollback.
+
+## Open questions
+
+### Should V1 run `npm run build` inside `release snapshot`?
+
+Recommendation: not in the first slice. Require existing `dist/` and record the build command in the manifest. Add build orchestration in `release deploy` when the command owns the full deploy flow.
+
+### Should snapshots include `node_modules`?
+
+Recommendation: no for V1. Rollback runs from the repo's current dependency install, so dependency rollback is not perfect. Accept that as a dev-rig tradeoff for now; revisit only if dependency changes make rollback flaky.
+
+### Should release ids be timestamp-first or commit-first?
+
+Recommendation: timestamp + short SHA, e.g. `20260619T153000Z-8a21bbe`. It sorts naturally and still maps to Git.
+
+## Acceptance criteria — slice 1
+
+- `release snapshot` creates `<config.dataDir>/releases/<release-id>/` using a temp directory then atomic rename where practical.
+- Snapshot copies `dist/`, `package.json`, `package-lock.json`, and exact private config file.
+- Snapshot writes `manifest.json` with safe metadata and no secrets.
+- Snapshot appends one valid JSON line to `releases/ledger.jsonl`.
+- Snapshot refuses dirty worktree unless `--allow-dirty` is present.
+- `release list` prints newest-first safe metadata and no secrets.
+- Private config snapshot is written local-only with restrictive permissions, ideally `0600`.
+- Tests use a temp `dataDir` and temp config; no LaunchAgent mutation.
+- Existing `npm run typecheck` still passes.
+- `npm run brain:check` passes after docs updates.
+
+## Validation plan
+
+Slice 1 should run:
+
+```sh
+npm run typecheck
+npm run test:release-snapshot
+npm run brain:check
+```
+
+Manual smoke after implementation:
+
+```sh
+npm run build
+node dist/index.js release snapshot --config ~/.config/pi-discord-threads/config.json
+node dist/index.js release list --config ~/.config/pi-discord-threads/config.json
+```
+
+Confirm generated manifest/list output redacts config secrets and does not print leased secret values.
+
+## Tracker mirror plan
+
+Brain is canonical. If this gets mirrored to issues later, create vertical slices:
+
+1. `release snapshot/list` storage foundation.
+2. LaunchAgent entrypoint switch to `releases/current`.
+3. `release deploy` with preflight/postflight and automatic rollback.
+4. Running-session deploy smoke harness.
+
+Each issue should link back to this PRD.
