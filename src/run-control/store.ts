@@ -8,6 +8,7 @@ import {
   completeFinalizeScript,
   heartbeatRunLeaseScript,
   recordRetryLaterScript,
+  recordWorkerIdleScript,
   releaseRunLeaseScript,
   verifyRunOwnershipScript,
 } from "./lua-scripts.js";
@@ -420,8 +421,15 @@ export class RunControlStore {
 
   async recordWorkerIdle(workerId: string): Promise<void> {
     const now = new Date().toISOString();
-    await this.hset(this.keys.worker(workerId), { workerId, status: "idle", updatedAt: now });
-    await this.command(["PEXPIRE", this.keys.worker(workerId), String(Math.max(this.config.runControl.leaseTtlMs * 2, this.config.runControl.heartbeatMs * 3))]);
+    await this.command([
+      "EVAL",
+      recordWorkerIdleScript.source,
+      "1",
+      this.keys.worker(workerId),
+      workerId,
+      now,
+      String(Math.max(this.config.runControl.leaseTtlMs * 2, this.config.runControl.heartbeatMs * 3)),
+    ]);
   }
 
   async getJobQueueSummary(): Promise<RunControlJobQueueSummary> {

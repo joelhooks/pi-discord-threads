@@ -147,6 +147,20 @@ return 1
 `,
 };
 
+export const recordWorkerIdleScript: RunControlLuaScript = {
+  name: "recordWorkerIdle",
+  source: `
+redis.call('HSET', KEYS[1],
+  'workerId', ARGV[1],
+  'status', 'idle',
+  'updatedAt', ARGV[2]
+)
+redis.call('HDEL', KEYS[1], 'runId')
+redis.call('PEXPIRE', KEYS[1], ARGV[3])
+return 1
+`,
+};
+
 export const clearActiveIfMatchesScript: RunControlLuaScript = {
   name: "clearActiveIfMatches",
   source: "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
@@ -168,6 +182,7 @@ export const runControlLuaScripts = [
   claimRunLeaseScript,
   recordRetryLaterScript,
   heartbeatRunLeaseScript,
+  recordWorkerIdleScript,
   clearActiveIfMatchesScript,
   releaseRunLeaseScript,
   completeFinalizeScript,

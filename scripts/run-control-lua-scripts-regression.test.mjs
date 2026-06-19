@@ -6,6 +6,7 @@ import {
   completeFinalizeScript,
   heartbeatRunLeaseScript,
   recordRetryLaterScript,
+  recordWorkerIdleScript,
   runControlLuaScripts,
   verifyRunOwnershipScript,
 } from "../dist/run-control/lua-scripts.js";
@@ -41,8 +42,10 @@ test("enqueue and lease scripts clean up partial state on Redis write errors", (
   assert.match(claimRunLeaseScript.source, /redis\.call\('DEL', KEYS\[2\]\)[\s\S]*return \{'error'/);
 });
 
-test("heartbeat and finalize scripts preserve existing invariants", () => {
+test("heartbeat, idle, and finalize scripts preserve existing invariants", () => {
   assert.match(heartbeatRunLeaseScript.source, /status ~= 'queued' and status ~= 'running' and status ~= 'finalizing'/);
   assert.match(heartbeatRunLeaseScript.source, /PEXPIRE/);
+  assert.match(recordWorkerIdleScript.source, /'status', 'idle'/);
+  assert.match(recordWorkerIdleScript.source, /HDEL', KEYS\[1\], 'runId'/);
   assert.match(completeFinalizeScript.source, /current == 'done'/);
 });

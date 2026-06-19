@@ -158,6 +158,18 @@ class FakeRedis {
       if (status !== "queued" && status !== "running" && status !== "finalizing") return 0;
       return 1;
     }
+    if (script.includes("redis.call('HDEL', KEYS[1], 'runId')")) {
+      const workerKey = args[3];
+      const workerId = args[4];
+      const updatedAt = args[5];
+      const hash = this.hashes.get(workerKey) ?? new Map();
+      hash.set("workerId", workerId);
+      hash.set("status", "idle");
+      hash.set("updatedAt", updatedAt);
+      hash.delete("runId");
+      this.hashes.set(workerKey, hash);
+      return 1;
+    }
     if (script.includes("return {'enqueued'")) {
       const activeKey = args[3];
       const runKey = args[4];
@@ -337,6 +349,22 @@ test("recordRetryLater refuses to count attempts after ownership is gone", async
   assert.equal(persisted.retryLaterCount, undefined);
   assert.equal(fake.strings.get("pi-discord-threads:thread:thread-1:active"), run.runId);
   assert.equal(fake.strings.get("pi-discord-threads:leases:run:run-lost-retry"), "someone-else");
+});
+
+test("recordWorkerIdle clears stale worker run id", async () => {
+  const { store, fake } = createStore();
+  fake.hashes.set("pi-discord-threads:workers:worker-1", new Map([
+    ["workerId", "worker-1"],
+    ["status", "running"],
+    ["runId", "run-old"],
+  ]));
+
+  await store.recordWorkerIdle("worker-1");
+
+  const worker = fake.hashes.get("pi-discord-threads:workers:worker-1");
+  assert.equal(worker.get("status"), "idle");
+  assert.equal(worker.has("runId"), false);
+  assert.equal(worker.get("workerId"), "worker-1");
 });
 
 test("claimRunLease atomically verifies the active pointer before taking the lease", async () => {
