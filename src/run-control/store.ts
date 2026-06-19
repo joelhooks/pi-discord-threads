@@ -11,6 +11,20 @@ import {
 
 const WORKER_GROUP = "workers";
 
+const VERIFY_RUN_OWNERSHIP_SCRIPT = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+if redis.call('GET', KEYS[2]) ~= ARGV[2] then
+  return 0
+end
+local status = redis.call('HGET', KEYS[3], 'status')
+if status ~= 'queued' and status ~= 'running' and status ~= 'finalizing' then
+  return 0
+end
+return 1
+`;
+
 const ATOMIC_ENQUEUE_RUN_SCRIPT = `
 local active = redis.call('GET', KEYS[1])
 if active then
@@ -49,12 +63,19 @@ local claimed = redis.call('SET', KEYS[2], ARGV[2], 'NX', 'PX', ARGV[3])
 if not ((type(claimed) == 'table' and claimed['ok'] == 'OK') or claimed == 'OK') then
   return 0
 end
+local generation = redis.pcall('HINCRBY', KEYS[3], 'leaseGeneration', 1)
+if type(generation) == 'table' and generation['err'] then
+  redis.call('DEL', KEYS[2])
+  return {'error', generation['err']}
+end
 local hset = redis.pcall('HSET', KEYS[3],
   'status', ARGV[4],
   'workerId', ARGV[5],
   'leaseToken', ARGV[2],
   'startedAt', ARGV[6],
-  'updatedAt', ARGV[7]
+  'updatedAt', ARGV[7],
+  'leaseExpiresAt', ARGV[9],
+  'leaseGeneration', generation
 )
 if type(hset) == 'table' and hset['err'] then
   redis.call('DEL', KEYS[2])
@@ -178,7 +199,7 @@ export class RunControlStore {
   }
 
   async dequeueJob(workerId: string, blockMs: number): Promise<RunJob | undefined> {
-    const reply = await this.command([
+    const reply = await this.blockingCommand([
       "XREADGROUP",
       "GROUP",
       WORKER_GROUP,
@@ -190,7 +211,7 @@ export class RunControlStore {
       "STREAMS",
       this.keys.jobs,
       ">",
-    ]);
+    ], workerId);
     const freshJob = jobFromStreamEntries(parseXReadReply(reply)[0]?.entries ?? []);
     if (freshJob) return freshJob;
     return this.claimStaleJob(workerId);
@@ -286,6 +307,7 @@ export class RunControlStore {
 
   async claimRunLease(run: RunRecord, workerId: string, leaseToken: string): Promise<boolean> {
     const now = new Date().toISOString();
+    const leaseExpiresAt = new Date(Date.now() + this.config.runControl.leaseTtlMs).toISOString();
     const result = await this.command([
       "EVAL",
       CLAIM_RUN_LEASE_SCRIPT,
@@ -301,6 +323,7 @@ export class RunControlStore {
       run.startedAt ?? now,
       now,
       run.status,
+      leaseExpiresAt,
     ]);
     const claimResult = parseEvalArray(result);
     if (claimResult[0] === "error") {
@@ -312,19 +335,25 @@ export class RunControlStore {
     return true;
   }
 
-  async heartbeatRunLease(runId: string, leaseToken: string, workerId: string): Promise<boolean> {
+  async heartbeatRunLease(runId: string, logicalThreadId: string, leaseToken: string, workerId: string): Promise<boolean> {
+    const now = new Date().toISOString();
+    const leaseExpiresAt = new Date(Date.now() + this.config.runControl.leaseTtlMs).toISOString();
     const result = await this.command([
       "EVAL",
-      "if redis.call('GET', KEYS[1]) == ARGV[1] then redis.call('PEXPIRE', KEYS[1], ARGV[2]); return 1 else return 0 end",
-      "1",
+      "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end; if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end; local status = redis.call('HGET', KEYS[3], 'status'); if status ~= 'queued' and status ~= 'running' and status ~= 'finalizing' then return 0 end; redis.call('PEXPIRE', KEYS[2], ARGV[3]); redis.call('HSET', KEYS[3], 'updatedAt', ARGV[4], 'workerId', ARGV[5], 'leaseExpiresAt', ARGV[6]); return 1",
+      "3",
+      this.keys.active(logicalThreadId),
       this.keys.runLease(runId),
+      this.keys.run(runId),
+      runId,
       leaseToken,
       String(this.config.runControl.leaseTtlMs),
+      now,
+      workerId,
+      leaseExpiresAt,
     ]);
     const ok = Number(result) === 1;
     if (ok) {
-      const now = new Date().toISOString();
-      await this.hset(this.keys.run(runId), { updatedAt: now, workerId });
       await this.hset(this.keys.worker(workerId), {
         workerId,
         runId,
@@ -334,6 +363,20 @@ export class RunControlStore {
       await this.command(["PEXPIRE", this.keys.worker(workerId), String(Math.max(this.config.runControl.leaseTtlMs * 2, this.config.runControl.heartbeatMs * 3))]);
     }
     return ok;
+  }
+
+  async verifyRunOwnership(runId: string, logicalThreadId: string, leaseToken: string): Promise<boolean> {
+    const result = await this.command([
+      "EVAL",
+      VERIFY_RUN_OWNERSHIP_SCRIPT,
+      "3",
+      this.keys.active(logicalThreadId),
+      this.keys.runLease(runId),
+      this.keys.run(runId),
+      runId,
+      leaseToken,
+    ]);
+    return Number(result) === 1;
   }
 
   async releaseRunLease(runId: string, leaseToken: string): Promise<boolean> {
@@ -438,6 +481,12 @@ export class RunControlStore {
     return this.client.sendCommand(args);
   }
 
+  private async blockingCommand(args: string[], isolationKey: string): Promise<unknown> {
+    return this.client.sendBlockingCommand
+      ? this.client.sendBlockingCommand(args, isolationKey)
+      : this.client.sendCommand(args);
+  }
+
   private async hset(key: string, fields: Record<string, string | undefined>): Promise<void> {
     const args = ["HSET", key];
     for (const [field, value] of Object.entries(fields)) {
@@ -528,6 +577,8 @@ function runRecordToHash(record: Partial<RunRecord>): Record<string, string | un
     resultText: record.resultText,
     workerId: record.workerId,
     leaseToken: record.leaseToken,
+    leaseExpiresAt: record.leaseExpiresAt,
+    leaseGeneration: record.leaseGeneration === undefined ? undefined : String(record.leaseGeneration),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     startedAt: record.startedAt,
@@ -558,6 +609,8 @@ function runRecordFromHash(hash: Record<string, string>): RunRecord {
     resultText: hash.resultText || undefined,
     workerId: hash.workerId || undefined,
     leaseToken: hash.leaseToken || undefined,
+    leaseExpiresAt: hash.leaseExpiresAt || undefined,
+    leaseGeneration: hash.leaseGeneration ? Number(hash.leaseGeneration) : undefined,
     createdAt: hash.createdAt,
     updatedAt: hash.updatedAt,
     startedAt: hash.startedAt || undefined,

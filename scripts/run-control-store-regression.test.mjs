@@ -42,6 +42,13 @@ class FakeRedis {
       this.streams.push({ key: args[1], id, args });
       return id;
     }
+    if (command === "HSET") {
+      const hash = this.hashes.get(args[1]) ?? new Map();
+      for (let i = 2; i < args.length; i += 2) hash.set(args[i], args[i + 1]);
+      this.hashes.set(args[1], hash);
+      return 1;
+    }
+    if (command === "PEXPIRE") return 1;
     if (command === "XAUTOCLAIM") return ["0-0", []];
     throw new Error(`unexpected command: ${args.join(" ")}`);
   }
@@ -62,6 +69,7 @@ class FakeRedis {
       const startedAt = args[11];
       const updatedAt = args[12];
       const expectedCurrentStatus = args[13];
+      const leaseExpiresAt = args[14];
       if (this.strings.get(activeKey) !== runId) return 0;
       const hash = this.hashes.get(runKey) ?? new Map();
       const currentStatus = hash.get("status");
@@ -74,7 +82,42 @@ class FakeRedis {
       hash.set("leaseToken", leaseToken);
       hash.set("startedAt", startedAt);
       hash.set("updatedAt", updatedAt);
+      hash.set("leaseExpiresAt", leaseExpiresAt);
+      hash.set("leaseGeneration", String(Number(hash.get("leaseGeneration") ?? "0") + 1));
       this.hashes.set(runKey, hash);
+      return 1;
+    }
+    if (script.includes("redis.call('PEXPIRE', KEYS[2], ARGV[3])")) {
+      const activeKey = args[3];
+      const leaseKey = args[4];
+      const runKey = args[5];
+      const runId = args[6];
+      const leaseToken = args[7];
+      const updatedAt = args[9];
+      const workerId = args[10];
+      const leaseExpiresAt = args[11];
+      const hash = this.hashes.get(runKey) ?? new Map();
+      const status = hash.get("status");
+      if (this.strings.get(activeKey) !== runId) return 0;
+      if (this.strings.get(leaseKey) !== leaseToken) return 0;
+      if (status !== "queued" && status !== "running" && status !== "finalizing") return 0;
+      hash.set("updatedAt", updatedAt);
+      hash.set("workerId", workerId);
+      hash.set("leaseExpiresAt", leaseExpiresAt);
+      this.hashes.set(runKey, hash);
+      return 1;
+    }
+    if (script.includes("redis.call('GET', KEYS[2]) ~= ARGV[2]")) {
+      const activeKey = args[3];
+      const leaseKey = args[4];
+      const runKey = args[5];
+      const runId = args[6];
+      const leaseToken = args[7];
+      const hash = this.hashes.get(runKey) ?? new Map();
+      const status = hash.get("status");
+      if (this.strings.get(activeKey) !== runId) return 0;
+      if (this.strings.get(leaseKey) !== leaseToken) return 0;
+      if (status !== "queued" && status !== "running" && status !== "finalizing") return 0;
       return 1;
     }
     if (script.includes("return {'enqueued'")) {
@@ -199,6 +242,42 @@ test("claimRunLease atomically verifies the active pointer before taking the lea
   assert.equal(fake.strings.get("pi-discord-threads:leases:run:run-claim"), "token-live");
   assert.equal(fake.hashes.get("pi-discord-threads:runs:run-claim").get("status"), "running");
   assert.equal(fake.hashes.get("pi-discord-threads:runs:run-claim").get("workerId"), "worker-1");
+  assert.equal(fake.hashes.get("pi-discord-threads:runs:run-claim").get("leaseGeneration"), "1");
+  assert.match(fake.hashes.get("pi-discord-threads:runs:run-claim").get("leaseExpiresAt"), /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test("heartbeatRunLease requires active pointer, lease token, and non-terminal status", async () => {
+  const { store, fake } = createStore();
+  const run = createRun("run-heartbeat");
+  await store.tryEnqueueRun(run);
+  assert.equal(await store.claimRunLease(run, "worker-1", "token-1"), true);
+
+  assert.equal(await store.heartbeatRunLease("run-heartbeat", "thread-1", "token-1", "worker-1"), true);
+  assert.match(fake.hashes.get("pi-discord-threads:runs:run-heartbeat").get("leaseExpiresAt"), /^\d{4}-\d{2}-\d{2}T/);
+
+  fake.strings.set("pi-discord-threads:thread:thread-1:active", "run-newer");
+  assert.equal(await store.heartbeatRunLease("run-heartbeat", "thread-1", "token-1", "worker-1"), false);
+
+  fake.strings.set("pi-discord-threads:thread:thread-1:active", "run-heartbeat");
+  fake.hashes.get("pi-discord-threads:runs:run-heartbeat").set("status", "succeeded");
+  assert.equal(await store.heartbeatRunLease("run-heartbeat", "thread-1", "token-1", "worker-1"), false);
+});
+
+test("verifyRunOwnership requires active pointer, lease token, and non-terminal status", async () => {
+  const { store, fake } = createStore();
+  const run = createRun("run-owned");
+  await store.tryEnqueueRun(run);
+  assert.equal(await store.claimRunLease(run, "worker-1", "token-1"), true);
+
+  assert.equal(await store.verifyRunOwnership("run-owned", "thread-1", "token-1"), true);
+  assert.equal(await store.verifyRunOwnership("run-owned", "thread-1", "wrong-token"), false);
+
+  fake.strings.set("pi-discord-threads:thread:thread-1:active", "run-newer");
+  assert.equal(await store.verifyRunOwnership("run-owned", "thread-1", "token-1"), false);
+
+  fake.strings.set("pi-discord-threads:thread:thread-1:active", "run-owned");
+  fake.hashes.get("pi-discord-threads:runs:run-owned").set("status", "succeeded");
+  assert.equal(await store.verifyRunOwnership("run-owned", "thread-1", "token-1"), false);
 });
 
 test("tryEnqueueRun clears stale terminal active pointer and retries", async () => {

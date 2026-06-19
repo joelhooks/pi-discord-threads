@@ -39,6 +39,8 @@ export interface RunRecord {
   resultText?: string;
   workerId?: string;
   leaseToken?: string;
+  leaseExpiresAt?: string;
+  leaseGeneration?: number;
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
@@ -104,7 +106,8 @@ export interface RunControlStorePort {
   getQueueableActiveRunId(logicalThreadId: string): Promise<string | undefined>;
   clearActiveIfMatches(logicalThreadId: string, runId: string): Promise<boolean>;
   claimRunLease(run: RunRecord, workerId: string, leaseToken: string): Promise<boolean>;
-  heartbeatRunLease(runId: string, leaseToken: string, workerId: string): Promise<boolean>;
+  heartbeatRunLease(runId: string, logicalThreadId: string, leaseToken: string, workerId: string): Promise<boolean>;
+  verifyRunOwnership(runId: string, logicalThreadId: string, leaseToken: string): Promise<boolean>;
   releaseRunLease(runId: string, leaseToken: string): Promise<boolean>;
   acquireFinalize(runId: string, leaseToken: string): Promise<FinalizeClaim>;
   completeFinalize(runId: string, leaseToken: string): Promise<boolean>;

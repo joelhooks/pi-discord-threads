@@ -5,12 +5,19 @@ import { formatUnknownError } from "../error-format.js";
 
 export interface RedisCommandClient {
   sendCommand(command: string[]): Promise<unknown>;
+  sendBlockingCommand?(command: string[], isolationKey: string): Promise<unknown>;
   close(): Promise<unknown>;
   destroy?(): Promise<unknown> | unknown;
   on?(event: "error", listener: (error: Error) => void): unknown;
 }
 
 type RedisNodeClient = ReturnType<typeof createClient>;
+
+interface ManagedRedisConnection {
+  label: string;
+  activeClient?: RedisNodeClient;
+  connectPromise?: Promise<RedisNodeClient>;
+}
 
 export class RedisCommandTimeoutError extends Error {
   constructor(commandName: string, timeoutMs: number) {
@@ -35,19 +42,19 @@ export async function createRunControlRedisClient(config: AppConfig): Promise<Re
 
   const timeoutMs = config.runControl.commandTimeoutMs;
   const errorListeners: Array<(error: Error) => void> = [];
-  let activeClient: RedisNodeClient | undefined;
-  let connectPromise: Promise<RedisNodeClient> | undefined;
+  const commandConnection: ManagedRedisConnection = { label: "command" };
+  const blockingConnections = new Map<string, ManagedRedisConnection>();
   let closed = false;
 
-  const attachListeners = (client: RedisNodeClient) => {
+  const attachListeners = (client: RedisNodeClient, label: string) => {
     client.on("error", (error) => {
-      console.warn(`Redis run-control client error: ${formatUnknownError(error)}`);
+      console.warn(`Redis run-control ${label} client error: ${formatUnknownError(error)}`);
       for (const listener of errorListeners) listener(error);
     });
   };
 
-  const discardClient = (client: RedisNodeClient) => {
-    if (activeClient === client) activeClient = undefined;
+  const discardClient = (connection: ManagedRedisConnection, client: RedisNodeClient) => {
+    if (connection.activeClient === client) connection.activeClient = undefined;
     try {
       client.destroy();
     } catch {
@@ -55,80 +62,106 @@ export async function createRunControlRedisClient(config: AppConfig): Promise<Re
     }
   };
 
-  const openClient = async (): Promise<RedisNodeClient> => {
+  const openConnection = async (connection: ManagedRedisConnection): Promise<RedisNodeClient> => {
     if (closed) throw new Error("Redis run-control client is closed");
-    if (activeClient) return activeClient;
-    if (!connectPromise) {
+    if (connection.activeClient) return connection.activeClient;
+    if (!connection.connectPromise) {
       const nextClient = createClient({
         url,
         socket: {
           connectTimeout: timeoutMs,
         },
       });
-      attachListeners(nextClient);
-      connectPromise = withRedisTimeout(
+      attachListeners(nextClient, connection.label);
+      connection.connectPromise = withRedisTimeout(
         nextClient.connect().then(() => nextClient),
         "CONNECT",
         timeoutMs,
-        () => discardClient(nextClient),
+        () => discardClient(connection, nextClient),
       ).then((connected) => {
         if (closed) {
-          discardClient(connected);
+          discardClient(connection, connected);
           throw new Error("Redis run-control client is closed");
         }
-        activeClient = connected;
+        connection.activeClient = connected;
         return connected;
       }).catch((error) => {
-        discardClient(nextClient);
+        discardClient(connection, nextClient);
         throw error;
       }).finally(() => {
-        connectPromise = undefined;
+        connection.connectPromise = undefined;
       });
     }
-    return connectPromise;
+    return connection.connectPromise;
   };
 
-  await openClient();
+  const sendOnConnection = async (connection: ManagedRedisConnection, command: string[]): Promise<unknown> => {
+    const commandName = command[0]?.toUpperCase() || "UNKNOWN";
+    const client = await openConnection(connection);
+    try {
+      return await withRedisTimeout(
+        client.sendCommand(command),
+        commandName,
+        timeoutMs,
+        () => discardClient(connection, client),
+      );
+    } catch (error) {
+      if (error instanceof RedisCommandTimeoutError || isRedisClientClosedError(error)) {
+        discardClient(connection, client);
+      }
+      throw error;
+    }
+  };
+
+  const closeConnection = async (connection: ManagedRedisConnection): Promise<unknown> => {
+    const client = connection.activeClient;
+    connection.activeClient = undefined;
+    const pendingConnect = connection.connectPromise;
+    connection.connectPromise = undefined;
+    if (client) {
+      return withRedisTimeout(client.close(), "CLOSE", timeoutMs, () => discardClient(connection, client));
+    }
+    const connected = await pendingConnect?.catch(() => undefined);
+    if (connected) {
+      return withRedisTimeout(connected.close(), "CLOSE", timeoutMs, () => discardClient(connection, connected));
+    }
+    return undefined;
+  };
+
+  await openConnection(commandConnection);
 
   return {
-    async sendCommand(command: string[]) {
-      const commandName = command[0]?.toUpperCase() || "UNKNOWN";
-      const client = await openClient();
-      try {
-        return await withRedisTimeout(
-          client.sendCommand(command),
-          commandName,
-          timeoutMs,
-          () => discardClient(client),
-        );
-      } catch (error) {
-        if (error instanceof RedisCommandTimeoutError || isRedisClientClosedError(error)) {
-          discardClient(client);
-        }
-        throw error;
+    sendCommand(command: string[]) {
+      return sendOnConnection(commandConnection, command);
+    },
+    sendBlockingCommand(command: string[], isolationKey: string) {
+      const safeIsolationKey = isolationKey.trim() || "default";
+      let connection = blockingConnections.get(safeIsolationKey);
+      if (!connection) {
+        connection = { label: `blocking:${safeIsolationKey}` };
+        blockingConnections.set(safeIsolationKey, connection);
       }
+      return sendOnConnection(connection, command);
     },
     async close() {
       closed = true;
-      const client = activeClient;
-      activeClient = undefined;
-      const pendingConnect = connectPromise;
-      connectPromise = undefined;
-      if (client) {
-        return withRedisTimeout(client.close(), "CLOSE", timeoutMs, () => discardClient(client));
-      }
-      const connected = await pendingConnect?.catch(() => undefined);
-      if (connected) {
-        return withRedisTimeout(connected.close(), "CLOSE", timeoutMs, () => discardClient(connected));
-      }
+      const connections = [commandConnection, ...blockingConnections.values()];
+      blockingConnections.clear();
+      const results = await Promise.allSettled(connections.map((connection) => closeConnection(connection)));
+      const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (rejected) throw rejected.reason;
       return undefined;
     },
     destroy() {
       closed = true;
-      const client = activeClient;
-      activeClient = undefined;
-      connectPromise = undefined;
-      if (client) discardClient(client);
+      const connections = [commandConnection, ...blockingConnections.values()];
+      blockingConnections.clear();
+      for (const connection of connections) {
+        const client = connection.activeClient;
+        connection.activeClient = undefined;
+        connection.connectPromise = undefined;
+        if (client) discardClient(connection, client);
+      }
     },
     on(event: "error", listener: (error: Error) => void) {
       if (event === "error") errorListeners.push(listener);
@@ -185,7 +218,7 @@ function isRedisClientClosedError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const name = error.name || error.constructor.name;
   const message = error.message.toLowerCase();
-  return name.includes("Closed") || message.includes("closed") || message.includes("socket closed");
+  return name.includes("Closed") || message.includes("closed") || message.includes("socket closed") || message.includes("disconnects client");
 }
 
 export function getRunControlWorkerId(config: AppConfig): string {

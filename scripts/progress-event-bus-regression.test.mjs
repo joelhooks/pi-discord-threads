@@ -78,6 +78,7 @@ test("RunControlWorker wires progress bus to run-event appenders and adapter sub
     },
     patchRun: async () => run,
     heartbeatRunLease: async () => true,
+    verifyRunOwnership: async () => true,
     acquireFinalize: async () => "acquired",
     completeFinalize: async () => true,
     markTerminal: async (_runId, status, patch) => ({ ...run, status, ...patch }),

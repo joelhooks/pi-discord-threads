@@ -219,7 +219,8 @@ export type RunQueueStoreLike = {
   readonly getQueueableActiveRunId: (logicalThreadId: string) => Promise<string | undefined>;
   readonly clearActiveIfMatches: (logicalThreadId: string, runId: string) => Promise<boolean>;
   readonly claimRunLease: (run: RunRecord, workerId: string, leaseToken: string) => Promise<boolean>;
-  readonly heartbeatRunLease: (runId: string, leaseToken: string, workerId: string) => Promise<boolean>;
+  readonly heartbeatRunLease: (runId: string, logicalThreadId: string, leaseToken: string, workerId: string) => Promise<boolean>;
+  readonly verifyRunOwnership: (runId: string, logicalThreadId: string, leaseToken: string) => Promise<boolean>;
   readonly releaseRunLease: (runId: string, leaseToken: string) => Promise<boolean>;
   readonly acquireFinalize: (runId: string, leaseToken: string) => Promise<FinalizeClaim>;
   readonly completeFinalize: (runId: string, leaseToken: string) => Promise<boolean>;
@@ -286,8 +287,11 @@ export function makeRunQueueService(store: RunQueueStoreLike, timeoutMs: number)
     claimRunLease: Effect.fn("RunQueueService.claimRunLease")((run, workerId, leaseToken) =>
       call("claimRunLease", () => store.claimRunLease(run, workerId, leaseToken)),
     ),
-    heartbeatRunLease: Effect.fn("RunQueueService.heartbeatRunLease")((runId, leaseToken, workerId) =>
-      call("heartbeatRunLease", () => store.heartbeatRunLease(runId, leaseToken, workerId)),
+    heartbeatRunLease: Effect.fn("RunQueueService.heartbeatRunLease")((runId, logicalThreadId, leaseToken, workerId) =>
+      call("heartbeatRunLease", () => store.heartbeatRunLease(runId, logicalThreadId, leaseToken, workerId)),
+    ),
+    verifyRunOwnership: Effect.fn("RunQueueService.verifyRunOwnership")((runId, logicalThreadId, leaseToken) =>
+      call("verifyRunOwnership", () => store.verifyRunOwnership(runId, logicalThreadId, leaseToken)),
     ),
     releaseRunLease: Effect.fn("RunQueueService.releaseRunLease")((runId, leaseToken) =>
       call("releaseRunLease", () => store.releaseRunLease(runId, leaseToken)),

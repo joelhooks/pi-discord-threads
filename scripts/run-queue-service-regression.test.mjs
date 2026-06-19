@@ -46,6 +46,7 @@ const createStore = (overrides = {}) => ({
   clearActiveIfMatches: async () => false,
   claimRunLease: async () => true,
   heartbeatRunLease: async () => true,
+  verifyRunOwnership: async () => true,
   releaseRunLease: async () => true,
   acquireFinalize: async () => "acquired",
   completeFinalize: async () => true,

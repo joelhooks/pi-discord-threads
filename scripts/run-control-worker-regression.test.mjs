@@ -58,6 +58,7 @@ function createStore(overrides = {}) {
     appendRunEvent: async () => "event-1",
     claimRunLease: async () => true,
     heartbeatRunLease: async () => true,
+    verifyRunOwnership: async () => true,
     releaseRunLease: async () => true,
     readInputsSince: async () => [],
     patchRun: async () => run,
@@ -192,6 +193,179 @@ test("busy finalization leaves the stream job pending without logging an outside
   assert.equal(releaseCount, 1);
   assert.equal(ackCount, 0);
   assert.deepEqual(errors, []);
+});
+
+test("RunControlLeasedRunMachine treats lost heartbeat ownership as retry-later without finalizing", async () => {
+  let finalizeCount = 0;
+  const warnings = [];
+  const config = createConfig();
+  config.runControl.heartbeatMs = 10;
+  const store = createStore({
+    heartbeatRunLease: async () => false,
+  });
+  const adapter = {
+    ...createAdapter(),
+    executeRun: async () => new Promise((resolve) => setTimeout(() => resolve({ text: "late", sessionFile: undefined }), 200)),
+    finalizeRun: async () => { finalizeCount++; },
+  };
+  const actor = createActor(runControlLeasedRunMachine, {
+    input: {
+      store,
+      adapter,
+      config,
+      run,
+      leaseToken: "lease-1",
+      workerId: "worker-1",
+      createFinalizeToken: () => "finalize-1",
+      warn: (message) => warnings.push(message),
+    },
+  });
+
+  actor.start();
+  const done = await waitFor(actor, (snapshot) => snapshot.status === "done", { timeout: 1_000 });
+  actor.stop();
+
+  assert.equal(done.context.outcome.kind, "retry-later");
+  assert.match(done.context.outcome.message, /lease lost/);
+  assert.equal(finalizeCount, 0);
+  assert.equal(warnings.some((message) => message.includes("lease lost")), true);
+});
+
+test("RunControlLeasedRunMachine checks ownership before Discord final post", async () => {
+  let verifyCount = 0;
+  let finalizeCount = 0;
+  const store = createStore({
+    verifyRunOwnership: async () => {
+      verifyCount++;
+      return verifyCount < 5;
+    },
+  });
+  const adapter = {
+    ...createAdapter(),
+    executeRun: async () => ({ text: "done", sessionFile: "session.jsonl" }),
+    finalizeRun: async () => { finalizeCount++; },
+  };
+  const actor = createActor(runControlLeasedRunMachine, {
+    input: {
+      store,
+      adapter,
+      config: createConfig(),
+      run,
+      leaseToken: "lease-1",
+      workerId: "worker-1",
+      createFinalizeToken: () => "finalize-1",
+      warn: () => undefined,
+    },
+  });
+
+  actor.start();
+  const done = await waitFor(actor, (snapshot) => snapshot.status === "done", { timeout: 1_000 });
+  actor.stop();
+
+  assert.equal(done.context.outcome.kind, "retry-later");
+  assert.equal(finalizeCount, 0);
+  assert.equal(verifyCount, 5);
+});
+
+test("RunControlLeasedRunMachine treats ownership check errors as retry-later", async () => {
+  let finalizeCount = 0;
+  let failCount = 0;
+  const store = createStore({
+    verifyRunOwnership: async () => {
+      throw new Error("redis temporarily unavailable");
+    },
+  });
+  const adapter = {
+    ...createAdapter(),
+    finalizeRun: async () => { finalizeCount++; },
+    failRun: async () => { failCount++; },
+  };
+  const actor = createActor(runControlLeasedRunMachine, {
+    input: {
+      store,
+      adapter,
+      config: createConfig(),
+      run,
+      leaseToken: "lease-1",
+      workerId: "worker-1",
+      createFinalizeToken: () => "finalize-1",
+      warn: () => undefined,
+    },
+  });
+
+  actor.start();
+  const done = await waitFor(actor, (snapshot) => snapshot.status === "done", { timeout: 1_000 });
+  actor.stop();
+
+  assert.equal(done.context.outcome.kind, "retry-later");
+  assert.match(done.context.outcome.message, /ownership check failed/);
+  assert.equal(finalizeCount, 0);
+  assert.equal(failCount, 0);
+});
+
+test("RunControlLeasedRunMachine does not mark terminal when finalize completion claim is lost", async () => {
+  let finalizeCount = 0;
+  let markTerminalCount = 0;
+  const store = createStore({
+    completeFinalize: async () => false,
+    markTerminal: async (_runId, status) => {
+      markTerminalCount++;
+      return { ...run, status };
+    },
+  });
+  const adapter = {
+    ...createAdapter(),
+    executeRun: async () => ({ text: "done", sessionFile: "session.jsonl" }),
+    finalizeRun: async () => { finalizeCount++; },
+  };
+  const actor = createActor(runControlLeasedRunMachine, {
+    input: {
+      store,
+      adapter,
+      config: createConfig(),
+      run,
+      leaseToken: "lease-1",
+      workerId: "worker-1",
+      createFinalizeToken: () => "finalize-1",
+      warn: () => undefined,
+    },
+  });
+
+  actor.start();
+  const done = await waitFor(actor, (snapshot) => snapshot.status === "done", { timeout: 1_000 });
+  actor.stop();
+
+  assert.equal(done.context.outcome.kind, "retry-later");
+  assert.match(done.context.outcome.message, /finalize claim lost/);
+  assert.equal(finalizeCount, 1);
+  assert.equal(markTerminalCount, 0);
+});
+
+test("RunControlWorkerJobMachine leaves completed job pending when ACK ownership is gone", async () => {
+  let ackCount = 0;
+  const store = createStore({
+    releaseRunLease: async () => false,
+    acknowledgeJob: async () => { ackCount++; },
+    getRun: async () => ({ ...run, status: "running" }),
+  });
+  const actor = createActor(runControlWorkerJobMachine, {
+    input: {
+      store,
+      job: { streamId: "1-0", runId: run.runId },
+      workerId: "worker-1",
+      createLeaseToken: () => "lease-1",
+      executeWithLease: async () => undefined,
+      shouldLeavePending: (error) => error?.name === "RetryRunLaterError",
+    },
+  });
+
+  actor.start();
+  const done = await waitFor(actor, (snapshot) => snapshot.status === "done", { timeout: 1_000 });
+  actor.stop();
+
+  assert.equal(done.context.outcome.kind, "pending");
+  assert.equal(done.context.outcome.reason, "retry-later");
+  assert.equal(ackCount, 0);
 });
 
 test("RunControlLeasedRunMachine exposes execution and finalization as machine state", async () => {

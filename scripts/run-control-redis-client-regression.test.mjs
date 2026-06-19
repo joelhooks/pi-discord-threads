@@ -17,7 +17,7 @@ test("formatUnknownError surfaces Effect tagged errors with nested causes", () =
   );
 });
 
-test("Redis command timeout reconnects for the next command", async (t) => {
+test("Redis blocking command timeout does not poison the command client", async (t) => {
   const config = defaultConfig();
   config.runControl.enabled = true;
   config.runControl.redisUrl = process.env.REDIS_URL?.trim() || "redis://127.0.0.1:6379";
@@ -33,8 +33,9 @@ test("Redis command timeout reconnects for the next command", async (t) => {
   }
 
   const blockingKey = `${config.runControl.keyPrefix}:test:${process.pid}:empty-stream`;
+  assert.equal(typeof client.sendBlockingCommand, "function");
   await assert.rejects(
-    () => client.sendCommand(["XREAD", "BLOCK", "1000", "STREAMS", blockingKey, "$"]),
+    () => client.sendBlockingCommand(["XREAD", "BLOCK", "1000", "STREAMS", blockingKey, "$"], "test-lane"),
     /Redis command XREAD timed out after 200ms/,
   );
 

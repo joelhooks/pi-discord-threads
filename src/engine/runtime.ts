@@ -182,8 +182,10 @@ export function createRunQueueRuntimeClient(config: AppConfig): RunQueueRuntimeC
     getQueueableActiveRunId: (logicalThreadId: string) => withQueue((queue) => queue.getQueueableActiveRunId(logicalThreadId)),
     clearActiveIfMatches: (logicalThreadId: string, runId: string) => withQueue((queue) => queue.clearActiveIfMatches(logicalThreadId, runId)),
     claimRunLease: (run: RunRecord, workerId: string, leaseToken: string) => withQueue((queue) => queue.claimRunLease(run, workerId, leaseToken)),
-    heartbeatRunLease: (runId: string, leaseToken: string, workerId: string) =>
-      withQueue((queue) => queue.heartbeatRunLease(runId, leaseToken, workerId)),
+    heartbeatRunLease: (runId: string, logicalThreadId: string, leaseToken: string, workerId: string) =>
+      withQueue((queue) => queue.heartbeatRunLease(runId, logicalThreadId, leaseToken, workerId)),
+    verifyRunOwnership: (runId: string, logicalThreadId: string, leaseToken: string) =>
+      withQueue((queue) => queue.verifyRunOwnership(runId, logicalThreadId, leaseToken)),
     releaseRunLease: (runId: string, leaseToken: string) => withQueue((queue) => queue.releaseRunLease(runId, leaseToken)),
     acquireFinalize: (runId: string, leaseToken: string) => withQueue((queue) => queue.acquireFinalize(runId, leaseToken)),
     completeFinalize: (runId: string, leaseToken: string) => withQueue((queue) => queue.completeFinalize(runId, leaseToken)),

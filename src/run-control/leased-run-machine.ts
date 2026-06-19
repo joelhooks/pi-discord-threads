@@ -3,7 +3,7 @@ import type { AppConfig } from "../config.js";
 import { formatUnknownError } from "../error-format.js";
 import { createProgressEventBus, type ProgressEventBusPort } from "../progress-events.js";
 import type { FinalizeClaim, QueuedRunInput, RunControlExecutionResult, RunControlStorePort, RunRecord } from "./types.js";
-import { RetryRunLaterError } from "./errors.js";
+import { isRetryRunLaterError, RetryRunLaterError } from "./errors.js";
 
 type PendingRunInput = QueuedRunInput & {
   attempts: number;
@@ -46,7 +46,7 @@ export interface RunControlLeasedRunMachineContext extends RunControlLeasedRunMa
   outcome?: RunControlLeasedRunOutcome;
 }
 
-export type RunControlLeasedRunMachineEvent = { type: "INPUT_TICK" };
+export type RunControlLeasedRunMachineEvent = { type: "INPUT_TICK" } | { type: "LEASE_LOST" };
 
 type DoneEvent<T> = { output: T };
 type ErrorEvent = { error: unknown };
@@ -98,7 +98,19 @@ function finalizedAt(context: RunControlLeasedRunMachineContext): string {
   return context.finalizedAt ?? new Date().toISOString();
 }
 
+function leaseLostError(context: RunControlLeasedRunMachineContext): RetryRunLaterError {
+  return new RetryRunLaterError(`run-control lease lost for ${context.run.runId}; leaving job pending for ownership recovery`);
+}
+
+async function ensureOwnership(context: RunControlLeasedRunMachineContext): Promise<void> {
+  const owned = await context.store.verifyRunOwnership(context.run.runId, context.run.logicalThreadId, context.leaseToken).catch((error) => {
+    throw new RetryRunLaterError(`run-control ownership check failed for ${context.run.runId}: ${formatUnknownError(error)}`);
+  });
+  if (!owned) throw leaseLostError(context);
+}
+
 async function drainInputs(context: RunControlLeasedRunMachineContext): Promise<InputDrainOutput> {
+  await ensureOwnership(context);
   let lastInputId = context.lastInputId;
   const pendingInputs = context.pendingInputs.map((input) => ({ ...input }));
   const inputs = await context.store.readInputsSince(context.run.logicalThreadId, lastInputId);
@@ -140,6 +152,7 @@ async function drainInputs(context: RunControlLeasedRunMachineContext): Promise<
 }
 
 async function acquireFinalize(context: RunControlLeasedRunMachineContext): Promise<FinalizeAcquireOutput> {
+  await ensureOwnership(context);
   const finalizeToken = context.createFinalizeToken();
   const claim = await context.store.acquireFinalize(context.run.runId, finalizeToken).catch(() => "busy" as const);
   return { claim, finalizeToken, finalizedAt: new Date().toISOString() };
@@ -156,9 +169,11 @@ export const runControlLeasedRunMachine = setup({
     events: RunControlLeasedRunMachineEvent;
   },
   actors: {
-    heartbeat: fromCallback<RunControlLeasedRunMachineEvent, RunControlLeasedRunMachineContext>(({ input }) => {
+    heartbeat: fromCallback<RunControlLeasedRunMachineEvent, RunControlLeasedRunMachineContext>(({ input, sendBack }) => {
       const heartbeat = setInterval(() => {
-        void input.store.heartbeatRunLease(input.run.runId, input.leaseToken, input.workerId).catch((error) => {
+        void input.store.heartbeatRunLease(input.run.runId, input.run.logicalThreadId, input.leaseToken, input.workerId).then((owned) => {
+          if (!owned) sendBack({ type: "LEASE_LOST" });
+        }).catch((error) => {
           input.warn(`run-control heartbeat failed for ${input.run.runId}: ${formatUnknownError(error)}`);
         });
       }, input.config.runControl.heartbeatMs);
@@ -188,6 +203,7 @@ export const runControlLeasedRunMachine = setup({
       return input.adapter.executeRun(input.run, progressEvents);
     }),
     patchRunFinalizing: fromPromise<void, RunControlLeasedRunMachineContext>(async ({ input }) => {
+      await ensureOwnership(input);
       const result = requireResult(input);
       await input.store.patchRun(input.run.runId, {
         status: "finalizing",
@@ -204,25 +220,30 @@ export const runControlLeasedRunMachine = setup({
       return acquireFinalize(input);
     }),
     recordFinalizeAttempt: fromPromise<void, RunControlLeasedRunMachineContext>(async ({ input }) => {
+      await ensureOwnership(input);
       await input.store.patchRun(input.run.runId, { finalizeAttemptedAt: finalizedAt(input) }, { preserveTerminal: true });
     }),
     postSuccessDiscord: fromPromise<void, RunControlLeasedRunMachineContext>(async ({ input }) => {
+      await ensureOwnership(input);
       await input.adapter.finalizeRun(input.run, requireResult(input));
     }),
     editUncertainFailurePlaceholder: fromPromise<void, RunControlLeasedRunMachineContext>(async ({ input }) => {
+      await ensureOwnership(input);
       const error = duplicateFinalizationError();
       await input.adapter.failRun(input.run, error).catch((failError) => {
         input.warn(`run-control failed to edit uncertain-finalization placeholder for ${input.run.runId}: ${formatUnknownError(failError)}`);
       });
     }),
     editFailurePlaceholder: fromPromise<void, RunControlLeasedRunMachineContext>(async ({ input }) => {
+      await ensureOwnership(input);
       const error = normalizeError(input.lastError);
       await input.adapter.failRun(input.run, error).catch((failError) => {
         input.warn(`run-control failed to edit error placeholder for ${input.run.runId}: ${formatUnknownError(failError)}`);
       });
     }),
     completeFinalize: fromPromise<void, RunControlLeasedRunMachineContext>(async ({ input }) => {
-      await input.store.completeFinalize(input.run.runId, requireFinalizeToken(input));
+      const completed = await input.store.completeFinalize(input.run.runId, requireFinalizeToken(input));
+      if (!completed) throw new RetryRunLaterError(`finalize claim lost for ${input.run.runId}; leaving job pending for uncertain-finalization recovery`);
     }),
     markSuccessTerminal: fromPromise<void, RunControlLeasedRunMachineContext>(async ({ input }) => {
       const result = requireResult(input);
@@ -287,10 +308,21 @@ export const runControlLeasedRunMachine = setup({
     failedFromError: assign({
       outcome: ({ event }) => ({ kind: "failed", error: normalizeError(errorFrom(event)) } as const),
     }),
+    retryLaterFromError: assign({
+      outcome: ({ event }) => ({ kind: "retry-later", message: normalizeError(errorFrom(event)).message } as const),
+    }),
+    lostOwnership: assign({
+      outcome: ({ context }) => {
+        const error = leaseLostError(context);
+        context.warn(error.message);
+        return { kind: "retry-later", message: error.message } as const;
+      },
+    }),
   },
   guards: {
     hasPersistedFinalizingResult: ({ context }) => context.run.status === "finalizing" && context.run.resultText !== undefined,
     hasFinalizeAttemptReceipt: ({ context }) => Boolean(context.run.finalizeAttemptedAt),
+    isRetryLaterError: ({ event }) => isRetryRunLaterError(errorFrom(event)),
     finalizeBusy: ({ context }) => context.finalizeClaim === "busy",
     finalizeAcquired: ({ context }) => context.finalizeClaim === "acquired",
     finalizeDone: ({ context }) => context.finalizeClaim === "done",
@@ -330,14 +362,24 @@ export const runControlLeasedRunMachine = setup({
               target: "freshExecution",
               actions: "rememberInputDrain",
             },
-            onError: {
-              target: "acquiringFailureFinalize",
-              actions: "rememberError",
-            },
+            onError: [
+              {
+                guard: "isRetryLaterError",
+                target: "#runControlLeasedRun.done",
+                actions: "retryLaterFromError",
+              },
+              {
+                target: "acquiringFailureFinalize",
+                actions: "rememberError",
+              },
+            ],
           },
         },
         freshExecution: {
           type: "parallel",
+          on: {
+            LEASE_LOST: { target: "#runControlLeasedRun.done", actions: "lostOwnership" },
+          },
           invoke: {
             id: "inputTicker",
             src: "inputTicker",
@@ -360,10 +402,17 @@ export const runControlLeasedRunMachine = setup({
                       target: "waiting",
                       actions: "rememberInputDrain",
                     },
-                    onError: {
-                      target: "waiting",
-                      actions: "warnInputDrainFailure",
-                    },
+                    onError: [
+                      {
+                        guard: "isRetryLaterError",
+                        target: "#runControlLeasedRun.done",
+                        actions: "retryLaterFromError",
+                      },
+                      {
+                        target: "waiting",
+                        actions: "warnInputDrainFailure",
+                      },
+                    ],
                   },
                 },
               },
@@ -379,10 +428,17 @@ export const runControlLeasedRunMachine = setup({
                       target: "#runControlLeasedRun.leased.patchingRunFinalizing",
                       actions: "rememberResult",
                     },
-                    onError: {
-                      target: "#runControlLeasedRun.leased.acquiringFailureFinalize",
-                      actions: "rememberError",
-                    },
+                    onError: [
+                      {
+                        guard: "isRetryLaterError",
+                        target: "#runControlLeasedRun.done",
+                        actions: "retryLaterFromError",
+                      },
+                      {
+                        target: "#runControlLeasedRun.leased.acquiringFailureFinalize",
+                        actions: "rememberError",
+                      },
+                    ],
                   },
                 },
               },
@@ -394,10 +450,17 @@ export const runControlLeasedRunMachine = setup({
             src: "patchRunFinalizing",
             input: ({ context }) => context,
             onDone: "acquiringSuccessFinalize",
-            onError: {
-              target: "acquiringFailureFinalize",
-              actions: "rememberError",
-            },
+            onError: [
+              {
+                guard: "isRetryLaterError",
+                target: "#runControlLeasedRun.done",
+                actions: "retryLaterFromError",
+              },
+              {
+                target: "acquiringFailureFinalize",
+                actions: "rememberError",
+              },
+            ],
           },
         },
         acquiringSuccessFinalize: {
@@ -408,10 +471,17 @@ export const runControlLeasedRunMachine = setup({
               target: "routingSuccessFinalizeClaim",
               actions: "rememberFinalizeAcquire",
             },
-            onError: {
-              target: "#runControlLeasedRun.done",
-              actions: "failedFromError",
-            },
+            onError: [
+              {
+                guard: "isRetryLaterError",
+                target: "#runControlLeasedRun.done",
+                actions: "retryLaterFromError",
+              },
+              {
+                target: "#runControlLeasedRun.done",
+                actions: "failedFromError",
+              },
+            ],
           },
         },
         routingSuccessFinalizeClaim: {
@@ -428,10 +498,17 @@ export const runControlLeasedRunMachine = setup({
             src: "recordFinalizeAttempt",
             input: ({ context }) => context,
             onDone: "postingSuccessDiscord",
-            onError: {
-              target: "acquiringFailureFinalize",
-              actions: "rememberError",
-            },
+            onError: [
+              {
+                guard: "isRetryLaterError",
+                target: "#runControlLeasedRun.done",
+                actions: "retryLaterFromError",
+              },
+              {
+                target: "acquiringFailureFinalize",
+                actions: "rememberError",
+              },
+            ],
           },
         },
         postingSuccessDiscord: {
@@ -439,10 +516,17 @@ export const runControlLeasedRunMachine = setup({
             src: "postSuccessDiscord",
             input: ({ context }) => context,
             onDone: "completingSuccessFinalize",
-            onError: {
-              target: "acquiringFailureFinalize",
-              actions: "rememberError",
-            },
+            onError: [
+              {
+                guard: "isRetryLaterError",
+                target: "#runControlLeasedRun.done",
+                actions: "retryLaterFromError",
+              },
+              {
+                target: "acquiringFailureFinalize",
+                actions: "rememberError",
+              },
+            ],
           },
         },
         completingSuccessFinalize: {
@@ -450,10 +534,17 @@ export const runControlLeasedRunMachine = setup({
             src: "completeFinalize",
             input: ({ context }) => context,
             onDone: "markingSuccessTerminal",
-            onError: {
-              target: "acquiringFailureFinalize",
-              actions: "rememberError",
-            },
+            onError: [
+              {
+                guard: "isRetryLaterError",
+                target: "#runControlLeasedRun.done",
+                actions: "retryLaterFromError",
+              },
+              {
+                target: "acquiringFailureFinalize",
+                actions: "rememberError",
+              },
+            ],
           },
         },
         editingUncertainFailurePlaceholder: {
@@ -461,10 +552,17 @@ export const runControlLeasedRunMachine = setup({
             src: "editUncertainFailurePlaceholder",
             input: ({ context }) => context,
             onDone: "markingUncertainFailureTerminal",
-            onError: {
-              target: "#runControlLeasedRun.done",
-              actions: "failedFromError",
-            },
+            onError: [
+              {
+                guard: "isRetryLaterError",
+                target: "#runControlLeasedRun.done",
+                actions: "retryLaterFromError",
+              },
+              {
+                target: "#runControlLeasedRun.done",
+                actions: "failedFromError",
+              },
+            ],
           },
         },
         markingUncertainFailureTerminal: {
@@ -483,10 +581,17 @@ export const runControlLeasedRunMachine = setup({
             src: "completeFinalize",
             input: ({ context }) => context,
             onDone: "clearingActivePointer",
-            onError: {
-              target: "#runControlLeasedRun.done",
-              actions: "failedFromError",
-            },
+            onError: [
+              {
+                guard: "isRetryLaterError",
+                target: "#runControlLeasedRun.done",
+                actions: "retryLaterFromError",
+              },
+              {
+                target: "#runControlLeasedRun.done",
+                actions: "failedFromError",
+              },
+            ],
           },
         },
         acquiringFailureFinalize: {
@@ -497,10 +602,17 @@ export const runControlLeasedRunMachine = setup({
               target: "routingFailureFinalizeClaim",
               actions: "rememberFinalizeAcquire",
             },
-            onError: {
-              target: "#runControlLeasedRun.done",
-              actions: "failedFromError",
-            },
+            onError: [
+              {
+                guard: "isRetryLaterError",
+                target: "#runControlLeasedRun.done",
+                actions: "retryLaterFromError",
+              },
+              {
+                target: "#runControlLeasedRun.done",
+                actions: "failedFromError",
+              },
+            ],
           },
         },
         routingFailureFinalizeClaim: {
@@ -516,10 +628,17 @@ export const runControlLeasedRunMachine = setup({
             src: "editFailurePlaceholder",
             input: ({ context }) => context,
             onDone: "completingFailureFinalize",
-            onError: {
-              target: "#runControlLeasedRun.done",
-              actions: "failedFromError",
-            },
+            onError: [
+              {
+                guard: "isRetryLaterError",
+                target: "#runControlLeasedRun.done",
+                actions: "retryLaterFromError",
+              },
+              {
+                target: "#runControlLeasedRun.done",
+                actions: "failedFromError",
+              },
+            ],
           },
         },
         completingFailureFinalize: {
@@ -527,10 +646,17 @@ export const runControlLeasedRunMachine = setup({
             src: "completeFinalize",
             input: ({ context }) => context,
             onDone: "markingFailureTerminal",
-            onError: {
-              target: "#runControlLeasedRun.done",
-              actions: "failedFromError",
-            },
+            onError: [
+              {
+                guard: "isRetryLaterError",
+                target: "#runControlLeasedRun.done",
+                actions: "retryLaterFromError",
+              },
+              {
+                target: "#runControlLeasedRun.done",
+                actions: "failedFromError",
+              },
+            ],
           },
         },
         markingSuccessTerminal: {

@@ -1,5 +1,6 @@
 import { createActor, waitFor, assign, fromPromise, setup } from "xstate";
 import { formatUnknownError } from "../error-format.js";
+import { RetryRunLaterError } from "./errors.js";
 import type { RunControlStorePort, RunJob, RunRecord } from "./types.js";
 import { isTerminalRunStatus } from "./types.js";
 
@@ -104,7 +105,14 @@ export const runControlWorkerJobMachine = setup({
       await input.executeWithLease(requireRun(input), requireLeaseToken(input), input.workerId);
     }),
     releaseLeaseAndAck: fromPromise<void, RunControlWorkerJobMachineContext>(async ({ input }) => {
-      await releaseLease(input);
+      const run = requireRun(input);
+      const released = await input.store.releaseRunLease(run.runId, requireLeaseToken(input)).catch(() => false);
+      if (!released) {
+        const latest = await input.store.getRun(run.runId).catch(() => undefined);
+        if (!isTerminalRunStatus(latest?.status)) {
+          throw new RetryRunLaterError(`run-control lease lost before ACK for ${run.runId}; leaving job pending`);
+        }
+      }
       await input.store.acknowledgeJob(input.job);
     }),
     releaseLeasePending: fromPromise<void, RunControlWorkerJobMachineContext>(async ({ input }) => {
@@ -309,10 +317,17 @@ export const runControlWorkerJobMachine = setup({
           target: "done",
           actions: "ackedCompletedRun",
         },
-        onError: {
-          target: "done",
-          actions: "failedFromError",
-        },
+        onError: [
+          {
+            guard: "shouldLeavePending",
+            target: "done",
+            actions: "pendingRetryLater",
+          },
+          {
+            target: "done",
+            actions: "failedFromError",
+          },
+        ],
       },
     },
     releasingLeaseAndLeavingPending: {

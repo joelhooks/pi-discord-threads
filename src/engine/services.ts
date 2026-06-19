@@ -97,9 +97,11 @@ export interface RunQueueServiceShape {
   readonly claimRunLease: (run: RunRecord, workerId: string, leaseToken: string) => Effect.Effect<boolean, RunQueueError>;
   readonly heartbeatRunLease: (
     runId: string,
+    logicalThreadId: string,
     leaseToken: string,
     workerId: string,
   ) => Effect.Effect<boolean, RunQueueError>;
+  readonly verifyRunOwnership: (runId: string, logicalThreadId: string, leaseToken: string) => Effect.Effect<boolean, RunQueueError>;
   readonly releaseRunLease: (runId: string, leaseToken: string) => Effect.Effect<boolean, RunQueueError>;
   readonly acquireFinalize: (runId: string, leaseToken: string) => Effect.Effect<FinalizeClaim, RunQueueError>;
   readonly completeFinalize: (runId: string, leaseToken: string) => Effect.Effect<boolean, RunQueueError>;
