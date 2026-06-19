@@ -2273,45 +2273,9 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
       await options.runtimeManager.abort(run.threadId);
     },
     async finalizeRun(run, result) {
-      const record = options.registry.getThread(run.threadId);
-      if (!record) throw new RetryRunLaterError(`No registry record for run-control thread ${run.threadId}`);
-      const channel = await resolvePromptChannel(client, record).catch((error) => {
-        throw new RetryRunLaterError(`final answer outbox could not resolve Discord channel for ${run.runId}: ${formatUnknownError(error)}`);
-      });
-      const chunks = chunkForDiscord(result.text, options.config.render.maxDiscordChars);
       const hudSnapshot = hudSnapshots.get(run.runId);
       hudSnapshots.delete(run.runId);
-      const store = options.runControlStore;
-      if (!store) throw new Error("runControl worker finalization requires a Redis store");
-      await deliverFinalAnswerOutbox({
-        channel,
-        record,
-        registry: options.registry,
-        store,
-        run,
-        chunks,
-        assistantEntryId: result.assistantEntryId,
-      }).catch((error) => {
-        throw new RetryRunLaterError(`final answer outbox failed for ${run.runId}: ${formatUnknownError(error)}`);
-      });
-      const placeholder = await fetchPlaceholderMessage(channel, run.placeholderDiscordMessageId).catch((error) => {
-        console.warn(`run-control final answer posted but HUD archive fetch failed for ${run.runId}: ${formatUnknownError(error)}`);
-        return undefined;
-      });
-      if (placeholder) await archiveWorkingHud(placeholder, record, hudSnapshot);
-      const idleRecord = await options.registry.patchThread(record.threadId, {
-        status: "idle",
-        activeRun: undefined,
-        sessionFile: result.sessionFile ?? record.sessionFile,
-      }).catch((error) => {
-        throw new RetryRunLaterError(`final answer outbox posted for ${run.runId}, but registry idle patch failed: ${formatUnknownError(error)}`);
-      });
-      void recordCompletedTitleTurn(options.registry, idleRecord, run.prompt, result.text)
-        .then((titleRecord) => maybeEvaluateThreadTitle(getThreadChannel(channel), titleRecord, { config: options.config, registry: options.registry }))
-        .catch((error) => {
-          const text = error instanceof Error ? error.message : String(error);
-          console.warn(`thread title hook failed for ${record.threadId}: ${text}`);
-        });
+      await finalizeRunControlSuccess({ client, options, run, result, hudSnapshot });
     },
     async failRun(run, error) {
       const record = options.registry.getThread(run.threadId);
@@ -2330,6 +2294,53 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
       return applied;
     },
   };
+}
+
+async function finalizeRunControlSuccess(input: {
+  client: Client;
+  options: RunBotOptions;
+  run: RunRecord;
+  result: RunControlExecutionResult;
+  hudSnapshot: ProgressHudSnapshot | undefined;
+}): Promise<void> {
+  const { client, options, run, result, hudSnapshot } = input;
+  const record = options.registry.getThread(run.threadId);
+  if (!record) throw new RetryRunLaterError(`No registry record for run-control thread ${run.threadId}`);
+  const channel = await resolvePromptChannel(client, record).catch((error) => {
+    throw new RetryRunLaterError(`final answer outbox could not resolve Discord channel for ${run.runId}: ${formatUnknownError(error)}`);
+  });
+  const chunks = chunkForDiscord(result.text, options.config.render.maxDiscordChars);
+  const store = options.runControlStore;
+  if (!store) throw new Error("runControl worker finalization requires a Redis store");
+  await deliverFinalAnswerOutbox({
+    channel,
+    record,
+    registry: options.registry,
+    store,
+    run,
+    chunks,
+    assistantEntryId: result.assistantEntryId,
+  }).catch((error) => {
+    throw new RetryRunLaterError(`final answer outbox failed for ${run.runId}: ${formatUnknownError(error)}`);
+  });
+  const placeholder = await fetchPlaceholderMessage(channel, run.placeholderDiscordMessageId).catch((error) => {
+    console.warn(`run-control final answer posted but HUD archive fetch failed for ${run.runId}: ${formatUnknownError(error)}`);
+    return undefined;
+  });
+  if (placeholder) await archiveWorkingHud(placeholder, record, hudSnapshot);
+  const idleRecord = await options.registry.patchThread(record.threadId, {
+    status: "idle",
+    activeRun: undefined,
+    sessionFile: result.sessionFile ?? record.sessionFile,
+  }).catch((error) => {
+    throw new RetryRunLaterError(`final answer outbox posted for ${run.runId}, but registry idle patch failed: ${formatUnknownError(error)}`);
+  });
+  void recordCompletedTitleTurn(options.registry, idleRecord, run.prompt, result.text)
+    .then((titleRecord) => maybeEvaluateThreadTitle(getThreadChannel(channel), titleRecord, { config: options.config, registry: options.registry }))
+    .catch((error) => {
+      const text = error instanceof Error ? error.message : String(error);
+      console.warn(`thread title hook failed for ${record.threadId}: ${text}`);
+    });
 }
 
 async function resolvePromptChannel(client: Client, record: ThreadRecord): Promise<PromptChannel> {
