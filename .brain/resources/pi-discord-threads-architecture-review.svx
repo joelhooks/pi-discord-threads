@@ -13,9 +13,9 @@ tags:
 
 # Pi Discord Threads Architecture Review
 
-Architecture review after Redis run-control hardening through `8c56e02`.
+Original architecture review after Redis run-control hardening through `8c56e02`; current status update through `042d96a`.
 
-Published review page: https://pi-discord-architecture-review.wzrrd.sh/ — expiring 2026-06-26, noindex.
+Published review page: https://pi-discord-architecture-review.wzrrd.sh/ — expiring 2026-06-26, noindex. Republished on 2026-06-19 with current status.
 
 ## Context
 
@@ -31,17 +31,26 @@ Current Brain decisions still hold:
 
 - `.brain/areas/architecture.svx` — existing XState/Effect direction and Discord seam notes.
 - `.brain/projects/redis-run-control-plane.svx` — run-control invariants, live incidents, dead-letter/outbox/doctor hardening.
-- `.brain/resources/pi-discord-runtime-architecture-options-2026-06-17.svx` — Effect migration order and warnings against whole-bridge rewrites.
 - `src/run-control/lua-scripts.ts` — named Redis Lua scripts.
 - `src/run-control/store.ts` — Redis store callsites and inspection methods.
 - `src/run-control/leased-run-machine.ts` — finalization and lease-loss lifecycle policy.
 - `src/run-control/doctor.ts` / `src/run-control/reconcile.ts` — inspection and reconciliation views.
 - `src/discord-bot.ts` — remaining Discord gateway/router/orchestration mega-module.
 - `src/engine/layers.ts` / `src/engine/runtime.ts` / `src/pi-runtime.ts` — current Effect service/runtime seam and Pi runtime ownership.
+- `.brain/projects/release-snapshot-deploy-rollback.svx` — deploy/rollback PRD and snapshot/list acceptance criteria.
+- `src/release-snapshots.ts` / `scripts/release-snapshot-regression.test.mjs` — current release snapshot/list implementation and safety regressions.
 
-## Recommended candidates
+## Current status — 2026-06-19
 
-### 1. Deepen `PiSessionService` resource ownership
+- **Shipped:** Candidates 1 and 2 landed in `2e94f34`.
+- **Shipped:** Release snapshot/list storage foundation landed in `042d96a` as an operator/deploy slice, not a new architecture rewrite.
+- **Next architecture slice:** typed Lua command builders. This is now the sharpest run-control locality move because the Lua scripts are named, but `store.ts` still builds positional `EVAL` arrays by hand.
+- **Next deploy slice:** LaunchAgent handoff through `releases/current`, then `release deploy` / `release rollback` with preflight/postflight and automatic rollback. Keep it framed as **zero lost work + fast rollback**, not true zero downtime.
+- **Still deferred:** registry storage migration, whole Discord-to-Effect rewrite, giant `Engine` class, generalized release platform.
+
+## Architecture candidates and current status
+
+### 1. Deepen `PiSessionService` resource ownership — shipped in `2e94f34`
 
 **Files/modules:** `src/engine/layers.ts`, `src/engine/runtime.ts`, `src/pi-runtime.ts`, `src/app-lifecycle-machine.ts`, `scripts/pi-session-service-regression.test.mjs`, `scripts/pi-runtime-regression.test.mjs`.
 
@@ -55,7 +64,7 @@ Current Brain decisions still hold:
 
 **First reversible step:** Add a scoped `PiRuntimeManagerLive(config, registry)` layer and switch only `createPiSessionRuntimeClient(config, registry)` to use it.
 
-### 2. Extract a Discord run surface module
+### 2. Extract a Discord run surface module — shipped in `2e94f34`
 
 **Files/modules:** `src/discord-bot.ts`, `src/discord/final-answer-outbox.ts`, `src/discord/payloads.ts`, `src/discord/message-renderer.ts`, `src/discord/progress-hud-machine.ts`.
 
@@ -111,11 +120,11 @@ Current Brain decisions still hold:
 
 **First reversible step:** Use the snapshot in doctor only, then reconcile dry-run after tests settle.
 
-## Recommendation
+## Updated recommendation
 
-If we continue architecture work, start with **PiSessionService resource ownership**. It is the deepest module improvement: small public interface change, high lifecycle leverage, and directly aligned with the Effect migration notes.
+Candidate 1 and candidate 2 are done. The next architecture move should be **typed Lua command builders** for the run-control scripts, starting with `recordRetryLaterScript`. That is the smallest slice that reduces positional `KEYS`/`ARGV` drift without touching live Discord behavior.
 
-If we stay purely run-control-focused, start with **typed Lua command builders** because it shrinks future positional-drift bugs without touching live Discord behavior.
+If the next workstream is deploy/ops instead of architecture, continue the release PRD with the LaunchAgent `releases/current` handoff and `release deploy` / `release rollback` postflight proof. Do not call it zero downtime; the singleton Discord Gateway still has a reconnect gap.
 
 ## Implementation receipt — 2026-06-19
 
@@ -132,7 +141,7 @@ Top two candidates were implemented as one focused slice after fresh-context rev
 Pi Fable findings resolved:
 
 - `fromManager` close-before-warmup initially skipped injected manager disposal because `ManagedRuntime` is lazy. Fixed with a pre-acquisition disposal path and regression tests.
-- `src/discord/run-surface.ts` was initially untracked. The final commit must include it with the source changes.
+- `src/discord/run-surface.ts` was initially untracked during review, then included in the final `2e94f34` source commit.
 
 Verification evidence:
 
@@ -147,6 +156,27 @@ Verification evidence:
 - `npm run test:progress-hud` — 2/2
 
 Remaining risk: no live Discord smoke or daemon deploy was performed in this slice. The running daemon remains on the previous `dist` until a deliberate deploy/restart.
+
+## Release snapshot/list receipt — 2026-06-19
+
+The first deploy/rollback PRD slice shipped in `042d96a`:
+
+- `release snapshot --config <path> [--allow-dirty]` creates a local release bundle under `config.dataDir/releases`.
+- `release list --config <path>` prints newest-first safe ledger metadata.
+- Snapshot copies built `dist/`, `package.json`, `package-lock.json`, and the exact private config file.
+- Manifest/list/ledger include `distSha256` so ignored `dist/` changes are identifiable beyond Git commit metadata.
+- Private content permissions are tightened: releases root and release dir `0700`, copied config `0600`.
+- Dirty worktrees are refused by default; `--allow-dirty` is explicit.
+- `release deploy` and `release rollback` still reject as not implemented. No LaunchAgent mutation and no `releases/current` symlink are in this slice.
+
+Verification evidence:
+
+- `npm run typecheck`
+- `npm run test:release-snapshot` — 9/9
+- `npm run brain:check`
+- Pi Fable findings gate passed with 5 resolved findings.
+
+Remaining risk: snapshots intentionally do not include `node_modules`; deploy/rollback/current symlink and live postflight recovery remain the next slice.
 
 ## Deferred on purpose
 
