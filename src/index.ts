@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { type AppConfig, expandPath, loadConfig, parseCliArgs, writeDefaultConfig } from "./config.js";
+import { type AppConfig, type CliOptions, expandPath, loadConfig, parseCliArgs, writeDefaultConfig } from "./config.js";
 import { runAppLifecycle } from "./app-runtime.js";
 import { postDailyMessage } from "./daily-post.js";
 import { SecretResolver } from "./secrets.js";
@@ -10,6 +10,7 @@ import { buildRunControlDoctorReport, formatRunControlDoctorReport, loadRunContr
 import { checkRunControlRedisHealth, getRunControlWorkerId } from "./run-control/redis-client.js";
 import { formatReconcileReport, reconcileRunControl } from "./run-control/reconcile.js";
 import { installLaunchAgent, printLaunchAgentStatus, uninstallLaunchAgent } from "./launch-agent.js";
+import { createReleaseSnapshot, formatReleaseSnapshotList, formatReleaseSnapshotResult, listReleaseSnapshots } from "./release-snapshots.js";
 
 installProcessGuards();
 
@@ -59,6 +60,10 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (cli.command === "release" && (cli.releaseCommand === "deploy" || cli.releaseCommand === "rollback")) {
+    throw new Error(`release ${cli.releaseCommand} is not implemented yet. First slice only supports release snapshot and release list.`);
+  }
+
   const config = await loadConfig(cli.configPath);
 
   if (cli.command === "doctor") {
@@ -95,6 +100,11 @@ async function main(): Promise<void> {
 
   if (cli.command === "launch-agent-status") {
     await printLaunchAgentStatus(config);
+    return;
+  }
+
+  if (cli.command === "release") {
+    await releaseCommand(cli, config);
     return;
   }
 
@@ -171,6 +181,25 @@ async function dailyPostCommand(
   console.log(JSON.stringify(result, null, 2));
 }
 
+async function releaseCommand(cli: CliOptions, config: AppConfig): Promise<void> {
+  if (cli.releaseCommand === "snapshot") {
+    const result = await createReleaseSnapshot({
+      config,
+      configPath: expandPath(cli.configPath),
+      allowDirty: cli.releaseAllowDirty,
+    });
+    console.log(formatReleaseSnapshotResult(result));
+    return;
+  }
+
+  if (cli.releaseCommand === "list") {
+    console.log(formatReleaseSnapshotList(await listReleaseSnapshots({ config }), config));
+    return;
+  }
+
+  throw new Error(`release ${cli.releaseCommand ?? "(missing)"} is not implemented yet. First slice only supports release snapshot and release list.`);
+}
+
 function printHelp(): void {
   console.log(`pi-discord-threads
 
@@ -187,6 +216,9 @@ Commands:
                               Inspect/apply Redis run-control reconciliation
   daily-post [--config path] --request path
                               Post a daily Brain Dump receipt and register the date thread as a resumable Pi session
+  release snapshot [--config path] [--allow-dirty]
+                              Snapshot built dist/package/config under config.dataDir/releases
+  release list [--config path] List release snapshots without printing secrets
   init-config [--config path]  Write a default JSON config
   doctor [--config path]       Print non-secret runtime diagnostics
 

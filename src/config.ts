@@ -101,8 +101,10 @@ export interface AppConfig {
   runControl: RunControlConfig;
 }
 
+export type ReleaseCommand = "snapshot" | "list" | "deploy" | "rollback";
+
 export interface CliOptions {
-  command: "start" | "init-config" | "doctor" | "status" | "reconcile" | "daily-post" | "install-launch-agent" | "uninstall-launch-agent" | "launch-agent-status" | "help";
+  command: "start" | "init-config" | "doctor" | "status" | "reconcile" | "daily-post" | "install-launch-agent" | "uninstall-launch-agent" | "launch-agent-status" | "release" | "help";
   configPath: string;
   dailyPostRequestPath?: string;
   roles?: RunControlRole[];
@@ -110,6 +112,9 @@ export interface CliOptions {
   launchAgentStart: boolean;
   launchAgentRestart: boolean;
   force: boolean;
+  releaseCommand?: ReleaseCommand;
+  releaseTarget?: string;
+  releaseAllowDirty: boolean;
 }
 
 export function expandPath(path: string): string {
@@ -439,6 +444,8 @@ export function parseCliArgs(argv: string[]): CliOptions {
     : "start";
   const args = command === maybeCommand ? rest : argv;
 
+  if (command === "release") return parseReleaseCliArgs(args);
+
   let configPath = defaultConfigPath;
   let reconcileApply = false;
   let launchAgentStart = false;
@@ -471,7 +478,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
       continue;
     }
     if (arg === "--help" || arg === "-h") {
-      return { command: "help", configPath, reconcileApply, launchAgentStart, launchAgentRestart, force };
+      return baseCliOptions("help", { configPath, reconcileApply, launchAgentStart, launchAgentRestart, force });
     }
     if (arg === "--dry-run") {
       reconcileApply = false;
@@ -522,8 +529,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     throw new Error(`Unknown command: ${command}`);
   }
 
-  return {
-    command: command as CliOptions["command"],
+  return baseCliOptions(command as CliOptions["command"], {
     configPath,
     ...(dailyPostRequestPath ? { dailyPostRequestPath } : {}),
     ...(roles ? { roles } : {}),
@@ -531,5 +537,85 @@ export function parseCliArgs(argv: string[]): CliOptions {
     launchAgentStart,
     launchAgentRestart,
     force,
+  });
+}
+
+function parseReleaseCliArgs(args: string[]): CliOptions {
+  let configPath = defaultConfigPath;
+  let releaseCommand: ReleaseCommand | undefined;
+  let releaseTarget: string | undefined;
+  let releaseAllowDirty = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--config" || arg === "-c") {
+      const next = args[i + 1];
+      if (!next) throw new Error("--config requires a path");
+      configPath = next;
+      i++;
+      continue;
+    }
+    if (arg.startsWith("--config=")) {
+      configPath = arg.slice("--config=".length);
+      continue;
+    }
+    if (arg === "--allow-dirty") {
+      releaseAllowDirty = true;
+      continue;
+    }
+    if (arg === "--help" || arg === "-h") {
+      return baseCliOptions("help", { configPath });
+    }
+    if (arg.startsWith("-")) {
+      throw new Error(`Unknown release option: ${arg}`);
+    }
+    if (!releaseCommand) {
+      releaseCommand = parseReleaseCommand(arg);
+      continue;
+    }
+    if (releaseCommand === "rollback" && !releaseTarget) {
+      releaseTarget = arg;
+      continue;
+    }
+    throw new Error(`Unexpected release argument: ${arg}`);
+  }
+
+  if (!releaseCommand) {
+    throw new Error("release requires a subcommand: snapshot, list, deploy, or rollback");
+  }
+  if (releaseAllowDirty && releaseCommand !== "snapshot") {
+    throw new Error("--allow-dirty is only valid for release snapshot");
+  }
+  if (releaseCommand === "rollback" && !releaseTarget) {
+    throw new Error("release rollback requires a release id or commit");
+  }
+
+  return baseCliOptions("release", {
+    configPath,
+    releaseCommand,
+    ...(releaseTarget ? { releaseTarget } : {}),
+    releaseAllowDirty,
+  });
+}
+
+function parseReleaseCommand(value: string): ReleaseCommand {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "snapshot" || normalized === "list" || normalized === "deploy" || normalized === "rollback") return normalized;
+  throw new Error(`Unknown release subcommand: ${value}`);
+}
+
+function baseCliOptions(command: CliOptions["command"], options: Partial<Omit<CliOptions, "command">>): CliOptions {
+  return {
+    command,
+    configPath: options.configPath ?? defaultConfigPath,
+    ...(options.dailyPostRequestPath ? { dailyPostRequestPath: options.dailyPostRequestPath } : {}),
+    ...(options.roles ? { roles: options.roles } : {}),
+    reconcileApply: options.reconcileApply ?? false,
+    launchAgentStart: options.launchAgentStart ?? false,
+    launchAgentRestart: options.launchAgentRestart ?? false,
+    force: options.force ?? false,
+    ...(options.releaseCommand ? { releaseCommand: options.releaseCommand } : {}),
+    ...(options.releaseTarget ? { releaseTarget: options.releaseTarget } : {}),
+    releaseAllowDirty: options.releaseAllowDirty ?? false,
   };
 }
