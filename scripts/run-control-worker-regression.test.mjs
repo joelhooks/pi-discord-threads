@@ -3,6 +3,7 @@ import test from "node:test";
 import { createActor, waitFor } from "xstate";
 import { defaultConfig } from "../dist/config.js";
 import { RunControlWorker } from "../dist/run-control/worker.js";
+import { RetryRunLaterError } from "../dist/run-control/errors.js";
 import { runControlLeasedRunMachine } from "../dist/run-control/leased-run-machine.js";
 import { runControlWorkerLaneMachine } from "../dist/run-control/worker-lane-machine.js";
 import { runControlWorkerJobMachine } from "../dist/run-control/worker-machine.js";
@@ -137,6 +138,206 @@ test("uncertain finalization retry fails safe instead of posting duplicate final
   assert.equal(terminalStatus, "failed");
   assert.deepEqual(calls, ["markTerminal", "completeFinalize"]);
   assert.equal(ackCount, 1);
+});
+
+test("finalization retry with outbox-start marker but no ids retries final posting", async () => {
+  const finalizingRun = {
+    ...run,
+    status: "finalizing",
+    resultText: "final answer",
+    finalizeAttemptedAt: new Date().toISOString(),
+    finalDiscordOutboxStartedAt: new Date().toISOString(),
+  };
+  let finalizeCount = 0;
+  let failCount = 0;
+  let terminalStatus;
+  let resolveTerminal;
+  const terminalSeen = new Promise((resolve) => { resolveTerminal = resolve; });
+  const store = createStore({
+    getRun: async () => finalizingRun,
+    markTerminal: async (_runId, status) => {
+      terminalStatus = status;
+      resolveTerminal();
+      return { ...finalizingRun, status };
+    },
+  });
+  const adapter = {
+    ...createAdapter(),
+    finalizeRun: async () => { finalizeCount++; },
+    failRun: async () => { failCount++; },
+  };
+  const worker = new RunControlWorker(store, adapter, createConfig(), "worker-1");
+
+  worker.start();
+  await terminalSeen;
+  await worker.stop();
+
+  assert.equal(finalizeCount, 1);
+  assert.equal(failCount, 0);
+  assert.equal(terminalStatus, "succeeded");
+});
+
+test("old outbox-start marker without ids fails closed instead of blind nonce send", async () => {
+  const finalizingRun = {
+    ...run,
+    status: "finalizing",
+    resultText: "final answer",
+    finalizeAttemptedAt: new Date(1).toISOString(),
+    finalDiscordOutboxStartedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+  };
+  let finalizeCount = 0;
+  let failCount = 0;
+  let terminalStatus;
+  let resolveTerminal;
+  const terminalSeen = new Promise((resolve) => { resolveTerminal = resolve; });
+  const store = createStore({
+    getRun: async () => finalizingRun,
+    markTerminal: async (_runId, status) => {
+      terminalStatus = status;
+      resolveTerminal();
+      return { ...finalizingRun, status };
+    },
+  });
+  const adapter = {
+    ...createAdapter(),
+    finalizeRun: async () => { finalizeCount++; },
+    failRun: async () => { failCount++; },
+  };
+  const worker = new RunControlWorker(store, adapter, createConfig(), "worker-1");
+
+  worker.start();
+  await terminalSeen;
+  await worker.stop();
+
+  assert.equal(finalizeCount, 0);
+  assert.equal(failCount, 1);
+  assert.equal(terminalStatus, "failed");
+});
+
+test("finalization retry with persisted outbox edits final messages instead of failing unsafe", async () => {
+  const finalizingRun = {
+    ...run,
+    status: "finalizing",
+    resultText: "final answer",
+    finalizeAttemptedAt: new Date(1).toISOString(),
+    finalDiscordMessageIds: ["final-message-1"],
+  };
+  let ackCount = 0;
+  let finalizeCount = 0;
+  let failCount = 0;
+  let terminalStatus;
+  let resolveTerminal;
+  const terminalSeen = new Promise((resolve) => { resolveTerminal = resolve; });
+  const store = createStore({
+    getRun: async () => finalizingRun,
+    acknowledgeJob: async () => { ackCount++; },
+    markTerminal: async (_runId, status) => {
+      terminalStatus = status;
+      resolveTerminal();
+      return { ...finalizingRun, status };
+    },
+  });
+  const adapter = {
+    ...createAdapter(),
+    finalizeRun: async (candidateRun) => {
+      finalizeCount++;
+      assert.deepEqual(candidateRun.finalDiscordMessageIds, ["final-message-1"]);
+    },
+    failRun: async () => { failCount++; },
+  };
+  const worker = new RunControlWorker(store, adapter, createConfig(), "worker-1");
+
+  worker.start();
+  await terminalSeen;
+  await worker.stop();
+
+  assert.equal(finalizeCount, 1);
+  assert.equal(failCount, 0);
+  assert.equal(terminalStatus, "succeeded");
+  assert.equal(ackCount, 1);
+});
+
+test("old partial outbox ids fail closed instead of blind-sending missing chunks", async () => {
+  const finalizingRun = {
+    ...run,
+    status: "finalizing",
+    resultText: "first chunk\n\nsecond chunk",
+    finalizeAttemptedAt: new Date(1).toISOString(),
+    finalDiscordOutboxStartedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+    finalDiscordMessageIds: ["final-message-1"],
+    finalDiscordChunkCount: 2,
+  };
+  let finalizeCount = 0;
+  let failCount = 0;
+  let terminalStatus;
+  let resolveTerminal;
+  const terminalSeen = new Promise((resolve) => { resolveTerminal = resolve; });
+  const store = createStore({
+    getRun: async () => finalizingRun,
+    markTerminal: async (_runId, status) => {
+      terminalStatus = status;
+      resolveTerminal();
+      return { ...finalizingRun, status };
+    },
+  });
+  const adapter = {
+    ...createAdapter(),
+    finalizeRun: async () => { finalizeCount++; },
+    failRun: async () => { failCount++; },
+  };
+  const worker = new RunControlWorker(store, adapter, createConfig(), "worker-1");
+
+  worker.start();
+  await terminalSeen;
+  await worker.stop();
+
+  assert.equal(finalizeCount, 0);
+  assert.equal(failCount, 1);
+  assert.equal(terminalStatus, "failed");
+});
+
+test("final outbox post followed by registry failure leaves job pending", async () => {
+  const finalizingRun = {
+    ...run,
+    status: "finalizing",
+    resultText: "final answer",
+    finalizeAttemptedAt: new Date().toISOString(),
+    finalDiscordOutboxStartedAt: new Date().toISOString(),
+    finalDiscordMessageIds: ["final-message-1"],
+  };
+  let ackCount = 0;
+  let markTerminalCount = 0;
+  let finalizeCount = 0;
+  let sawRelease;
+  const releaseSeen = new Promise((resolve) => { sawRelease = resolve; });
+  const store = createStore({
+    getRun: async () => finalizingRun,
+    acknowledgeJob: async () => { ackCount++; },
+    markTerminal: async (_runId, status) => {
+      markTerminalCount++;
+      return { ...finalizingRun, status };
+    },
+    releaseRunLease: async () => {
+      sawRelease();
+      return true;
+    },
+  });
+  const adapter = {
+    ...createAdapter(),
+    finalizeRun: async () => {
+      finalizeCount++;
+      throw new RetryRunLaterError("registry idle patch failed");
+    },
+  };
+  const worker = new RunControlWorker(store, adapter, createConfig(), "worker-1");
+
+  worker.start();
+  await releaseSeen;
+  await worker.stop();
+
+  assert.equal(finalizeCount, 1);
+  assert.equal(markTerminalCount, 0);
+  assert.equal(ackCount, 0);
 });
 
 test("stale job for non-active run is skipped and ACKed", async () => {
@@ -427,7 +628,6 @@ test("RunControlLeasedRunMachine exposes execution and finalization as machine s
     "executeRun",
     "patch:finalizing",
     "acquireFinalize",
-    "patch:finalizeAttemptedAt",
     "finalizeRun",
     "completeFinalize",
     "markTerminal:succeeded",

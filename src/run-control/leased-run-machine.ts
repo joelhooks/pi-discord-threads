@@ -11,6 +11,7 @@ type PendingRunInput = QueuedRunInput & {
 };
 
 const MAX_INPUT_APPLY_ATTEMPTS = 30;
+const FINAL_OUTBOX_BLIND_NONCE_WINDOW_MS = 2 * 60_000;
 
 export interface RunControlLeasedRunAdapter {
   executeRun(run: RunRecord, progressEvents: ProgressEventBusPort): Promise<RunControlExecutionResult>;
@@ -162,6 +163,30 @@ function duplicateFinalizationError(): Error {
   return new Error("Previous Discord finalization attempt is uncertain; refusing to post a duplicate final answer");
 }
 
+function finalOutboxStartedAtMs(run: RunRecord): number | undefined {
+  if (!run.finalDiscordOutboxStartedAt) return undefined;
+  const startedAt = Date.parse(run.finalDiscordOutboxStartedAt);
+  return Number.isFinite(startedAt) ? startedAt : undefined;
+}
+
+function hasCompleteFinalOutboxIds(run: RunRecord): boolean {
+  const ids = run.finalDiscordMessageIds ?? [];
+  if (ids.length === 0) return false;
+  return run.finalDiscordChunkCount === undefined || ids.length >= run.finalDiscordChunkCount;
+}
+
+function hasRecoverableFinalOutbox(run: RunRecord): boolean {
+  if (hasCompleteFinalOutboxIds(run)) return true;
+  const startedAt = finalOutboxStartedAtMs(run);
+  return startedAt !== undefined && Date.now() - startedAt <= FINAL_OUTBOX_BLIND_NONCE_WINDOW_MS;
+}
+
+function hasExpiredFinalOutboxWithoutCompleteIds(run: RunRecord): boolean {
+  if (hasCompleteFinalOutboxIds(run)) return false;
+  const startedAt = finalOutboxStartedAtMs(run);
+  return startedAt !== undefined && Date.now() - startedAt > FINAL_OUTBOX_BLIND_NONCE_WINDOW_MS;
+}
+
 export const runControlLeasedRunMachine = setup({
   types: {} as {
     input: RunControlLeasedRunMachineInput;
@@ -221,7 +246,6 @@ export const runControlLeasedRunMachine = setup({
     }),
     recordFinalizeAttempt: fromPromise<void, RunControlLeasedRunMachineContext>(async ({ input }) => {
       await ensureOwnership(input);
-      await input.store.patchRun(input.run.runId, { finalizeAttemptedAt: finalizedAt(input) }, { preserveTerminal: true });
     }),
     postSuccessDiscord: fromPromise<void, RunControlLeasedRunMachineContext>(async ({ input }) => {
       await ensureOwnership(input);
@@ -322,6 +346,8 @@ export const runControlLeasedRunMachine = setup({
   guards: {
     hasPersistedFinalizingResult: ({ context }) => context.run.status === "finalizing" && context.run.resultText !== undefined,
     hasFinalizeAttemptReceipt: ({ context }) => Boolean(context.run.finalizeAttemptedAt),
+    hasRecoverableFinalOutbox: ({ context }) => hasRecoverableFinalOutbox(context.run),
+    hasExpiredFinalOutboxWithoutCompleteIds: ({ context }) => hasExpiredFinalOutboxWithoutCompleteIds(context.run),
     isRetryLaterError: ({ event }) => isRetryRunLaterError(errorFrom(event)),
     finalizeBusy: ({ context }) => context.finalizeClaim === "busy",
     finalizeAcquired: ({ context }) => context.finalizeClaim === "acquired",
@@ -488,6 +514,8 @@ export const runControlLeasedRunMachine = setup({
           always: [
             { guard: "finalizeBusy", target: "#runControlLeasedRun.done", actions: "retryLater" },
             { guard: "finalizeDone", target: "markingSuccessTerminal" },
+            { guard: "hasRecoverableFinalOutbox", target: "postingSuccessDiscord" },
+            { guard: "hasExpiredFinalOutboxWithoutCompleteIds", target: "editingUncertainFailurePlaceholder" },
             { guard: "hasFinalizeAttemptReceipt", target: "editingUncertainFailurePlaceholder" },
             { guard: "finalizeAcquired", target: "recordingFinalizeAttempt" },
             { target: "#runControlLeasedRun.done", actions: "retryLater" },

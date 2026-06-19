@@ -584,6 +584,11 @@ function runRecordToHash(record: Partial<RunRecord>): Record<string, string | un
     startedAt: record.startedAt,
     finalizedAt: record.finalizedAt,
     finalizeAttemptedAt: record.finalizeAttemptedAt,
+    finalDiscordOutboxStartedAt: record.finalDiscordOutboxStartedAt,
+    finalDiscordMessageIdsJson: record.finalDiscordMessageIds ? JSON.stringify(record.finalDiscordMessageIds) : undefined,
+    finalDiscordChunkCount: record.finalDiscordChunkCount === undefined ? undefined : String(record.finalDiscordChunkCount),
+    finalDiscordReservedAt: record.finalDiscordReservedAt,
+    finalDiscordPostedAt: record.finalDiscordPostedAt,
     placeholderRetiredAt: record.placeholderRetiredAt,
     error: record.error,
   };
@@ -616,6 +621,11 @@ function runRecordFromHash(hash: Record<string, string>): RunRecord {
     startedAt: hash.startedAt || undefined,
     finalizedAt: hash.finalizedAt || undefined,
     finalizeAttemptedAt: hash.finalizeAttemptedAt || undefined,
+    finalDiscordOutboxStartedAt: hash.finalDiscordOutboxStartedAt || undefined,
+    finalDiscordMessageIds: parseJson(hash.finalDiscordMessageIdsJson, []),
+    finalDiscordChunkCount: hash.finalDiscordChunkCount ? Number(hash.finalDiscordChunkCount) : undefined,
+    finalDiscordReservedAt: hash.finalDiscordReservedAt || undefined,
+    finalDiscordPostedAt: hash.finalDiscordPostedAt || undefined,
     placeholderRetiredAt: hash.placeholderRetiredAt || undefined,
     error: hash.error || undefined,
   };

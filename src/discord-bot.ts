@@ -45,6 +45,7 @@ import { applicationCommands, askPiMessageCommandName } from "./discord-commands
 import { DISCORD_SYSTEM_PROMPT_URL } from "./discord-system-prompt.js";
 import { chunkForDiscord, stripBotMention, stripCommandPrefix, summarizeForThreadName } from "./render.js";
 import { startAsyncSubagentResultBridge } from "./discord/async-subagent-result-bridge.js";
+import { deliverFinalAnswerOutbox } from "./discord/final-answer-outbox.js";
 import { DiscordMessageRenderer } from "./discord/message-renderer.js";
 import { createProgressHudController, type ProgressHudSnapshot } from "./discord/progress-hud-machine.js";
 import {
@@ -63,6 +64,7 @@ import type { QueuedRunInput, RunControlExecutionResult, RunControlStorePort, Ru
 import { RunControlWorker, type RunControlWorkerAdapter } from "./run-control/worker.js";
 import { createForkedSessionFile, forkWorkGraph, formatWorkGraphEmbedDescription, formatWorkGraphStatus, rootWorkGraph } from "./work-graph.js";
 import { isBridgeRecoveryPrompt, recoverableInterruptedPrompt } from "./recovery-prompt.js";
+import { RetryRunLaterError } from "./run-control/errors.js";
 import { startupRecoveryEnabled } from "./startup-recovery.js";
 import { extractFirstUrl, postPreparedLinkIngest, prepareLinkIngest, type LinkIngestSendResult, type PreparedLinkIngest } from "./link-ingest.js";
 import { buildLinkIngestCommandText, linkIngestAcceptedTitle, linkIngestUsage, parsePrefixLinkIngestCommand, type LinkIngestCommandMode } from "./link-ingest-command.js";
@@ -88,6 +90,9 @@ export interface BotRuntimeHandle {
 type PromptChannel = {
   send(options: MessageCreateOptions): Promise<Message>;
   sendTyping(): Promise<void>;
+  messages: {
+    fetch(messageId: string): Promise<Message>;
+  };
   isThread?: () => boolean;
 };
 
@@ -311,7 +316,7 @@ async function autoResumeInterruptedThreads(client: Client, options: RunBotOptio
       const persistedFinal = getPersistedFinalAssistant(record);
       if (persistedFinal) {
         const chunks = chunkForDiscord(persistedFinal.text, options.config.render.maxDiscordChars);
-        await sendFinalResponseMessages(thread, record, options.registry, chunks, persistedFinal.entryId);
+        await sendRecoveredFinalResponse(thread, record, options, chunks, persistedFinal.entryId);
         await archiveWorkingHud(placeholder, record);
         await options.registry.patchThread(record.threadId, { status: "idle", activeRun: undefined }).catch(() => undefined);
         reconciled++;
@@ -378,7 +383,7 @@ async function reconcileInterruptedThreadPlaceholders(client: Client, options: R
       const persistedFinal = getPersistedFinalAssistant(record);
       if (persistedFinal) {
         const chunks = chunkForDiscord(persistedFinal.text, options.config.render.maxDiscordChars);
-        await sendFinalResponseMessages(thread, record, options.registry, chunks, persistedFinal.entryId);
+        await sendRecoveredFinalResponse(thread, record, options, chunks, persistedFinal.entryId);
         await archiveWorkingHud(placeholder, record);
         await options.registry.patchThread(record.threadId, { status: "idle", activeRun: undefined }).catch(() => undefined);
         reconciled++;
@@ -403,6 +408,33 @@ async function reconcileInterruptedThreadPlaceholders(client: Client, options: R
   if (reconciled > 0) {
     console.log(`reconciled ${reconciled} interrupted Pi thread placeholder(s) without auto-resume`);
   }
+}
+
+async function sendRecoveredFinalResponse(
+  channel: PromptChannel,
+  record: ThreadRecord,
+  options: RunBotOptions,
+  chunks: string[],
+  assistantEntryId: string | undefined,
+): Promise<void> {
+  const runId = record.activeRun?.runId;
+  const store = options.runControlStore;
+  if (runId && store) {
+    const run = await store.getRun(runId);
+    if (!run) throw new Error(`Cannot recover final response for ${runId}: Redis run record is missing`);
+    await deliverFinalAnswerOutbox({
+      channel,
+      record,
+      registry: options.registry,
+      store,
+      run,
+      chunks,
+      assistantEntryId,
+    });
+    return;
+  }
+
+  await sendFinalResponseMessages(channel, record, options.registry, chunks, assistantEntryId);
 }
 
 function getPersistedFinalAssistant(record: ThreadRecord): { entryId: string; text: string } | undefined {
@@ -2224,24 +2256,44 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
     },
     async finalizeRun(run, result) {
       const record = options.registry.getThread(run.threadId);
-      if (!record) throw new Error(`No registry record for run-control thread ${run.threadId}`);
-      const channel = await resolvePromptChannel(client, record);
+      if (!record) throw new RetryRunLaterError(`No registry record for run-control thread ${run.threadId}`);
+      const channel = await resolvePromptChannel(client, record).catch((error) => {
+        throw new RetryRunLaterError(`final answer outbox could not resolve Discord channel for ${run.runId}: ${formatUnknownError(error)}`);
+      });
       const chunks = chunkForDiscord(result.text, options.config.render.maxDiscordChars);
       const hudSnapshot = hudSnapshots.get(run.runId);
       hudSnapshots.delete(run.runId);
-      await sendFinalResponseMessages(channel, record, options.registry, chunks, result.assistantEntryId);
-      const placeholder = await fetchPlaceholderMessage(channel, run.placeholderDiscordMessageId);
-      await archiveWorkingHud(placeholder, record, hudSnapshot);
+      const store = options.runControlStore;
+      if (!store) throw new Error("runControl worker finalization requires a Redis store");
+      await deliverFinalAnswerOutbox({
+        channel,
+        record,
+        registry: options.registry,
+        store,
+        run,
+        chunks,
+        assistantEntryId: result.assistantEntryId,
+      }).catch((error) => {
+        throw new RetryRunLaterError(`final answer outbox failed for ${run.runId}: ${formatUnknownError(error)}`);
+      });
+      const placeholder = await fetchPlaceholderMessage(channel, run.placeholderDiscordMessageId).catch((error) => {
+        console.warn(`run-control final answer posted but HUD archive fetch failed for ${run.runId}: ${formatUnknownError(error)}`);
+        return undefined;
+      });
+      if (placeholder) await archiveWorkingHud(placeholder, record, hudSnapshot);
       const idleRecord = await options.registry.patchThread(record.threadId, {
         status: "idle",
         activeRun: undefined,
         sessionFile: result.sessionFile ?? record.sessionFile,
-      }).catch(() => record);
-      const titleRecord = await recordCompletedTitleTurn(options.registry, idleRecord, run.prompt, result.text);
-      void maybeEvaluateThreadTitle(getThreadChannel(channel), titleRecord, { config: options.config, registry: options.registry }).catch((error) => {
-        const text = error instanceof Error ? error.message : String(error);
-        console.warn(`thread title hook failed for ${record.threadId}: ${text}`);
+      }).catch((error) => {
+        throw new RetryRunLaterError(`final answer outbox posted for ${run.runId}, but registry idle patch failed: ${formatUnknownError(error)}`);
       });
+      void recordCompletedTitleTurn(options.registry, idleRecord, run.prompt, result.text)
+        .then((titleRecord) => maybeEvaluateThreadTitle(getThreadChannel(channel), titleRecord, { config: options.config, registry: options.registry }))
+        .catch((error) => {
+          const text = error instanceof Error ? error.message : String(error);
+          console.warn(`thread title hook failed for ${record.threadId}: ${text}`);
+        });
     },
     async failRun(run, error) {
       const record = options.registry.getThread(run.threadId);
@@ -2278,7 +2330,10 @@ async function resolvePromptChannel(client: Client, record: ThreadRecord): Promi
 
 function isPromptChannelLike(value: unknown): value is PromptChannel {
   const channel = value as Partial<PromptChannel> | undefined;
-  return Boolean(channel && typeof channel.send === "function" && typeof channel.sendTyping === "function");
+  return Boolean(channel
+    && typeof channel.send === "function"
+    && typeof channel.sendTyping === "function"
+    && typeof channel.messages?.fetch === "function");
 }
 
 async function fetchPromptChannelMessage(channel: PromptChannel, messageId: string): Promise<Message> {

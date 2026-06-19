@@ -46,6 +46,11 @@ export interface RunRecord {
   startedAt?: string;
   finalizedAt?: string;
   finalizeAttemptedAt?: string;
+  finalDiscordOutboxStartedAt?: string;
+  finalDiscordMessageIds?: string[];
+  finalDiscordChunkCount?: number;
+  finalDiscordReservedAt?: string;
+  finalDiscordPostedAt?: string;
   placeholderRetiredAt?: string;
   error?: string;
 }
