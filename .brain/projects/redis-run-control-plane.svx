@@ -126,6 +126,48 @@ Relevant `joelclaw.com/api/docs` source pointers found during planning:
 - Lease-loss execution abort — 2026-06-18: fresh run execution now receives the XState invoke `AbortSignal`, forwards it through the Discord run-control adapter into `PiRuntimeManager.enqueuePrompt()`, and explicitly calls `runtimeManager.abort(threadId)` before returning retry-later after heartbeat ownership loss. Pi runtime prompt retries preserve the signal, check it before every retry attempt, and run-control-managed prompt completion no longer clears registry `activeRun`; finalization owns the visible idle transition after ownership is verified. Regression coverage lives in `scripts/pi-runtime-regression.test.mjs` and `scripts/run-control-worker-regression.test.mjs`.
 - Dead-letter and doctor hardening — 2026-06-19: repeated `RetryRunLaterError` jobs now have a bounded retry counter (`runControl.maxRetryLaterAttempts`, default 12) and an atomic Redis `recordRetryLater` Lua transition. The script verifies active pointer + lease token + non-terminal status, increments retry metadata, releases the lease below threshold, and dead-letters by marking the run `interrupted`, clearing the active pointer, and deleting the lease before the worker ACKs the stream entry. `doctor` now reports active pointers, lease TTLs, pending jobs, workers, outbox/dead-letter state, reconcile dry-run issues, and a bounded daemon stderr tail through a read-only registry adapter. Redis Lua scripts live in `src/run-control/lua-scripts.ts` with script-level tests. Regression coverage lives in `scripts/run-control-worker-regression.test.mjs`, `scripts/run-control-store-regression.test.mjs`, `scripts/run-control-doctor-regression.test.mjs`, and `scripts/run-control-lua-scripts-regression.test.mjs`.
 
+## Deploy/Rollback Target — 2026-06-19
+
+Operator intent: deploy freely while Discord/Pi sessions are running, and keep a simple snapshot/rollback path back to a known commit if a deploy misbehaves.
+
+Canonical target terms:
+
+- **Running-session deploy** means the daemon can restart while Redis run-control has active work without losing the run, duplicating final Discord answers, or orphaning the thread. A brief Discord Gateway reconnect is acceptable if queued/running work recovers cleanly.
+- **Snapshot rollback** means a deploy records enough release metadata to flip back to a previous commit/build/config bundle and restart quickly. It is not a Redis state rollback unless a specific migration requires one. Config snapshots are included because live behavior depends on `~/.config/pi-discord-threads/config.json`; metadata must not expose secrets, but the private local snapshot should preserve the exact rollback file.
+- **Safe deploy gate** remains: build current commit, run doctor, verify Redis health and run-control invariants, then restart. When active work exists, restart must rely on Redis lease/outbox recovery rather than waiting for idle.
+- **Deploy-while-active behavior** should restart anyway after preflight, then prove recovery postflight. The command should show that active runs became reclaimed, pending, finalized, or otherwise explicitly safe — never silently orphaned.
+
+First implementation shape: project-local release commands under the `pi-discord-threads` CLI. This is a dev/operator feature for Joel's local rig, not a generalized deployment platform. Versioned release directories live under `config.dataDir`, keyed by git SHA/release id; `releases/current` is a symlink used by the LaunchAgent; `releases/<id>/manifest.json` contains commit/config/build metadata; `releases/ledger.jsonl` is the append-only history; and deploy/rollback commands flip the symlink then kickstart launchd.
+
+Initial command surface:
+
+```sh
+node dist/index.js release snapshot --config ~/.config/pi-discord-threads/config.json
+node dist/index.js release deploy --config ~/.config/pi-discord-threads/config.json
+node dist/index.js release rollback <sha-or-release-id> --config ~/.config/pi-discord-threads/config.json
+node dist/index.js release list --config ~/.config/pi-discord-threads/config.json
+```
+
+First implementation slice: `release snapshot` + `release list` only. This establishes the release directory layout, manifest shape, config snapshot behavior, and append-only ledger without touching LaunchAgent restart behavior yet. Deploy/rollback can then reuse the boring storage foundation.
+
+Snapshot contents for V1:
+
+- built `dist/` artifact, so rollback can run without rebuilding
+- `package.json` and `package-lock.json` for provenance
+- manifest with release id, commit SHA, branch, dirty/clean status, build command, created timestamp, Node version, config path, and redacted config summary
+- private exact config copy for rollback
+- no full source checkout and no `node_modules`; Git already owns source history, and release snapshots should not become a second raw filesystem repo
+
+Reason: this repo already owns config parsing, doctor output, LaunchAgent label, run-control state, and postflight recovery checks. A generic shell script would hide the invariants in operator folklore.
+
+Do not call this true zero-downtime yet. Today the Discord bot process is a singleton, so deploys can have a Gateway reconnect gap. The goal is **zero lost work + fast rollback**, not duplicate bot ingress.
+
+Prior art to steal, not worship:
+
+- **Capistrano release directories:** each deploy creates a release dir and flips a `current` symlink; rollback flips the symlink to a previous release and restarts. Source: https://capistranorb.com/documentation/getting-started/rollbacks/
+- **Heroku releases:** a release binds build artifact plus config vars, keeps an append-only release ledger, and rollback copies a previous slug/config bundle. External state is explicitly not rolled back. Source: https://devcenter.heroku.com/articles/releases
+- **Kubernetes rollouts:** roll forward with readiness gates, watch rollout status, keep revision history, and `rollout undo` to a known revision. For this singleton Discord bot, borrow the health-gate/history/undo ideas, not the multi-pod traffic-routing model. Source: https://www.bluematador.com/blog/kubernetes-deployments-rolling-update-configuration
+
 ## Live Redis instability note — 2026-06-09
 
 Flagg Central Redis is currently not a safe dependency for Discord run control without command timeouts/fallback.
