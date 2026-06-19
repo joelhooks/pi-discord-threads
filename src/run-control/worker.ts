@@ -5,11 +5,12 @@ import { formatUnknownError } from "../error-format.js";
 import type { ProgressEventBusPort } from "../progress-events.js";
 import { isRetryRunLaterError } from "./errors.js";
 import { runRunControlLeasedRun } from "./leased-run-machine.js";
-import type { QueuedRunInput, RunControlExecutionResult, RunControlStorePort, RunRecord } from "./types.js";
+import type { QueuedRunInput, RunControlExecutionOptions, RunControlExecutionResult, RunControlStorePort, RunRecord } from "./types.js";
 import { runControlWorkerLaneMachine } from "./worker-lane-machine.js";
 
 export interface RunControlWorkerAdapter {
-  executeRun(run: RunRecord, progressEvents: ProgressEventBusPort): Promise<RunControlExecutionResult>;
+  executeRun(run: RunRecord, progressEvents: ProgressEventBusPort, options: RunControlExecutionOptions): Promise<RunControlExecutionResult>;
+  abortRun(run: RunRecord, reason: string): Promise<void>;
   finalizeRun(run: RunRecord, result: RunControlExecutionResult): Promise<void>;
   failRun(run: RunRecord, error: Error): Promise<void>;
   applyInput(run: RunRecord, input: QueuedRunInput): Promise<{ queued: boolean }>;

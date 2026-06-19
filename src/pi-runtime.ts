@@ -54,8 +54,20 @@ export interface CompactResult {
   sessionFile: string | undefined;
 }
 
+export interface PromptRunOptions {
+  signal?: AbortSignal;
+  deferRegistryCompletion?: boolean;
+}
+
+export class PiPromptAbortedError extends Error {
+  constructor(message = "Pi prompt aborted") {
+    super(message);
+    this.name = "PiPromptAbortedError";
+  }
+}
+
 export interface PiRuntimePort {
-  enqueuePrompt(thread: ThreadRecord, text: string, images?: InlineImageContent[], onProgress?: PromptProgressHandler): Promise<PromptResult>;
+  enqueuePrompt(thread: ThreadRecord, text: string, images?: InlineImageContent[], onProgress?: PromptProgressHandler, options?: PromptRunOptions): Promise<PromptResult>;
   queueMessageDuringActive(threadId: string, text: string, mode?: "steer" | "followUp", images?: InlineImageContent[]): Promise<QueueMessageResult>;
   queueMessageForThreadIfActive(thread: ThreadRecord, text: string, mode?: "steer" | "followUp", images?: InlineImageContent[]): Promise<QueueMessageResult>;
   enqueueReload(thread: ThreadRecord, onProgress?: PromptProgressHandler): Promise<void>;
@@ -72,6 +84,36 @@ interface PiCompactionResult {
   details?: unknown;
 }
 
+export function buildRuntimeRegistrationPatch(
+  thread: ThreadRecord,
+  sessionFile: string | undefined,
+  sessionName: string | undefined,
+  currentRecord: ThreadRecord | undefined,
+): Partial<Omit<ThreadRecord, "threadId" | "createdAt">> {
+  const visibleActiveRun = hasVisibleActiveRun({
+    registryStatus: currentRecord?.status,
+    hasRegistryActiveRun: Boolean(currentRecord?.activeRun),
+  });
+  if (visibleActiveRun && currentRecord?.activeRun) {
+    return {
+      sessionFile,
+      sessionName: sessionName ?? thread.sessionName,
+      status: currentRecord.status,
+      activeRun: {
+        ...currentRecord.activeRun,
+        sessionFile,
+        updatedAt: new Date().toISOString(),
+      },
+    };
+  }
+
+  return {
+    sessionFile,
+    sessionName: sessionName ?? thread.sessionName,
+    status: "idle",
+  };
+}
+
 export class PiRuntimeManager implements PiRuntimePort {
   private readonly runtimes = new Map<string, ManagedRuntime>();
   private readonly queues = new Map<string, Promise<unknown>>();
@@ -84,8 +126,8 @@ export class PiRuntimeManager implements PiRuntimePort {
     this.agentDir = config.pi.agentDir ?? getAgentDir();
   }
 
-  async enqueuePrompt(thread: ThreadRecord, text: string, images: InlineImageContent[] = [], onProgress?: PromptProgressHandler): Promise<PromptResult> {
-    return this.enqueueOperation(thread.threadId, () => this.prompt(thread, text, images, onProgress));
+  async enqueuePrompt(thread: ThreadRecord, text: string, images: InlineImageContent[] = [], onProgress?: PromptProgressHandler, options: PromptRunOptions = {}): Promise<PromptResult> {
+    return this.enqueueOperation(thread.threadId, () => this.prompt(thread, text, images, onProgress, options));
   }
 
   async queueMessageDuringActive(threadId: string, text: string, mode: "steer" | "followUp" = "steer", images: InlineImageContent[] = []): Promise<QueueMessageResult> {
@@ -211,7 +253,10 @@ export class PiRuntimeManager implements PiRuntimePort {
     }
   }
 
-  private async prompt(thread: ThreadRecord, text: string, images: InlineImageContent[], onProgress?: PromptProgressHandler): Promise<PromptResult> {
+  private async prompt(thread: ThreadRecord, text: string, images: InlineImageContent[], onProgress?: PromptProgressHandler, options: PromptRunOptions = {}): Promise<PromptResult> {
+    const signal = options.signal;
+    throwIfPromptAborted(signal);
+
     this.publishProgress(onProgress, {
       phase: "starting",
       title: "Starting Pi session",
@@ -226,7 +271,12 @@ export class PiRuntimeManager implements PiRuntimePort {
     });
 
     const managed = await this.getOrCreateRuntime(thread);
+    if (signal?.aborted) {
+      await managed.runtime.session.abort().catch(() => undefined);
+      throwIfPromptAborted(signal);
+    }
     await this.reloadRuntimeAuth(managed);
+    throwIfPromptAborted(signal);
     const authSnapshot = await this.getAuthFileSnapshot();
     const session = managed.runtime.session;
     if (repairDanglingAssistantLeaf(session.sessionManager)) {
@@ -280,6 +330,13 @@ export class PiRuntimeManager implements PiRuntimePort {
         phase: "thinking",
       },
     });
+
+    let abortPromise: Promise<void> | undefined;
+    const abortPrompt = () => {
+      abortPromise = session.abort().catch(() => undefined);
+    };
+    signal?.addEventListener("abort", abortPrompt, { once: true });
+    if (signal?.aborted) abortPrompt();
 
     const unsubscribe = session.subscribe((event) => {
       if (event.type === "session_info_changed") {
@@ -516,67 +573,79 @@ export class PiRuntimeManager implements PiRuntimePort {
         updatedAt: new Date().toISOString(),
       };
     }
-    await this.registry.patchThread(thread.threadId, runPatch);
     try {
-      await this.promptWithAssistantLeafRecovery(session, text, images, onProgress);
-    } finally {
-      unsubscribe();
-      this.scheduleDispose(thread.threadId, managed);
-    }
+      await this.registry.patchThread(thread.threadId, runPatch);
+      try {
+        throwIfPromptAborted(signal);
+        await this.promptWithAssistantLeafRecovery(session, text, images, onProgress, signal);
+        throwIfPromptAborted(signal);
+      } finally {
+        unsubscribe();
+        this.scheduleDispose(thread.threadId, managed);
+      }
 
-    const assistantError = getNewAssistantError(session.messages, beforeAssistantCount);
-    if (assistantError) {
-      const authSnapshotAfterError = await this.getAuthFileSnapshot();
-      if (isOpenAiOAuthInvalidation(assistantError) && authSnapshot && authSnapshotAfterError && authSnapshotAfterError !== authSnapshot) {
-        this.publishProgress(onProgress, {
-          phase: "retry",
-          title: "OpenAI auth changed; retrying",
-          detail: "Reloading Pi auth from disk after OAuth refresh",
-          sessionFile: session.sessionFile,
-          feedEvent: {
-            type: "auto_retry_start",
+      const assistantError = getNewAssistantError(session.messages, beforeAssistantCount);
+      if (assistantError) {
+        const authSnapshotAfterError = await this.getAuthFileSnapshot();
+        if (isOpenAiOAuthInvalidation(assistantError) && authSnapshot && authSnapshotAfterError && authSnapshotAfterError !== authSnapshot) {
+          this.publishProgress(onProgress, {
+            phase: "retry",
             title: "OpenAI auth changed; retrying",
             detail: "Reloading Pi auth from disk after OAuth refresh",
-            phase: "retry",
-            data: { reason: "openai_oauth_refreshed" },
-          },
-        });
-        await this.reloadRuntimeAuth(managed);
-        return this.prompt(thread, text, images, onProgress);
+            sessionFile: session.sessionFile,
+            feedEvent: {
+              type: "auto_retry_start",
+              title: "OpenAI auth changed; retrying",
+              detail: "Reloading Pi auth from disk after OAuth refresh",
+              phase: "retry",
+              data: { reason: "openai_oauth_refreshed" },
+            },
+          });
+          await this.reloadRuntimeAuth(managed);
+          return this.prompt(thread, text, images, onProgress, options);
+        }
+        throw new Error(formatAssistantRunError(assistantError));
       }
-      throw new Error(formatAssistantRunError(assistantError));
-    }
 
-    const sessionFile = session.sessionFile;
-    const entryIds = this.getNewMessageEntryIds(session.sessionManager.getEntries(), beforeCount);
-    await this.registry.patchThread(thread.threadId, {
-      sessionFile,
-      status: "idle",
-      activeRun: undefined,
-      sessionName: session.sessionManager.getSessionName() ?? thread.sessionName,
-    });
+      const sessionFile = session.sessionFile;
+      const entryIds = this.getNewMessageEntryIds(session.sessionManager.getEntries(), beforeCount);
+      if (!options.deferRegistryCompletion) {
+        throwIfPromptAborted(signal);
+        await this.registry.patchThread(thread.threadId, {
+          sessionFile,
+          status: "idle",
+          activeRun: undefined,
+          sessionName: session.sessionManager.getSessionName() ?? thread.sessionName,
+        });
+        throwIfPromptAborted(signal);
+      }
 
-    const finalText = assistantText.trim() || session.getLastAssistantText() || "";
-    this.publishProgress(onProgress, {
-      phase: "done",
-      title: "Done",
-      textPreview: tail(finalText, 700),
-      sessionFile,
-      feedEvent: {
-        type: "run_done",
-        title: "Done",
+      throwIfPromptAborted(signal);
+      const finalText = assistantText.trim() || session.getLastAssistantText() || "";
+      this.publishProgress(onProgress, {
         phase: "done",
-        textPreview: tail(finalText, 1_500),
-      },
-    });
+        title: "Done",
+        textPreview: tail(finalText, 700),
+        sessionFile,
+        feedEvent: {
+          type: "run_done",
+          title: "Done",
+          phase: "done",
+          textPreview: tail(finalText, 1_500),
+        },
+      });
 
-    return {
-      kind: "completed",
-      text: finalText,
-      sessionFile,
-      userEntryId: entryIds.userEntryId,
-      assistantEntryId: entryIds.assistantEntryId,
-    };
+      return {
+        kind: "completed",
+        text: finalText,
+        sessionFile,
+        userEntryId: entryIds.userEntryId,
+        assistantEntryId: entryIds.assistantEntryId,
+      };
+    } finally {
+      signal?.removeEventListener("abort", abortPrompt);
+      await abortPromise?.catch(() => undefined);
+    }
   }
 
   private async promptWithAssistantLeafRecovery(
@@ -584,14 +653,17 @@ export class PiRuntimeManager implements PiRuntimePort {
     text: string,
     images: InlineImageContent[],
     onProgress?: PromptProgressHandler,
+    signal?: AbortSignal,
   ): Promise<void> {
     const options = images.length > 0 ? { images } : undefined;
     let recoveredAssistantLeaf = false;
     let recoveredAlreadyProcessing = false;
 
     while (true) {
+      throwIfPromptAborted(signal);
       try {
         await session.prompt(text, options);
+        throwIfPromptAborted(signal);
         return;
       } catch (error) {
         if (isAssistantLeafContinueError(error) && !recoveredAssistantLeaf) {
@@ -611,6 +683,7 @@ export class PiRuntimeManager implements PiRuntimePort {
           });
           console.warn("retrying Pi prompt after assistant-leaf continuation guard during pre-prompt compaction");
           await this.resetStaleSessionBeforePromptRetry(session, "assistant-leaf recovery");
+          throwIfPromptAborted(signal);
           continue;
         }
 
@@ -631,6 +704,7 @@ export class PiRuntimeManager implements PiRuntimePort {
           });
           console.warn("retrying Pi prompt after stale already-processing guard");
           await this.resetStaleSessionBeforePromptRetry(session, "already-processing recovery");
+          throwIfPromptAborted(signal);
           continue;
         }
 
@@ -723,11 +797,12 @@ export class PiRuntimeManager implements PiRuntimePort {
 
     const managed: ManagedRuntime = { runtime };
     this.runtimes.set(thread.threadId, managed);
-    await this.registry.patchThread(thread.threadId, {
-      sessionFile: runtime.session.sessionFile,
-      sessionName: runtime.session.sessionManager.getSessionName() ?? thread.sessionName,
-      status: "idle",
-    });
+    await this.registry.patchThread(thread.threadId, buildRuntimeRegistrationPatch(
+      thread,
+      runtime.session.sessionFile,
+      runtime.session.sessionManager.getSessionName() ?? thread.sessionName,
+      this.registry.getThread(thread.threadId) ?? thread,
+    ));
     this.scheduleDispose(thread.threadId, managed);
     return managed;
   }
@@ -843,6 +918,12 @@ function getNewAssistantError(messages: unknown[], beforeAssistantCount: number)
 
 function isOpenAiOAuthInvalidation(message: string): boolean {
   return /authentication token has been invalidated|try signing in again|invalidated.*token/i.test(message);
+}
+
+function throwIfPromptAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new PiPromptAbortedError("Pi prompt aborted by run-control lease loss");
+  }
 }
 
 function formatAssistantRunError(message: string): string {

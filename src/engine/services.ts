@@ -1,6 +1,6 @@
 import type { InlineImageContent } from "../attachments.js";
 import type { AppConfig } from "../config.js";
-import type { CompactResult, PromptProgressHandler, PromptResult, QueueMessageResult } from "../pi-runtime.js";
+import type { CompactResult, PromptProgressHandler, PromptResult, PromptRunOptions, QueueMessageResult } from "../pi-runtime.js";
 import type {
   LinkIngestRecord,
   LinkIngestStatusUpdateRecord,
@@ -126,6 +126,7 @@ export interface PiSessionServiceShape {
     text: string,
     images?: InlineImageContent[],
     onProgress?: PromptProgressHandler,
+    options?: PromptRunOptions,
   ) => Effect.Effect<PromptResult, PiSessionError>;
   readonly queueMessageDuringActive: (
     threadId: string,

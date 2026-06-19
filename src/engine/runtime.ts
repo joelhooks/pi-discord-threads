@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { InlineImageContent } from "../attachments.js";
 import type { AppConfig } from "../config.js";
-import { PiRuntimeManager, type CompactResult, type PiRuntimePort, type PromptProgressHandler, type PromptResult, type QueueMessageResult } from "../pi-runtime.js";
+import { PiRuntimeManager, type CompactResult, type PiRuntimePort, type PromptProgressHandler, type PromptResult, type PromptRunOptions, type QueueMessageResult } from "../pi-runtime.js";
 import { Registry, type LinkIngestRecord, type LinkIngestStatusUpdateRecord, type MessageRecord, type RegistryPort, type ThreadRecord } from "../registry.js";
 import type {
   ActivePointer,
@@ -107,8 +107,8 @@ export function createPiSessionRuntimeClientFromManager(manager: PiRuntimePort):
     engine: PI_SESSION_ENGINE_NAME,
     warmup: () => withSession(() => Effect.succeed(undefined)),
     close: disposeRuntime,
-    enqueuePrompt: (thread: ThreadRecord, text: string, images?: InlineImageContent[], onProgress?: PromptProgressHandler): Promise<PromptResult> =>
-      withSession((session) => session.enqueuePrompt(thread, text, images, onProgress)),
+    enqueuePrompt: (thread: ThreadRecord, text: string, images?: InlineImageContent[], onProgress?: PromptProgressHandler, options?: PromptRunOptions): Promise<PromptResult> =>
+      withSession((session) => session.enqueuePrompt(thread, text, images, onProgress, options)),
     queueMessageDuringActive: (threadId: string, text: string, mode?: "steer" | "followUp", images?: InlineImageContent[]): Promise<QueueMessageResult> =>
       withSession((session) => session.queueMessageDuringActive(threadId, text, mode, images)),
     queueMessageForThreadIfActive: (thread: ThreadRecord, text: string, mode?: "steer" | "followUp", images?: InlineImageContent[]): Promise<QueueMessageResult> =>

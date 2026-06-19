@@ -2187,14 +2187,23 @@ function buildRunControlRecord(
   };
 }
 
+function throwIfRunExecutionAborted(signal: AbortSignal, runId: string): void {
+  if (signal.aborted) {
+    throw new RetryRunLaterError(`run-control execution aborted for ${runId}; leaving job pending for ownership recovery`);
+  }
+}
+
 function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): RunControlWorkerAdapter {
   const hudSnapshots = new Map<string, ProgressHudSnapshot>();
   return {
-    async executeRun(run, progressEvents) {
+    async executeRun(run, progressEvents, execution) {
+      throwIfRunExecutionAborted(execution.signal, run.runId);
       const record = options.registry.getThread(run.threadId);
       if (!record) throw new Error(`No registry record for run-control thread ${run.threadId}`);
       const channel = await resolvePromptChannel(client, record);
+      throwIfRunExecutionAborted(execution.signal, run.runId);
       const placeholder = await fetchPlaceholderMessage(channel, run.placeholderDiscordMessageId);
+      throwIfRunExecutionAborted(execution.signal, run.runId);
       let stopTyping: (() => void) | undefined;
       let stopProgress: (() => Promise<void>) | undefined;
       let unsubscribeProgress: (() => void) | undefined;
@@ -2202,6 +2211,7 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
         stopTyping = startTypingIndicator(channel);
         const thread = getThreadChannel(channel);
         if (thread) await maybeRenameThreadForPrompt(thread, record, run.prompt, options.registry);
+        throwIfRunExecutionAborted(execution.signal, run.runId);
         const runningRecord: ThreadRecord = {
           ...record,
           status: "running",
@@ -2232,12 +2242,17 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
           await progress.stop();
         };
         unsubscribeProgress = progressEvents.subscribe(progress.update);
+        throwIfRunExecutionAborted(execution.signal, run.runId);
         await renderer.render(buildWorkingPayload(runningRecord, run.prompt, {
           phase: "starting",
           title: "Worker claimed Redis run",
           detail: run.sessionFile ? "Rehydrating existing session" : "Creating a durable session",
         })).catch(() => undefined);
-        const result = await options.runtimeManager.enqueuePrompt(runningRecord, run.prompt, run.images ?? [], progressEvents.publish);
+        const result = await options.runtimeManager.enqueuePrompt(runningRecord, run.prompt, run.images ?? [], progressEvents.publish, {
+          signal: execution.signal,
+          deferRegistryCompletion: true,
+        });
+        throwIfRunExecutionAborted(execution.signal, run.runId);
         unsubscribeProgress?.();
         await stopProgress();
         stopTyping();
@@ -2253,6 +2268,9 @@ function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): 
         stopTyping?.();
         throw error;
       }
+    },
+    async abortRun(run) {
+      await options.runtimeManager.abort(run.threadId);
     },
     async finalizeRun(run, result) {
       const record = options.registry.getThread(run.threadId);

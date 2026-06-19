@@ -80,6 +80,10 @@ export interface RunControlExecutionResult {
   assistantEntryId?: string;
 }
 
+export interface RunControlExecutionOptions {
+  signal: AbortSignal;
+}
+
 export interface ActivePointer {
   logicalThreadId: string;
   runId: string;

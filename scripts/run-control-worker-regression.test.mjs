@@ -34,6 +34,7 @@ function createConfig() {
 function createAdapter() {
   return {
     executeRun: async () => ({ text: "done", sessionFile: undefined }),
+    abortRun: async () => undefined,
     finalizeRun: async () => undefined,
     failRun: async () => undefined,
     applyInput: async () => ({ queued: false }),
@@ -398,6 +399,8 @@ test("busy finalization leaves the stream job pending without logging an outside
 
 test("RunControlLeasedRunMachine treats lost heartbeat ownership as retry-later without finalizing", async () => {
   let finalizeCount = 0;
+  let abortRunCount = 0;
+  let executionSignalAborted = false;
   const warnings = [];
   const config = createConfig();
   config.runControl.heartbeatMs = 10;
@@ -406,7 +409,13 @@ test("RunControlLeasedRunMachine treats lost heartbeat ownership as retry-later 
   });
   const adapter = {
     ...createAdapter(),
-    executeRun: async () => new Promise((resolve) => setTimeout(() => resolve({ text: "late", sessionFile: undefined }), 200)),
+    executeRun: async (_run, _progressEvents, { signal }) => new Promise((resolve) => {
+      signal.addEventListener("abort", () => {
+        executionSignalAborted = true;
+        resolve({ text: "late", sessionFile: undefined });
+      }, { once: true });
+    }),
+    abortRun: async () => { abortRunCount++; },
     finalizeRun: async () => { finalizeCount++; },
   };
   const actor = createActor(runControlLeasedRunMachine, {
@@ -429,6 +438,8 @@ test("RunControlLeasedRunMachine treats lost heartbeat ownership as retry-later 
   assert.equal(done.context.outcome.kind, "retry-later");
   assert.match(done.context.outcome.message, /lease lost/);
   assert.equal(finalizeCount, 0);
+  assert.equal(abortRunCount, 1);
+  assert.equal(executionSignalAborted, true);
   assert.equal(warnings.some((message) => message.includes("lease lost")), true);
 });
 

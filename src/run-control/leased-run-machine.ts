@@ -2,7 +2,7 @@ import { createActor, waitFor, assign, fromCallback, fromPromise, setup } from "
 import type { AppConfig } from "../config.js";
 import { formatUnknownError } from "../error-format.js";
 import { createProgressEventBus, type ProgressEventBusPort } from "../progress-events.js";
-import type { FinalizeClaim, QueuedRunInput, RunControlExecutionResult, RunControlStorePort, RunRecord } from "./types.js";
+import type { FinalizeClaim, QueuedRunInput, RunControlExecutionOptions, RunControlExecutionResult, RunControlStorePort, RunRecord } from "./types.js";
 import { isRetryRunLaterError, RetryRunLaterError } from "./errors.js";
 
 type PendingRunInput = QueuedRunInput & {
@@ -14,7 +14,8 @@ const MAX_INPUT_APPLY_ATTEMPTS = 30;
 const FINAL_OUTBOX_BLIND_NONCE_WINDOW_MS = 2 * 60_000;
 
 export interface RunControlLeasedRunAdapter {
-  executeRun(run: RunRecord, progressEvents: ProgressEventBusPort): Promise<RunControlExecutionResult>;
+  executeRun(run: RunRecord, progressEvents: ProgressEventBusPort, options: RunControlExecutionOptions): Promise<RunControlExecutionResult>;
+  abortRun(run: RunRecord, reason: string): Promise<void>;
   finalizeRun(run: RunRecord, result: RunControlExecutionResult): Promise<void>;
   failRun(run: RunRecord, error: Error): Promise<void>;
   applyInput(run: RunRecord, input: QueuedRunInput): Promise<{ queued: boolean }>;
@@ -215,7 +216,7 @@ export const runControlLeasedRunMachine = setup({
     drainInputs: fromPromise<InputDrainOutput, RunControlLeasedRunMachineContext>(async ({ input }) => {
       return drainInputs(input);
     }),
-    executeFreshRun: fromPromise<RunControlExecutionResult, RunControlLeasedRunMachineContext>(async ({ input }) => {
+    executeFreshRun: fromPromise<RunControlExecutionResult, RunControlLeasedRunMachineContext>(async ({ input, signal }) => {
       const progressEvents = createProgressEventBus(async (progress) => {
         await input.store.appendRunEvent(input.run.runId, progress.feedEvent?.type ?? progress.phase, {
           title: progress.title,
@@ -225,7 +226,12 @@ export const runControlLeasedRunMachine = setup({
           sessionFile: progress.sessionFile,
         }).catch(() => undefined);
       });
-      return input.adapter.executeRun(input.run, progressEvents);
+      return input.adapter.executeRun(input.run, progressEvents, { signal });
+    }),
+    abortFreshExecution: fromPromise<void, RunControlLeasedRunMachineContext>(async ({ input }) => {
+      await input.adapter.abortRun(input.run, leaseLostError(input).message).catch((error) => {
+        input.warn(`run-control abort after lease loss failed for ${input.run.runId}: ${formatUnknownError(error)}`);
+      });
     }),
     patchRunFinalizing: fromPromise<void, RunControlLeasedRunMachineContext>(async ({ input }) => {
       await ensureOwnership(input);
@@ -404,7 +410,7 @@ export const runControlLeasedRunMachine = setup({
         freshExecution: {
           type: "parallel",
           on: {
-            LEASE_LOST: { target: "#runControlLeasedRun.done", actions: "lostOwnership" },
+            LEASE_LOST: { target: "abortingFreshExecution", actions: "lostOwnership" },
           },
           invoke: {
             id: "inputTicker",
@@ -469,6 +475,14 @@ export const runControlLeasedRunMachine = setup({
                 },
               },
             },
+          },
+        },
+        abortingFreshExecution: {
+          invoke: {
+            src: "abortFreshExecution",
+            input: ({ context }) => context,
+            onDone: "#runControlLeasedRun.done",
+            onError: "#runControlLeasedRun.done",
           },
         },
         patchingRunFinalizing: {

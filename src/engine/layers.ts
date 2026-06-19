@@ -51,8 +51,8 @@ export function makePiSessionService(manager: PiRuntimePort): PiSessionServiceSh
     });
 
   return {
-    enqueuePrompt: Effect.fn("PiSessionService.enqueuePrompt")((thread, text, images, onProgress) =>
-      call("enqueuePrompt", () => manager.enqueuePrompt(thread, text, images, onProgress)),
+    enqueuePrompt: Effect.fn("PiSessionService.enqueuePrompt")((thread, text, images, onProgress, options) =>
+      call("enqueuePrompt", () => manager.enqueuePrompt(thread, text, images, onProgress, options)),
     ),
     queueMessageDuringActive: Effect.fn("PiSessionService.queueMessageDuringActive")((threadId, text, mode, images) =>
       call("queueMessageDuringActive", () => manager.queueMessageDuringActive(threadId, text, mode, images)),
