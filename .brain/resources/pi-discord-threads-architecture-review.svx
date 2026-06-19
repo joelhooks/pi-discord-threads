@@ -117,6 +117,37 @@ If we continue architecture work, start with **PiSessionService resource ownersh
 
 If we stay purely run-control-focused, start with **typed Lua command builders** because it shrinks future positional-drift bugs without touching live Discord behavior.
 
+## Implementation receipt — 2026-06-19
+
+Top two candidates were implemented as one focused slice after fresh-context review:
+
+- `PiSessionService` resource ownership was deepened in `src/engine/layers.ts` and `src/engine/runtime.ts`.
+  - Manager-created clients now construct `PiRuntimeManager` inside `PiRuntimeManagerLive(...)`.
+  - The manager is disposed through an Effect `Scope.addFinalizer`.
+  - Injected-manager clients preserve the old close-before-warmup disposal behavior.
+- Discord run delivery primitives were extracted to `src/discord/run-surface.ts`.
+  - Channel resolution, message fetches, non-run-control final sends, and HUD archive live there.
+  - Redis-aware final-answer outbox policy remains in `src/discord/final-answer-outbox.ts` and run-control finalization still calls it.
+
+Pi Fable findings resolved:
+
+- `fromManager` close-before-warmup initially skipped injected manager disposal because `ManagedRuntime` is lazy. Fixed with a pre-acquisition disposal path and regression tests.
+- `src/discord/run-surface.ts` was initially untracked. The final commit must include it with the source changes.
+
+Verification evidence:
+
+- `git diff --check`
+- `npm run typecheck`
+- `npm run test:pi-session-service` — 9/9
+- `npm run test:pi-runtime` — 8/8
+- `npm run test:app-lifecycle-machine` — 3/3
+- `npm run test:async-subagent-bridge` — 6/6
+- `npm run test:final-answer-outbox` — 6/6
+- `npm run test:engine-layer` — 4/4
+- `npm run test:progress-hud` — 2/2
+
+Remaining risk: no live Discord smoke or daemon deploy was performed in this slice. The running daemon remains on the previous `dist` until a deliberate deploy/restart.
+
 ## Deferred on purpose
 
 - Do not migrate registry storage to Postgres/SQLite yet. That is a storage migration, not the next architecture improvement.

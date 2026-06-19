@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { AppConfig } from "../config.js";
-import type { PiRuntimePort } from "../pi-runtime.js";
-import { Registry } from "../registry.js";
+import { PiRuntimeManager, type PiRuntimePort } from "../pi-runtime.js";
+import { Registry, type RegistryPort } from "../registry.js";
 import { createRunControlRedisClient, RedisCommandTimeoutError } from "../run-control/redis-client.js";
 import { RunControlStore } from "../run-control/store.js";
 import { isAssistantLeafContinueError } from "../thread-run-state.js";
@@ -79,8 +79,60 @@ export function makePiSessionService(manager: PiRuntimePort): PiSessionServiceSh
   };
 }
 
-export const PiSessionManagerLive = (manager: PiRuntimePort): Layer.Layer<PiSessionService> =>
-  Layer.succeed(PiSessionService, makePiSessionService(manager));
+export const PiSessionManagerLive = (
+  manager: PiRuntimePort,
+  options: {
+    readonly onService?: (service: PiSessionServiceShape) => void;
+    readonly onDisposeError?: (cause: unknown) => void;
+  } = {},
+): Layer.Layer<PiSessionService> => Layer.effect(
+  PiSessionService,
+  Effect.gen(function* () {
+    const service = makePiSessionService(manager);
+    options.onService?.(service);
+
+    const scope = yield* Effect.scope;
+    yield* Scope.addFinalizer(scope, disposePiRuntimeOnScopeClose(manager, options.onDisposeError));
+
+    return service;
+  }),
+);
+
+export const PiRuntimeManagerLive = (
+  config: AppConfig,
+  registry: RegistryPort,
+  options: {
+    readonly onService?: (service: PiSessionServiceShape) => void;
+    readonly onDisposeError?: (cause: unknown) => void;
+  } = {},
+): Layer.Layer<PiSessionService> => Layer.effect(
+  PiSessionService,
+  Effect.gen(function* () {
+    const manager = new PiRuntimeManager(config, registry);
+    const service = makePiSessionService(manager);
+    options.onService?.(service);
+
+    const scope = yield* Effect.scope;
+    yield* Scope.addFinalizer(scope, disposePiRuntimeOnScopeClose(manager, options.onDisposeError));
+
+    return service;
+  }),
+);
+
+function disposePiRuntimeOnScopeClose(
+  manager: PiRuntimePort,
+  onDisposeError: ((cause: unknown) => void) | undefined,
+): Effect.Effect<void> {
+  return Effect.catch(
+    Effect.tryPromise({
+      try: () => manager.disposeAll(),
+      catch: (cause) => cause,
+    }),
+    (cause: unknown) => Effect.sync(() => {
+      onDisposeError?.(cause);
+    }),
+  );
+}
 
 export function makeRegistryService(registry: Registry): RegistryServiceShape {
   const write = <A>(operation: string, run: () => Promise<A>): Effect.Effect<A, RegistryWriteFailed> =>

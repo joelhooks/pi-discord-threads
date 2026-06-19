@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Effect, Layer } from "effect";
+import { defaultConfig } from "../dist/config.js";
+import { PiRuntimeManager } from "../dist/pi-runtime.js";
 import {
+  createPiSessionRuntimeClient,
   createPiSessionRuntimeClientFromManager,
   makePiSessionService,
   PiSessionAlreadyProcessing,
@@ -17,6 +20,11 @@ const thread = {
   cwd: process.cwd(),
   createdAt: new Date(0).toISOString(),
   updatedAt: new Date(0).toISOString(),
+};
+
+const fakeRegistry = {
+  getThread() { return undefined; },
+  patchThread(_threadId, patch) { return Promise.resolve({ ...thread, ...patch }); },
 };
 
 const createManager = (overrides = {}) => ({
@@ -144,6 +152,76 @@ test("PiSession runtime client close disposes manager resources once and stays i
   await client.close();
 
   assert.deepEqual(calls, [["disposeAll"]]);
+});
+
+test("PiSession runtime client close before warmup disposes injected manager once", async () => {
+  const calls = [];
+  const client = createPiSessionRuntimeClientFromManager(createManager({
+    disposeAll: async () => {
+      calls.push(["disposeAll"]);
+    },
+  }));
+
+  await client.close();
+  await client.disposeAll();
+
+  assert.deepEqual(calls, [["disposeAll"]]);
+});
+
+test("PiSession runtime client close before warmup preserves dispose failures", async () => {
+  let calls = 0;
+  const disposeError = new Error("dispose exploded before warmup");
+  const client = createPiSessionRuntimeClientFromManager(createManager({
+    disposeAll: async () => {
+      calls += 1;
+      throw disposeError;
+    },
+  }));
+
+  await assert.rejects(
+    () => client.close(),
+    (error) => error === disposeError,
+  );
+  await client.close();
+
+  assert.equal(calls, 1);
+});
+
+test("PiSession runtime client close preserves scoped dispose failures", async () => {
+  const disposeError = new Error("dispose exploded");
+  const client = createPiSessionRuntimeClientFromManager(createManager({
+    disposeAll: async () => {
+      throw disposeError;
+    },
+  }));
+
+  await client.warmup();
+
+  await assert.rejects(
+    () => client.close(),
+    (error) => error === disposeError,
+  );
+});
+
+test("manager-created PiSession runtime clients dispose the PiRuntimeManager from the scoped layer", async () => {
+  const calls = [];
+  const originalDisposeAll = PiRuntimeManager.prototype.disposeAll;
+  PiRuntimeManager.prototype.disposeAll = async function disposeAllForTest() {
+    calls.push(this);
+  };
+
+  try {
+    const client = createPiSessionRuntimeClient(defaultConfig(), fakeRegistry);
+
+    assert.equal(client.isActive(thread.threadId), false);
+    await client.warmup();
+    await client.close();
+    await client.disposeAll();
+
+    assert.equal(calls.length, 1);
+  } finally {
+    PiRuntimeManager.prototype.disposeAll = originalDisposeAll;
+  }
 });
 
 test("PiSessionService can be swapped with a fake layer", async () => {

@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { InlineImageContent } from "../attachments.js";
 import type { AppConfig } from "../config.js";
-import { PiRuntimeManager, type CompactResult, type PiRuntimePort, type PromptProgressHandler, type PromptResult, type PromptRunOptions, type QueueMessageResult } from "../pi-runtime.js";
+import type { CompactResult, PiRuntimePort, PromptProgressHandler, PromptResult, PromptRunOptions, QueueMessageResult } from "../pi-runtime.js";
 import { Registry, type LinkIngestRecord, type LinkIngestStatusUpdateRecord, type MessageRecord, type RegistryPort, type ThreadRecord } from "../registry.js";
 import type {
   ActivePointer,
@@ -11,7 +11,7 @@ import type {
   RunRecord,
 } from "../run-control/types.js";
 import { Cause, Effect, Exit, ManagedRuntime, Option } from "effect";
-import { JsonRegistryFromInstanceLive, PiSessionManagerLive, RunQueueEngineLive } from "./layers.js";
+import { JsonRegistryFromInstanceLive, PiRuntimeManagerLive, PiSessionManagerLive, RunQueueEngineLive } from "./layers.js";
 import type { DiscordMessageId, MentionId, ThreadId } from "./domain.js";
 import { PiSessionService, RegistryService, RunQueueService, type PiSessionServiceShape, type RegistryServiceShape, type RunQueueServiceShape } from "./services.js";
 
@@ -73,12 +73,54 @@ export interface PiSessionRuntimeClient extends PiRuntimePort {
 }
 
 export function createPiSessionRuntimeClient(config: AppConfig, registry: RegistryPort): PiSessionRuntimeClient {
-  return createPiSessionRuntimeClientFromManager(new PiRuntimeManager(config, registry));
+  let sessionRef: PiSessionServiceShape | undefined;
+  let disposeError: unknown;
+  const runtime = ManagedRuntime.make(PiRuntimeManagerLive(config, registry, {
+    onService: (service) => {
+      sessionRef = service;
+    },
+    onDisposeError: (cause) => {
+      disposeError ??= cause;
+    },
+  }));
+
+  return makePiSessionRuntimeClient(
+    runtime,
+    (threadId) => sessionRef?.isActive(threadId) ?? false,
+    () => disposeError,
+  );
 }
 
 export function createPiSessionRuntimeClientFromManager(manager: PiRuntimePort): PiSessionRuntimeClient {
-  const runtime = ManagedRuntime.make(PiSessionManagerLive(manager));
+  let managerLayerAcquired = false;
+  let disposeError: unknown;
+  const runtime = ManagedRuntime.make(PiSessionManagerLive(manager, {
+    onService: () => {
+      managerLayerAcquired = true;
+    },
+    onDisposeError: (cause) => {
+      disposeError ??= cause;
+    },
+  }));
 
+  return makePiSessionRuntimeClient(
+    runtime,
+    (threadId) => manager.isActive(threadId),
+    () => disposeError,
+    async () => {
+      if (!managerLayerAcquired) {
+        await manager.disposeAll();
+      }
+    },
+  );
+}
+
+function makePiSessionRuntimeClient(
+  runtime: ManagedRuntime.ManagedRuntime<PiSessionService, never>,
+  isActive: (threadId: string) => boolean,
+  getDisposeError: () => unknown,
+  disposeBeforeRuntime?: () => Promise<void>,
+): PiSessionRuntimeClient {
   const withSession = async <A, E>(
     operation: (session: PiSessionServiceShape) => Effect.Effect<A, E>,
   ): Promise<A> => {
@@ -97,10 +139,12 @@ export function createPiSessionRuntimeClientFromManager(manager: PiRuntimePort):
     if (runtimeDisposed) return;
     runtimeDisposed = true;
     try {
-      await manager.disposeAll();
+      await disposeBeforeRuntime?.();
     } finally {
       await runtime.dispose();
     }
+    const disposeError = getDisposeError();
+    if (disposeError !== undefined) throw disposeError;
   };
 
   return {
@@ -117,7 +161,7 @@ export function createPiSessionRuntimeClientFromManager(manager: PiRuntimePort):
       withSession((session) => session.enqueueReload(thread, onProgress)),
     enqueueCompact: (thread: ThreadRecord, customInstructions?: string, onProgress?: PromptProgressHandler): Promise<CompactResult> =>
       withSession((session) => session.enqueueCompact(thread, customInstructions, onProgress)),
-    isActive: (threadId: string): boolean => manager.isActive(threadId),
+    isActive,
     abort: (threadId: string): Promise<void> => withSession((session) => session.abort(threadId)),
     disposeAll: disposeRuntime,
   };
