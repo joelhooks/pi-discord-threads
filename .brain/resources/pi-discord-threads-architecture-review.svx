@@ -1,0 +1,125 @@
+---
+title: "Pi Discord Threads Architecture Review"
+type: "resource"
+status: "active"
+created_at: "2026-06-19"
+tags:
+  - architecture
+  - discord
+  - run-control
+  - effect
+  - review
+---
+
+# Pi Discord Threads Architecture Review
+
+Architecture review after Redis run-control hardening through `8c56e02`.
+
+Published review page: https://pi-discord-architecture-review.wzrrd.sh/ — expiring 2026-06-26, noindex.
+
+## Context
+
+Current Brain decisions still hold:
+
+- Redis owns active run coordination.
+- XState owns finite lifecycle truth.
+- Effect owns resource, service, scope, and finalizer seams.
+- Discord is the visible operator surface; Pi JSONL remains conversation truth.
+- The bridge should deepen real modules, not create a giant `Engine` class or move complexity into pass-through files.
+
+## Source receipts
+
+- `.brain/areas/architecture.svx` — existing XState/Effect direction and Discord seam notes.
+- `.brain/projects/redis-run-control-plane.svx` — run-control invariants, live incidents, dead-letter/outbox/doctor hardening.
+- `.brain/resources/pi-discord-runtime-architecture-options-2026-06-17.svx` — Effect migration order and warnings against whole-bridge rewrites.
+- `src/run-control/lua-scripts.ts` — named Redis Lua scripts.
+- `src/run-control/store.ts` — Redis store callsites and inspection methods.
+- `src/run-control/leased-run-machine.ts` — finalization and lease-loss lifecycle policy.
+- `src/run-control/doctor.ts` / `src/run-control/reconcile.ts` — inspection and reconciliation views.
+- `src/discord-bot.ts` — remaining Discord gateway/router/orchestration mega-module.
+- `src/engine/layers.ts` / `src/engine/runtime.ts` / `src/pi-runtime.ts` — current Effect service/runtime seam and Pi runtime ownership.
+
+## Recommended candidates
+
+### 1. Deepen `PiSessionService` resource ownership
+
+**Files/modules:** `src/engine/layers.ts`, `src/engine/runtime.ts`, `src/pi-runtime.ts`, `src/app-lifecycle-machine.ts`, `scripts/pi-session-service-regression.test.mjs`, `scripts/pi-runtime-regression.test.mjs`.
+
+**Observed friction:** `PiSessionService` exists, but it currently wraps an already-created `PiRuntimeManager`. The manager still owns runtime cache, queueing, auth reload, stale-session recovery, abort behavior, registry writes, and disposal. This is the highest-risk lifecycle module, and recent incidents clustered here.
+
+**Proposed change:** Construct `PiRuntimeManager` inside the Effect layer and register `manager.disposeAll()` with the layer scope. Keep the public `PiRuntimePort` unchanged and do not touch Discord handlers.
+
+**Why it improves locality/leverage/tests:** Effect would own the lifetime of the Pi runtime resource instead of merely forwarding calls. Tests can prove manager finalization and abort semantics without dragging Discord into the harness.
+
+**Risk:** Double-dispose or changed error identity. Preserve existing `disposeAll()` semantics and run Pi runtime abort/retry regressions.
+
+**First reversible step:** Add a scoped `PiRuntimeManagerLive(config, registry)` layer and switch only `createPiSessionRuntimeClient(config, registry)` to use it.
+
+### 2. Extract a Discord run surface module
+
+**Files/modules:** `src/discord-bot.ts`, `src/discord/final-answer-outbox.ts`, `src/discord/payloads.ts`, `src/discord/message-renderer.ts`, `src/discord/progress-hud-machine.ts`.
+
+**Observed friction:** `discord-bot.ts` still owns Discord channel resolution, placeholder fetches, final chunk sends, and HUD archive operations across local prompt, startup recovery, and run-control finalization paths.
+
+**Proposed change:** Create `src/discord/run-surface.ts` for Discord delivery primitives: resolve prompt channel, fetch placeholder/message, send non-run-control final chunks, archive HUD.
+
+**Why it improves locality/leverage/tests:** This is a real seam between Discord REST/Gateway effects and Pi/run-control policy. It shrinks the mega-file while keeping finalization policy in the run-control/outbox modules.
+
+**Risk:** Accidentally moving run-control idempotency policy into a generic Discord module. Keep `final-answer-outbox.ts` Redis-aware and unchanged.
+
+**First reversible step:** Move only `PromptChannel`, `resolvePromptChannel`, `fetchPromptChannelMessage`, `fetchPlaceholderMessage`, `sendFinalResponseMessages`, and `archiveWorkingHud` without behavior changes.
+
+### 3. Add typed Lua command builders
+
+**Files/modules:** `src/run-control/lua-scripts.ts`, `src/run-control/store.ts`, `scripts/run-control-lua-scripts-regression.test.mjs`, `scripts/run-control-store-regression.test.mjs`.
+
+**Observed friction:** Lua scripts are now named and tested, but `store.ts` still manually builds positional `KEYS`/`ARGV` arrays. Script and TypeScript callsites can drift.
+
+**Proposed change:** Put typed command builders next to scripts, for example `buildRecordRetryLaterEval(input)`, returning the full Redis command array.
+
+**Why it improves locality/leverage/tests:** The positional contract lives beside the script. Store methods become smaller and fake Redis tests can validate the command shape directly.
+
+**Risk:** Overbuilding a Lua framework. Keep it boring and move one script first.
+
+**First reversible step:** Add a builder for `recordRetryLaterScript`, the highest safety-impact script.
+
+### 4. Centralize finalization resume classification
+
+**Files/modules:** `src/run-control/leased-run-machine.ts`, `src/discord/final-answer-outbox.ts`, `scripts/run-control-worker-regression.test.mjs`, `scripts/final-answer-outbox-regression.test.mjs`.
+
+**Observed friction:** Finalization resume policy is split between `leased-run-machine.ts` guards and the Redis outbox adapter. A function named `recordFinalizeAttempt` currently only verifies ownership; the real attempt receipts happen later through the outbox path.
+
+**Proposed change:** Extract a pure `classifyFinalizationResume(run)` helper returning named decisions like `postRecoverableOutbox`, `failClosedUncertain`, and `recordFirstAttempt`.
+
+**Why it improves locality/leverage/tests:** The duplicate-final-answer safety policy becomes testable as a pure decision table before any Discord/Redis side effects.
+
+**Risk:** Moving `finalizeAttemptedAt` earlier could reduce recoverability. First slice should classify/rename only, not change persistence timing.
+
+**First reversible step:** Add the classifier and tests, then rename `recordFinalizeAttempt` to `verifyBeforeFinalOutbox` unless behavior changes.
+
+### 5. Share an inspection snapshot between doctor and reconcile
+
+**Files/modules:** `src/run-control/doctor.ts`, `src/run-control/reconcile.ts`, `src/run-control/store.ts`, `scripts/run-control-doctor-regression.test.mjs`, `scripts/run-control-reconcile-regression.test.mjs`.
+
+**Observed friction:** `doctor` builds one run/pointer view, then calls `reconcileRunControl()` which scans again. `reconcile` has its own active-pointer scan-race re-read logic. The inspection rule belongs in one read-only snapshot seam.
+
+**Proposed change:** Add `loadRunControlInspectionSnapshot(store)` returning runs, runsById, active pointers, active runs by thread, and missing pointer runs after re-reading pointer targets.
+
+**Why it improves locality/leverage/tests:** Every read-only operator view uses the same race-aware snapshot. Destructive reconcile apply paths can still perform fresh Redis ownership checks before mutation.
+
+**Risk:** Reusing stale snapshots for writes. Keep apply mutations guarded by current Redis methods.
+
+**First reversible step:** Use the snapshot in doctor only, then reconcile dry-run after tests settle.
+
+## Recommendation
+
+If we continue architecture work, start with **PiSessionService resource ownership**. It is the deepest module improvement: small public interface change, high lifecycle leverage, and directly aligned with the Effect migration notes.
+
+If we stay purely run-control-focused, start with **typed Lua command builders** because it shrinks future positional-drift bugs without touching live Discord behavior.
+
+## Deferred on purpose
+
+- Do not migrate registry storage to Postgres/SQLite yet. That is a storage migration, not the next architecture improvement.
+- Do not rewrite Discord handlers into Effect.
+- Do not add a giant `Engine` class.
+- Do not turn pure helpers into XState machines.
