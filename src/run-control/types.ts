@@ -101,6 +101,26 @@ export interface ActivePointer {
   runId: string;
 }
 
+export interface RunControlPendingConsumer {
+  name: string;
+  pending: number;
+}
+
+export interface RunControlJobQueueSummary {
+  pendingCount: number;
+  firstPendingId?: string;
+  lastPendingId?: string;
+  consumers: RunControlPendingConsumer[];
+}
+
+export interface RunControlWorkerRecord {
+  workerId: string;
+  status?: string;
+  runId?: string;
+  updatedAt?: string;
+  ttlMs: number;
+}
+
 export interface RunControlStorePort {
   close(): Promise<void>;
   ensureConsumerGroup(): Promise<void>;
@@ -136,6 +156,8 @@ export interface RunControlStorePort {
   getRunLeaseTtl(runId: string): Promise<number>;
   appendRunEvent(runId: string, type: string, fields?: Record<string, unknown>): Promise<string>;
   recordWorkerIdle(workerId: string): Promise<void>;
+  getJobQueueSummary(): Promise<RunControlJobQueueSummary>;
+  listWorkers(): Promise<RunControlWorkerRecord[]>;
   listRuns(): Promise<RunRecord[]>;
   listActivePointers(): Promise<ActivePointer[]>;
 }

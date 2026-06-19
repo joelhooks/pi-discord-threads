@@ -195,6 +195,8 @@ export function createRunQueueRuntimeClient(config: AppConfig): RunQueueRuntimeC
     appendRunEvent: (runId: string, type: string, fields?: Record<string, unknown>) =>
       withQueue((queue) => queue.appendRunEvent(runId, type, fields)),
     recordWorkerIdle: (workerId: string) => withQueue((queue) => queue.recordWorkerIdle(workerId)),
+    getJobQueueSummary: () => withQueue((queue) => queue.getJobQueueSummary()),
+    listWorkers: () => withQueue((queue) => queue.listWorkers()).then((workers) => [...workers]),
     listRuns: (): Promise<RunRecord[]> => withQueue((queue) => queue.listRuns()).then((runs) => [...runs]),
     listActivePointers: (): Promise<ActivePointer[]> => withQueue((queue) => queue.listActivePointers()).then((pointers) => [...pointers]),
   };

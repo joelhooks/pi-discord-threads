@@ -12,6 +12,8 @@ import type {
   ActivePointer,
   FinalizeClaim,
   QueuedRunInput,
+  RunControlJobQueueSummary,
+  RunControlWorkerRecord,
   RunJob,
   RunRecord,
   RetryLaterRecordResult,
@@ -120,6 +122,8 @@ export interface RunQueueServiceShape {
     fields?: Record<string, unknown>,
   ) => Effect.Effect<string, RunQueueError>;
   readonly recordWorkerIdle: (workerId: string) => Effect.Effect<void, RunQueueError>;
+  readonly getJobQueueSummary: () => Effect.Effect<RunControlJobQueueSummary, RunQueueError>;
+  readonly listWorkers: () => Effect.Effect<readonly RunControlWorkerRecord[], RunQueueError>;
   readonly listRuns: () => Effect.Effect<readonly RunRecord[], RunQueueError>;
   readonly listActivePointers: () => Effect.Effect<readonly ActivePointer[], RunQueueError>;
 }

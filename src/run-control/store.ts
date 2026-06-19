@@ -5,6 +5,8 @@ import {
   type ActivePointer,
   type FinalizeClaim,
   type QueuedRunInput,
+  type RunControlJobQueueSummary,
+  type RunControlWorkerRecord,
   type RunJob,
   type RunRecord,
   type RetryLaterRecordResult,
@@ -531,6 +533,34 @@ export class RunControlStore {
     await this.command(["PEXPIRE", this.keys.worker(workerId), String(Math.max(this.config.runControl.leaseTtlMs * 2, this.config.runControl.heartbeatMs * 3))]);
   }
 
+  async getJobQueueSummary(): Promise<RunControlJobQueueSummary> {
+    const reply = await this.command(["XPENDING", this.keys.jobs, WORKER_GROUP]).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("NOGROUP") || message.includes("no such key")) return [0, null, null, []];
+      throw error;
+    });
+    return parsePendingSummary(reply);
+  }
+
+  async listWorkers(): Promise<RunControlWorkerRecord[]> {
+    const keys = await this.keysMatching(this.keys.workerPattern);
+    const workers: RunControlWorkerRecord[] = [];
+    for (const key of keys) {
+      const hash = await this.hgetall(key);
+      const workerId = hash.workerId || this.keys.workerIdFromWorkerKey(key);
+      if (!workerId) continue;
+      const ttlMs = Number(await this.command(["PTTL", key]).catch(() => -2));
+      workers.push({
+        workerId,
+        status: hash.status || undefined,
+        runId: hash.runId || undefined,
+        updatedAt: hash.updatedAt || undefined,
+        ttlMs,
+      });
+    }
+    return workers.sort((a, b) => a.workerId.localeCompare(b.workerId));
+  }
+
   async listRuns(): Promise<RunRecord[]> {
     const keys = await this.keysMatching(this.keys.runPattern);
     const runs: RunRecord[] = [];
@@ -612,6 +642,10 @@ export class RunControlKeys {
     return `${this.prefix}:thread:*:active`;
   }
 
+  get workerPattern(): string {
+    return `${this.prefix}:workers:*`;
+  }
+
   run(runId: string): string {
     return `${this.prefix}:runs:${runId}`;
   }
@@ -638,6 +672,11 @@ export class RunControlKeys {
 
   worker(workerId: string): string {
     return `${this.prefix}:workers:${workerId}`;
+  }
+
+  workerIdFromWorkerKey(key: string): string {
+    const start = `${this.prefix}:workers:`;
+    return key.startsWith(start) ? key.slice(start.length) : key;
   }
 
   logicalThreadIdFromActiveKey(key: string): string {
@@ -798,6 +837,22 @@ function parseScanReply(reply: unknown): { cursor: string; keys: unknown[] } {
   return {
     cursor: valueToString(cursor) || "0",
     keys: Array.isArray(keys) ? keys : [],
+  };
+}
+
+function parsePendingSummary(reply: unknown): RunControlJobQueueSummary {
+  if (!Array.isArray(reply)) return { pendingCount: 0, consumers: [] };
+  const [count, first, last, consumers] = reply;
+  return {
+    pendingCount: Number(count) || 0,
+    firstPendingId: valueToString(first) || undefined,
+    lastPendingId: valueToString(last) || undefined,
+    consumers: Array.isArray(consumers)
+      ? consumers.flatMap((entry) => {
+        if (!Array.isArray(entry) || entry.length < 2) return [];
+        return [{ name: valueToString(entry[0]), pending: Number(entry[1]) || 0 }];
+      })
+      : [],
   };
 }
 

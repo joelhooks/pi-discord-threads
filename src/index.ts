@@ -6,6 +6,7 @@ import { runAppLifecycle } from "./app-runtime.js";
 import { postDailyMessage } from "./daily-post.js";
 import { SecretResolver } from "./secrets.js";
 import { PI_SESSION_ENGINE_NAME, REGISTRY_ENGINE_NAME, RUN_QUEUE_ENGINE_NAME, createRegistryRuntimeClient, createRunQueueRuntimeClient } from "./engine/runtime.js";
+import { buildRunControlDoctorReport, formatRunControlDoctorReport, loadRunControlDoctorRegistry } from "./run-control/doctor.js";
 import { checkRunControlRedisHealth, getRunControlWorkerId } from "./run-control/redis-client.js";
 import { formatReconcileReport, reconcileRunControl } from "./run-control/reconcile.js";
 import { installLaunchAgent, printLaunchAgentStatus, uninstallLaunchAgent } from "./launch-agent.js";
@@ -115,6 +116,16 @@ async function doctor(configPath: string, config: AppConfig): Promise<void> {
   console.log(`runControlWorkerId: ${getRunControlWorkerId(config)}`);
   const redisHealth = await checkRunControlRedisHealth(config);
   console.log(redisHealth.message);
+  if (config.runControl.enabled) {
+    const registry = await loadRunControlDoctorRegistry(config);
+    const store = createRunQueueRuntimeClient(config);
+    try {
+      await store.warmup();
+      console.log(formatRunControlDoctorReport(await buildRunControlDoctorReport({ store, registry, config })));
+    } finally {
+      await store.close();
+    }
+  }
   console.log(`node: ${process.version}`);
   console.log("secrets: will use local `secrets lease` unless env vars are set");
   console.log("discord: requires Message Content Intent and permission to create/send in threads");

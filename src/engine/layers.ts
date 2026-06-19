@@ -9,6 +9,8 @@ import type {
   ActivePointer,
   FinalizeClaim,
   QueuedRunInput,
+  RunControlJobQueueSummary,
+  RunControlWorkerRecord,
   RunJob,
   RunRecord,
   RetryLaterRecordResult,
@@ -235,6 +237,8 @@ export type RunQueueStoreLike = {
   readonly getRunLeaseTtl: (runId: string) => Promise<number>;
   readonly appendRunEvent: (runId: string, type: string, fields?: Record<string, unknown>) => Promise<string>;
   readonly recordWorkerIdle: (workerId: string) => Promise<void>;
+  readonly getJobQueueSummary: () => Promise<RunControlJobQueueSummary>;
+  readonly listWorkers: () => Promise<RunControlWorkerRecord[]>;
   readonly listRuns: () => Promise<RunRecord[]>;
   readonly listActivePointers: () => Promise<ActivePointer[]>;
 };
@@ -321,6 +325,12 @@ export function makeRunQueueService(store: RunQueueStoreLike, timeoutMs: number)
     ),
     recordWorkerIdle: Effect.fn("RunQueueService.recordWorkerIdle")((workerId) =>
       call("recordWorkerIdle", () => store.recordWorkerIdle(workerId)),
+    ),
+    getJobQueueSummary: Effect.fn("RunQueueService.getJobQueueSummary")(() =>
+      call("getJobQueueSummary", () => store.getJobQueueSummary()),
+    ),
+    listWorkers: Effect.fn("RunQueueService.listWorkers")(() =>
+      call("listWorkers", () => store.listWorkers()),
     ),
     listRuns: Effect.fn("RunQueueService.listRuns")(() =>
       call("listRuns", () => store.listRuns()),
