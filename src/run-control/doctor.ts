@@ -128,7 +128,7 @@ export function formatRunControlDoctorReport(report: RunControlDoctorReport): st
   lines.push(`workers: ${report.workers.length}`);
   if (report.workers.length === 0) lines.push("- none");
   for (const worker of report.workers) {
-    lines.push(`- ${worker.workerId} status=${worker.status ?? "unknown"} run=${worker.runId ?? "none"} updatedAt=${worker.updatedAt ?? "unknown"} ttlMs=${worker.ttlMs}`);
+    lines.push(`- ${worker.workerId} status=${worker.status ?? "unknown"} ${formatWorkerRunField(worker)} updatedAt=${worker.updatedAt ?? "unknown"} ttlMs=${worker.ttlMs}`);
   }
 
   lines.push(`outboxRuns: ${report.outboxRuns.length}`);
@@ -222,6 +222,11 @@ async function readDaemonStderr(path: string, tailLines: number): Promise<RunCon
   } finally {
     await file?.close().catch(() => undefined);
   }
+}
+
+function formatWorkerRunField(worker: RunControlWorkerRecord): string {
+  if (worker.status === "idle" && worker.runId) return `run=none staleRun=${worker.runId}`;
+  return `run=${worker.runId ?? "none"}`;
 }
 
 function formatOptionalNumber(value: number | undefined): string {

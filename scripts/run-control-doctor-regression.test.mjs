@@ -128,7 +128,10 @@ test("run-control doctor report includes active pointers, pending jobs, workers,
       lastPendingId: "1-0",
       consumers: [{ name: "worker-1", pending: 1 }],
     }),
-    listWorkers: async () => [{ workerId: "worker-1", status: "running", runId: "active", updatedAt: "2026-01-01T00:00:06.000Z", ttlMs: 1000 }],
+    listWorkers: async () => [
+      { workerId: "worker-1", status: "running", runId: "active", updatedAt: "2026-01-01T00:00:06.000Z", ttlMs: 1000 },
+      { workerId: "worker-2", status: "idle", runId: "stale-run", updatedAt: "2026-01-01T00:00:07.000Z", ttlMs: 1000 },
+    ],
     clearActiveIfMatches: async () => false,
     markTerminal: async () => undefined,
     patchRun: async () => undefined,
@@ -151,7 +154,9 @@ test("run-control doctor report includes active pointers, pending jobs, workers,
   assert.match(text, /thread-active -> active status=running worker=worker-1 leaseTtlMs=1234/);
   assert.match(text, /pendingJobs: 1 first=1-0 last=1-0/);
   assert.match(text, /consumer worker-1 pending=1/);
-  assert.match(text, /workers: 1/);
+  assert.match(text, /workers: 2/);
+  assert.match(text, /worker-1 status=running run=active/);
+  assert.match(text, /worker-2 status=idle run=none staleRun=stale-run/);
   assert.match(text, /outboxRuns: 1/);
   assert.match(text, /outbox status=succeeded chunks=2 ids=2/);
   assert.match(text, /deadLetteredRuns: 1/);
