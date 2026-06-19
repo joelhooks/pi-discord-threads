@@ -62,6 +62,10 @@ function createStore(overrides = {}) {
     heartbeatRunLease: async () => true,
     verifyRunOwnership: async () => true,
     releaseRunLease: async () => true,
+    recordRetryLater: async (runRecord, _leaseToken, _workerId, _reason, maxAttempts) => {
+      const attempts = (runRecord.retryLaterCount ?? 0) + 1;
+      return { attempts, deadLettered: attempts >= maxAttempts };
+    },
     readInputsSince: async () => [],
     patchRun: async () => run,
     acquireFinalize: async () => "acquired",
@@ -309,8 +313,9 @@ test("final outbox post followed by registry failure leaves job pending", async 
   let ackCount = 0;
   let markTerminalCount = 0;
   let finalizeCount = 0;
-  let sawRelease;
-  const releaseSeen = new Promise((resolve) => { sawRelease = resolve; });
+  let retryLaterCount = 0;
+  let sawRetryLater;
+  const retryLaterSeen = new Promise((resolve) => { sawRetryLater = resolve; });
   const store = createStore({
     getRun: async () => finalizingRun,
     acknowledgeJob: async () => { ackCount++; },
@@ -318,9 +323,10 @@ test("final outbox post followed by registry failure leaves job pending", async 
       markTerminalCount++;
       return { ...finalizingRun, status };
     },
-    releaseRunLease: async () => {
-      sawRelease();
-      return true;
+    recordRetryLater: async () => {
+      retryLaterCount++;
+      sawRetryLater();
+      return { attempts: 1, deadLettered: false };
     },
   });
   const adapter = {
@@ -333,11 +339,12 @@ test("final outbox post followed by registry failure leaves job pending", async 
   const worker = new RunControlWorker(store, adapter, createConfig(), "worker-1");
 
   worker.start();
-  await releaseSeen;
+  await retryLaterSeen;
   await worker.stop();
 
   assert.equal(finalizeCount, 1);
   assert.equal(markTerminalCount, 0);
+  assert.equal(retryLaterCount, 1);
   assert.equal(ackCount, 0);
 });
 
@@ -367,32 +374,32 @@ test("stale job for non-active run is skipped and ACKed", async () => {
 
 test("busy finalization leaves the stream job pending without logging an outside-handler failure", async () => {
   let ackCount = 0;
-  let releaseCount = 0;
-  let sawRelease;
-  const releaseSeen = new Promise((resolve) => { sawRelease = resolve; });
+  let retryLaterCount = 0;
+  let sawRetryLater;
+  const retryLaterSeen = new Promise((resolve) => { sawRetryLater = resolve; });
   const errors = [];
   const originalError = console.error;
   console.error = (message) => errors.push(String(message));
   const store = createStore({
     acquireFinalize: async () => "busy",
     acknowledgeJob: async () => { ackCount++; },
-    releaseRunLease: async () => {
-      releaseCount++;
-      sawRelease();
-      return true;
+    recordRetryLater: async () => {
+      retryLaterCount++;
+      sawRetryLater();
+      return { attempts: 1, deadLettered: false };
     },
   });
   const worker = new RunControlWorker(store, createAdapter(), createConfig(), "worker-1");
 
   try {
     worker.start();
-    await releaseSeen;
+    await retryLaterSeen;
     await worker.stop();
   } finally {
     console.error = originalError;
   }
 
-  assert.equal(releaseCount, 1);
+  assert.equal(retryLaterCount, 1);
   assert.equal(ackCount, 0);
   assert.deepEqual(errors, []);
 });
@@ -568,6 +575,7 @@ test("RunControlWorkerJobMachine leaves completed job pending when ACK ownership
       createLeaseToken: () => "lease-1",
       executeWithLease: async () => undefined,
       shouldLeavePending: (error) => error?.name === "RetryRunLaterError",
+      maxRetryLaterAttempts: 3,
     },
   });
 
@@ -578,6 +586,131 @@ test("RunControlWorkerJobMachine leaves completed job pending when ACK ownership
   assert.equal(done.context.outcome.kind, "pending");
   assert.equal(done.context.outcome.reason, "retry-later");
   assert.equal(ackCount, 0);
+});
+
+test("RunControlWorkerJobMachine records retry-later attempts and leaves job pending below threshold", async () => {
+  let current = { ...run, status: "running", retryLaterCount: 0 };
+  let ackCount = 0;
+  let terminalCount = 0;
+  const store = createStore({
+    getRun: async () => current,
+    recordRetryLater: async (_runRecord, _leaseToken, workerId, reason, maxAttempts) => {
+      const attempts = (current.retryLaterCount ?? 0) + 1;
+      current = {
+        ...current,
+        retryLaterCount: attempts,
+        lastRetryLaterReason: reason,
+        lastRetryLaterWorkerId: workerId,
+      };
+      return { attempts, deadLettered: attempts >= maxAttempts };
+    },
+    acknowledgeJob: async () => { ackCount++; },
+    markTerminal: async () => { terminalCount++; return current; },
+  });
+  const actor = createActor(runControlWorkerJobMachine, {
+    input: {
+      store,
+      job: { streamId: "1-0", runId: run.runId },
+      workerId: "worker-1",
+      createLeaseToken: () => "lease-1",
+      executeWithLease: async () => {
+        throw new RetryRunLaterError("temporary registry mismatch");
+      },
+      shouldLeavePending: (error) => error?.name === "RetryRunLaterError",
+      maxRetryLaterAttempts: 3,
+    },
+  });
+
+  actor.start();
+  const done = await waitFor(actor, (snapshot) => snapshot.status === "done", { timeout: 1_000 });
+  actor.stop();
+
+  assert.equal(done.context.outcome.kind, "pending");
+  assert.equal(done.context.outcome.reason, "retry-later");
+  assert.equal(current.retryLaterCount, 1);
+  assert.match(current.lastRetryLaterReason, /temporary registry mismatch/);
+  assert.equal(current.lastRetryLaterWorkerId, "worker-1");
+  assert.equal(ackCount, 0);
+  assert.equal(terminalCount, 0);
+});
+
+test("RunControlWorkerJobMachine surfaces retry-later persistence failures instead of masking them", async () => {
+  const persistenceError = new Error("retry counter write failed");
+  const store = createStore({
+    recordRetryLater: async () => {
+      throw persistenceError;
+    },
+  });
+  const actor = createActor(runControlWorkerJobMachine, {
+    input: {
+      store,
+      job: { streamId: "1-0", runId: run.runId },
+      workerId: "worker-1",
+      createLeaseToken: () => "lease-1",
+      executeWithLease: async () => {
+        throw new RetryRunLaterError("original retry-later reason");
+      },
+      shouldLeavePending: (error) => error?.name === "RetryRunLaterError",
+      maxRetryLaterAttempts: 3,
+    },
+  });
+
+  actor.start();
+  const done = await waitFor(actor, (snapshot) => snapshot.status === "done", { timeout: 1_000 });
+  actor.stop();
+
+  assert.equal(done.context.outcome.kind, "failed");
+  assert.equal(done.context.outcome.error, persistenceError);
+});
+
+test("RunControlWorkerJobMachine dead-letters repeated retry-later jobs and ACKs the stream entry", async () => {
+  let current = { ...run, status: "running", retryLaterCount: 2 };
+  let ackCount = 0;
+  const store = createStore({
+    getRun: async () => current,
+    recordRetryLater: async (_runRecord, _leaseToken, workerId, reason, maxAttempts) => {
+      const attempts = (current.retryLaterCount ?? 0) + 1;
+      const deadLettered = attempts >= maxAttempts;
+      current = {
+        ...current,
+        retryLaterCount: attempts,
+        lastRetryLaterReason: reason,
+        lastRetryLaterWorkerId: workerId,
+        ...(deadLettered ? {
+          status: "interrupted",
+          deadLetterReason: `dead-lettered: ${reason}`,
+          deadLetteredByWorkerId: workerId,
+        } : {}),
+      };
+      return { attempts, deadLettered };
+    },
+    acknowledgeJob: async () => { ackCount++; },
+  });
+  const actor = createActor(runControlWorkerJobMachine, {
+    input: {
+      store,
+      job: { streamId: "1-0", runId: run.runId },
+      workerId: "worker-1",
+      createLeaseToken: () => "lease-1",
+      executeWithLease: async () => {
+        throw new RetryRunLaterError("registry idle patch still failing");
+      },
+      shouldLeavePending: (error) => error?.name === "RetryRunLaterError",
+      maxRetryLaterAttempts: 3,
+    },
+  });
+
+  actor.start();
+  const done = await waitFor(actor, (snapshot) => snapshot.status === "done", { timeout: 1_000 });
+  actor.stop();
+
+  assert.equal(done.context.outcome.kind, "acked");
+  assert.equal(done.context.outcome.reason, "dead-lettered");
+  assert.equal(current.status, "interrupted");
+  assert.equal(current.retryLaterCount, 3);
+  assert.match(current.deadLetterReason, /registry idle patch still failing/);
+  assert.equal(current.deadLetteredByWorkerId, "worker-1");
+  assert.equal(ackCount, 1);
 });
 
 test("RunControlLeasedRunMachine exposes execution and finalization as machine state", async () => {
@@ -675,6 +808,7 @@ test("RunControlWorkerLaneMachine exposes ensure/dequeue/idle/stop lifecycle as 
       createLeaseToken: () => "lease-1",
       executeWithLease: async () => undefined,
       shouldLeavePending: () => false,
+      maxRetryLaterAttempts: 3,
       log: () => undefined,
       warn: (message) => warnings.push(message),
       error: () => undefined,
@@ -726,6 +860,7 @@ test("RunControlWorkerLaneMachine backs off and re-ensures after dequeue failure
       createLeaseToken: () => "lease-1",
       executeWithLease: async () => undefined,
       shouldLeavePending: () => false,
+      maxRetryLaterAttempts: 3,
       log: () => undefined,
       warn: (message) => warnings.push(message),
       error: () => undefined,
@@ -761,6 +896,7 @@ test("RunControlWorkerJobMachine exposes claim-to-execute lifecycle as machine s
       createLeaseToken: () => "lease-1",
       executeWithLease: async () => undefined,
       shouldLeavePending: () => false,
+      maxRetryLaterAttempts: 3,
     },
   });
   actor.subscribe((snapshot) => states.push(snapshot.value));

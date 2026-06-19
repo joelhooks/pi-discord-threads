@@ -187,6 +187,8 @@ export function createRunQueueRuntimeClient(config: AppConfig): RunQueueRuntimeC
     verifyRunOwnership: (runId: string, logicalThreadId: string, leaseToken: string) =>
       withQueue((queue) => queue.verifyRunOwnership(runId, logicalThreadId, leaseToken)),
     releaseRunLease: (runId: string, leaseToken: string) => withQueue((queue) => queue.releaseRunLease(runId, leaseToken)),
+    recordRetryLater: (run: RunRecord, leaseToken: string, workerId: string, reason: string, maxAttempts: number) =>
+      withQueue((queue) => queue.recordRetryLater(run, leaseToken, workerId, reason, maxAttempts)),
     acquireFinalize: (runId: string, leaseToken: string) => withQueue((queue) => queue.acquireFinalize(runId, leaseToken)),
     completeFinalize: (runId: string, leaseToken: string) => withQueue((queue) => queue.completeFinalize(runId, leaseToken)),
     getRunLeaseTtl: (runId: string) => withQueue((queue) => queue.getRunLeaseTtl(runId)),

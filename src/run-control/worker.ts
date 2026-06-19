@@ -50,6 +50,7 @@ export class RunControlWorker {
             warn: (message) => console.warn(message),
           }),
           shouldLeavePending: isRetryRunLaterError,
+          maxRetryLaterAttempts: this.config.runControl.maxRetryLaterAttempts,
           log: (message) => console.log(message),
           warn: (message) => console.warn(message),
           error: (message) => console.error(message),

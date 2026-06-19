@@ -12,6 +12,7 @@ export interface RunControlWorkerLaneMachineInput {
   createLeaseToken: () => string;
   executeWithLease(run: RunRecord, leaseToken: string, workerId: string): Promise<void>;
   shouldLeavePending(error: unknown): boolean;
+  maxRetryLaterAttempts: number;
   log(message: string): void;
   warn(message: string): void;
   error(message: string): void;
@@ -73,6 +74,7 @@ export const runControlWorkerLaneMachine = setup({
         createLeaseToken: input.createLeaseToken,
         executeWithLease: input.executeWithLease,
         shouldLeavePending: input.shouldLeavePending,
+        maxRetryLaterAttempts: input.maxRetryLaterAttempts,
       });
     }),
   },

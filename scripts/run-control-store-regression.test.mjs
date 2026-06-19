@@ -87,6 +87,44 @@ class FakeRedis {
       this.hashes.set(runKey, hash);
       return 1;
     }
+    if (script.includes("'lastRetryLaterAt'")) {
+      const activeKey = args[3];
+      const leaseKey = args[4];
+      const runKey = args[5];
+      const runId = args[6];
+      const leaseToken = args[7];
+      const workerId = args[8];
+      const now = args[9];
+      const reason = args[10];
+      const maxAttempts = Number(args[11]);
+      if (this.strings.get(activeKey) !== runId) return ["lost", "active"];
+      if (this.strings.get(leaseKey) !== leaseToken) return ["lost", "lease"];
+      const hash = this.hashes.get(runKey) ?? new Map();
+      const status = hash.get("status");
+      if (status !== "queued" && status !== "running" && status !== "finalizing") return ["lost", status ?? "missing"];
+      const attempts = Number(hash.get("retryLaterCount") ?? "0") + 1;
+      hash.set("retryLaterCount", String(attempts));
+      hash.set("lastRetryLaterAt", now);
+      hash.set("lastRetryLaterReason", reason);
+      hash.set("lastRetryLaterWorkerId", workerId);
+      hash.set("updatedAt", now);
+      if (attempts >= maxAttempts) {
+        const deadLetterReason = `run-control dead-lettered ${runId} after ${attempts} retry-later attempt(s): ${reason}`;
+        hash.set("status", "interrupted");
+        hash.set("finalizedAt", now);
+        hash.set("deadLetteredAt", now);
+        hash.set("deadLetterReason", deadLetterReason);
+        hash.set("deadLetteredByWorkerId", workerId);
+        hash.set("error", deadLetterReason);
+        this.strings.delete(activeKey);
+        this.strings.delete(leaseKey);
+        this.hashes.set(runKey, hash);
+        return ["dead_lettered", String(attempts)];
+      }
+      this.strings.delete(leaseKey);
+      this.hashes.set(runKey, hash);
+      return ["retry_later", String(attempts)];
+    }
     if (script.includes("redis.call('PEXPIRE', KEYS[2], ARGV[3])")) {
       const activeKey = args[3];
       const leaseKey = args[4];
@@ -217,6 +255,88 @@ test("finalizing active pointer is not cleared or queueable", async () => {
 
   assert.equal(queueable, undefined);
   assert.equal(fake.strings.get("pi-discord-threads:thread:thread-1:active"), run.runId);
+});
+
+test("patchRun round-trips retry-later and dead-letter metadata", async () => {
+  const { store, fake } = createStore();
+  const run = createRun("run-retry-metadata");
+  await store.tryEnqueueRun(run);
+
+  await store.patchRun(run.runId, {
+    retryLaterCount: 3,
+    lastRetryLaterAt: new Date(1).toISOString(),
+    lastRetryLaterReason: "registry idle patch failed",
+    lastRetryLaterWorkerId: "worker-1",
+    deadLetteredAt: new Date(2).toISOString(),
+    deadLetterReason: "dead-lettered after retries",
+    deadLetteredByWorkerId: "worker-1",
+  });
+
+  const persisted = await store.getRun(run.runId);
+  assert.equal(persisted.retryLaterCount, 3);
+  assert.equal(persisted.lastRetryLaterReason, "registry idle patch failed");
+  assert.equal(persisted.deadLetterReason, "dead-lettered after retries");
+  assert.equal(fake.hashes.get("pi-discord-threads:runs:run-retry-metadata").get("retryLaterCount"), "3");
+});
+
+test("recordRetryLater increments attempts and releases the lease below threshold", async () => {
+  const { store, fake } = createStore();
+  const run = createRun("run-retry-later", "running");
+  fake.strings.set("pi-discord-threads:thread:thread-1:active", run.runId);
+  fake.strings.set("pi-discord-threads:leases:run:run-retry-later", "lease-1");
+  fake.hashes.set("pi-discord-threads:runs:run-retry-later", new Map(Object.entries({
+    ...run,
+    imagesJson: "[]",
+  })));
+
+  const result = await store.recordRetryLater(run, "lease-1", "worker-1", "registry mismatch", 3);
+  const persisted = await store.getRun(run.runId);
+
+  assert.deepEqual(result, { attempts: 1, deadLettered: false });
+  assert.equal(persisted.retryLaterCount, 1);
+  assert.equal(persisted.lastRetryLaterReason, "registry mismatch");
+  assert.equal(fake.strings.get("pi-discord-threads:thread:thread-1:active"), run.runId);
+  assert.equal(fake.strings.has("pi-discord-threads:leases:run:run-retry-later"), false);
+});
+
+test("recordRetryLater dead-letters atomically before releasing ownership", async () => {
+  const { store, fake } = createStore();
+  const run = createRun("run-dead-letter", "running");
+  fake.strings.set("pi-discord-threads:thread:thread-1:active", run.runId);
+  fake.strings.set("pi-discord-threads:leases:run:run-dead-letter", "lease-1");
+  fake.hashes.set("pi-discord-threads:runs:run-dead-letter", new Map(Object.entries({
+    ...run,
+    imagesJson: "[]",
+    retryLaterCount: "2",
+  })));
+
+  const result = await store.recordRetryLater(run, "lease-1", "worker-1", "registry mismatch", 3);
+  const persisted = await store.getRun(run.runId);
+
+  assert.deepEqual(result, { attempts: 3, deadLettered: true });
+  assert.equal(persisted.status, "interrupted");
+  assert.equal(persisted.retryLaterCount, 3);
+  assert.match(persisted.deadLetterReason, /registry mismatch/);
+  assert.equal(fake.strings.has("pi-discord-threads:thread:thread-1:active"), false);
+  assert.equal(fake.strings.has("pi-discord-threads:leases:run:run-dead-letter"), false);
+});
+
+test("recordRetryLater refuses to count attempts after ownership is gone", async () => {
+  const { store, fake } = createStore();
+  const run = createRun("run-lost-retry", "running");
+  fake.strings.set("pi-discord-threads:thread:thread-1:active", run.runId);
+  fake.strings.set("pi-discord-threads:leases:run:run-lost-retry", "someone-else");
+  fake.hashes.set("pi-discord-threads:runs:run-lost-retry", new Map(Object.entries({
+    ...run,
+    imagesJson: "[]",
+  })));
+
+  await assert.rejects(() => store.recordRetryLater(run, "lease-1", "worker-1", "registry mismatch", 3), /ownership lost/);
+
+  const persisted = await store.getRun(run.runId);
+  assert.equal(persisted.retryLaterCount, undefined);
+  assert.equal(fake.strings.get("pi-discord-threads:thread:thread-1:active"), run.runId);
+  assert.equal(fake.strings.get("pi-discord-threads:leases:run:run-lost-retry"), "someone-else");
 });
 
 test("claimRunLease atomically verifies the active pointer before taking the lease", async () => {

@@ -11,6 +11,7 @@ import type {
   QueuedRunInput,
   RunJob,
   RunRecord,
+  RetryLaterRecordResult,
 } from "../run-control/types.js";
 import { Effect, Layer, Option, Scope } from "effect";
 import {
@@ -222,6 +223,13 @@ export type RunQueueStoreLike = {
   readonly heartbeatRunLease: (runId: string, logicalThreadId: string, leaseToken: string, workerId: string) => Promise<boolean>;
   readonly verifyRunOwnership: (runId: string, logicalThreadId: string, leaseToken: string) => Promise<boolean>;
   readonly releaseRunLease: (runId: string, leaseToken: string) => Promise<boolean>;
+  readonly recordRetryLater: (
+    run: RunRecord,
+    leaseToken: string,
+    workerId: string,
+    reason: string,
+    maxAttempts: number,
+  ) => Promise<RetryLaterRecordResult>;
   readonly acquireFinalize: (runId: string, leaseToken: string) => Promise<FinalizeClaim>;
   readonly completeFinalize: (runId: string, leaseToken: string) => Promise<boolean>;
   readonly getRunLeaseTtl: (runId: string) => Promise<number>;
@@ -295,6 +303,9 @@ export function makeRunQueueService(store: RunQueueStoreLike, timeoutMs: number)
     ),
     releaseRunLease: Effect.fn("RunQueueService.releaseRunLease")((runId, leaseToken) =>
       call("releaseRunLease", () => store.releaseRunLease(runId, leaseToken)),
+    ),
+    recordRetryLater: Effect.fn("RunQueueService.recordRetryLater")((run, leaseToken, workerId, reason, maxAttempts) =>
+      call("recordRetryLater", () => store.recordRetryLater(run, leaseToken, workerId, reason, maxAttempts)),
     ),
     acquireFinalize: Effect.fn("RunQueueService.acquireFinalize")((runId, leaseToken) =>
       call("acquireFinalize", () => store.acquireFinalize(runId, leaseToken)),

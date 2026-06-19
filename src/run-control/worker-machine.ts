@@ -5,7 +5,7 @@ import type { RunControlStorePort, RunJob, RunRecord } from "./types.js";
 import { isTerminalRunStatus } from "./types.js";
 
 export type RunControlWorkerJobOutcome =
-  | { kind: "acked"; reason: "missing-run" | "terminal-run" | "stale-job" | "completed" }
+  | { kind: "acked"; reason: "missing-run" | "terminal-run" | "stale-job" | "completed" | "dead-lettered" }
   | { kind: "pending"; reason: "lease-busy" | "retry-later" }
   | { kind: "failed"; reason: "handler-error"; error: Error };
 
@@ -16,6 +16,7 @@ export interface RunControlWorkerJobMachineInput {
   createLeaseToken: () => string;
   executeWithLease(run: RunRecord, leaseToken: string, workerId: string): Promise<void>;
   shouldLeavePending(error: unknown): boolean;
+  maxRetryLaterAttempts: number;
 }
 
 export interface RunControlWorkerJobMachineContext extends RunControlWorkerJobMachineInput {
@@ -32,6 +33,11 @@ type ErrorEvent = { error: unknown };
 interface LeaseClaimResult {
   claimed: boolean;
   leaseToken: string;
+}
+
+interface RetryLaterDecision {
+  attempts: number;
+  deadLettered: boolean;
 }
 
 function outputFrom<T>(event: unknown): T {
@@ -61,6 +67,22 @@ async function releaseLease(context: RunControlWorkerJobMachineContext): Promise
   const run = requireRun(context);
   const leaseToken = requireLeaseToken(context);
   await context.store.releaseRunLease(run.runId, leaseToken).catch(() => undefined);
+}
+
+async function recordRetryLaterAndRelease(context: RunControlWorkerJobMachineContext): Promise<RetryLaterDecision> {
+  const run = requireRun(context);
+  const leaseToken = requireLeaseToken(context);
+  const error = normalizeError(context.lastError);
+  const reason = error.message || formatUnknownError(error);
+  const decision = await context.store.recordRetryLater(
+    run,
+    leaseToken,
+    context.workerId,
+    reason,
+    context.maxRetryLaterAttempts,
+  );
+  if (decision.deadLettered) await context.store.acknowledgeJob(context.job);
+  return decision;
 }
 
 export const runControlWorkerJobMachine = setup({
@@ -115,6 +137,9 @@ export const runControlWorkerJobMachine = setup({
       }
       await input.store.acknowledgeJob(input.job);
     }),
+    recordRetryLaterAndRelease: fromPromise<RetryLaterDecision, RunControlWorkerJobMachineContext>(async ({ input }) => {
+      return recordRetryLaterAndRelease(input);
+    }),
     releaseLeasePending: fromPromise<void, RunControlWorkerJobMachineContext>(async ({ input }) => {
       await releaseLease(input);
     }),
@@ -147,6 +172,9 @@ export const runControlWorkerJobMachine = setup({
     ackedCompletedRun: assign({
       outcome: () => ({ kind: "acked", reason: "completed" } as const),
     }),
+    ackedDeadLetteredRun: assign({
+      outcome: () => ({ kind: "acked", reason: "dead-lettered" } as const),
+    }),
     pendingRetryLater: assign({
       outcome: () => ({ kind: "pending", reason: "retry-later" } as const),
     }),
@@ -163,6 +191,7 @@ export const runControlWorkerJobMachine = setup({
     activeRunMismatch: ({ context }) => context.activeRunId !== context.run?.runId,
     leaseClaimed: ({ event }) => outputFrom<LeaseClaimResult>(event).claimed,
     shouldLeavePending: ({ context, event }) => context.shouldLeavePending(errorFrom(event)),
+    retryLaterDeadLettered: ({ event }) => outputFrom<RetryLaterDecision>(event).deadLettered,
   },
 }).createMachine({
   id: "runControlWorkerJob",
@@ -299,7 +328,7 @@ export const runControlWorkerJobMachine = setup({
         onError: [
           {
             guard: "shouldLeavePending",
-            target: "releasingLeaseAndLeavingPending",
+            target: "recordingRetryLater",
             actions: "rememberError",
           },
           {
@@ -320,8 +349,8 @@ export const runControlWorkerJobMachine = setup({
         onError: [
           {
             guard: "shouldLeavePending",
-            target: "done",
-            actions: "pendingRetryLater",
+            target: "recordingRetryLater",
+            actions: "rememberError",
           },
           {
             target: "done",
@@ -330,18 +359,32 @@ export const runControlWorkerJobMachine = setup({
         ],
       },
     },
-    releasingLeaseAndLeavingPending: {
+    recordingRetryLater: {
       invoke: {
-        src: "releaseLeasePending",
+        src: "recordRetryLaterAndRelease",
         input: ({ context }) => context,
-        onDone: {
-          target: "done",
-          actions: "pendingRetryLater",
-        },
-        onError: {
-          target: "done",
-          actions: "failedFromRememberedError",
-        },
+        onDone: [
+          {
+            guard: "retryLaterDeadLettered",
+            target: "done",
+            actions: "ackedDeadLetteredRun",
+          },
+          {
+            target: "done",
+            actions: "pendingRetryLater",
+          },
+        ],
+        onError: [
+          {
+            guard: "shouldLeavePending",
+            target: "done",
+            actions: "pendingRetryLater",
+          },
+          {
+            target: "done",
+            actions: "failedFromError",
+          },
+        ],
       },
     },
     releasingLeaseAfterFailure: {

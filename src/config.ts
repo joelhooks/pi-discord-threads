@@ -19,6 +19,7 @@ export interface RunControlConfig {
   reconcileIntervalMs: number;
   commandTimeoutMs: number;
   maxConcurrentRuns: number;
+  maxRetryLaterAttempts: number;
 }
 
 export interface DiscordContextChannelConfig {
@@ -203,6 +204,7 @@ export function defaultConfig(): AppConfig {
       reconcileIntervalMs: 60_000,
       commandTimeoutMs: 5_000,
       maxConcurrentRuns: 4,
+      maxRetryLaterAttempts: 12,
     },
   };
 }
@@ -376,6 +378,7 @@ function normalizeRunControl(runControl: RunControlConfig | undefined): RunContr
     reconcileIntervalMs: clampNumber(merged.reconcileIntervalMs, 5_000, 60 * 60_000, defaults.reconcileIntervalMs),
     commandTimeoutMs: clampNumber(merged.commandTimeoutMs, 1_000, 60_000, defaults.commandTimeoutMs),
     maxConcurrentRuns: Math.floor(clampNumber(merged.maxConcurrentRuns, 1, 16, defaults.maxConcurrentRuns)),
+    maxRetryLaterAttempts: Math.floor(clampNumber(merged.maxRetryLaterAttempts, 1, 100, defaults.maxRetryLaterAttempts)),
   };
 }
 

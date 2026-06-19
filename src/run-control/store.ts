@@ -1,11 +1,13 @@
 import type { AppConfig } from "../config.js";
 import type { RedisCommandClient } from "./redis-client.js";
+import { RetryRunLaterError } from "./errors.js";
 import {
   type ActivePointer,
   type FinalizeClaim,
   type QueuedRunInput,
   type RunJob,
   type RunRecord,
+  type RetryLaterRecordResult,
   isTerminalRunStatus,
 } from "./types.js";
 
@@ -82,6 +84,52 @@ if type(hset) == 'table' and hset['err'] then
   return {'error', hset['err']}
 end
 return 1
+`;
+
+const RECORD_RETRY_LATER_SCRIPT = `
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return {'lost', 'active'}
+end
+if redis.call('GET', KEYS[2]) ~= ARGV[2] then
+  return {'lost', 'lease'}
+end
+local status = redis.call('HGET', KEYS[3], 'status')
+if status ~= 'queued' and status ~= 'running' and status ~= 'finalizing' then
+  return {'lost', status or 'missing'}
+end
+local attempts = redis.pcall('HINCRBY', KEYS[3], 'retryLaterCount', 1)
+if type(attempts) == 'table' and attempts['err'] then
+  return {'error', attempts['err']}
+end
+local hset = redis.pcall('HSET', KEYS[3],
+  'lastRetryLaterAt', ARGV[4],
+  'lastRetryLaterReason', ARGV[5],
+  'lastRetryLaterWorkerId', ARGV[3],
+  'updatedAt', ARGV[4]
+)
+if type(hset) == 'table' and hset['err'] then
+  return {'error', hset['err']}
+end
+if attempts >= tonumber(ARGV[6]) then
+  local deadLetterReason = 'run-control dead-lettered ' .. ARGV[1] .. ' after ' .. attempts .. ' retry-later attempt(s): ' .. ARGV[5]
+  local terminal = redis.pcall('HSET', KEYS[3],
+    'status', 'interrupted',
+    'updatedAt', ARGV[4],
+    'finalizedAt', ARGV[4],
+    'deadLetteredAt', ARGV[4],
+    'deadLetterReason', deadLetterReason,
+    'deadLetteredByWorkerId', ARGV[3],
+    'error', deadLetterReason
+  )
+  if type(terminal) == 'table' and terminal['err'] then
+    return {'error', terminal['err']}
+  end
+  redis.call('DEL', KEYS[1])
+  redis.call('DEL', KEYS[2])
+  return {'dead_lettered', tostring(attempts)}
+end
+redis.call('DEL', KEYS[2])
+return {'retry_later', tostring(attempts)}
 `;
 
 export class RunControlStore {
@@ -390,6 +438,50 @@ export class RunControlStore {
     return Number(result) === 1;
   }
 
+  async recordRetryLater(run: RunRecord, leaseToken: string, workerId: string, reason: string, maxAttempts: number): Promise<RetryLaterRecordResult> {
+    const now = new Date().toISOString();
+    const boundedMaxAttempts = String(Math.max(1, Math.floor(maxAttempts)));
+    const reply = await this.command([
+      "EVAL",
+      RECORD_RETRY_LATER_SCRIPT,
+      "3",
+      this.keys.active(run.logicalThreadId),
+      this.keys.runLease(run.runId),
+      this.keys.run(run.runId),
+      run.runId,
+      leaseToken,
+      workerId,
+      now,
+      reason,
+      boundedMaxAttempts,
+    ]);
+    const [status, attemptsOrReason] = parseEvalArray(reply);
+    if (status === "retry_later" || status === "dead_lettered") {
+      const attempts = Number(attemptsOrReason);
+      await this.appendRunEvent(run.runId, "retry_later", {
+        logicalThreadId: run.logicalThreadId,
+        workerId,
+        attempts,
+        maxAttempts: Number(boundedMaxAttempts),
+        reason,
+      }).catch(() => undefined);
+      if (status === "dead_lettered") {
+        await this.appendRunEvent(run.runId, "dead_lettered", {
+          logicalThreadId: run.logicalThreadId,
+          workerId,
+          attempts,
+          maxAttempts: Number(boundedMaxAttempts),
+          reason,
+        }).catch(() => undefined);
+      }
+      return { attempts, deadLettered: status === "dead_lettered" };
+    }
+    if (status === "error") {
+      throw new Error(`Redis retry-later record failed for ${run.runId}: ${attemptsOrReason || "unknown error"}`);
+    }
+    throw new RetryRunLaterError(`run-control ownership lost before retry-later record for ${run.runId}: ${attemptsOrReason || status || "unknown"}`);
+  }
+
   async acquireFinalize(runId: string, leaseToken: string): Promise<FinalizeClaim> {
     const key = this.keys.finalize(runId);
     const existing = valueToString(await this.command(["GET", key]));
@@ -579,6 +671,13 @@ function runRecordToHash(record: Partial<RunRecord>): Record<string, string | un
     leaseToken: record.leaseToken,
     leaseExpiresAt: record.leaseExpiresAt,
     leaseGeneration: record.leaseGeneration === undefined ? undefined : String(record.leaseGeneration),
+    retryLaterCount: record.retryLaterCount === undefined ? undefined : String(record.retryLaterCount),
+    lastRetryLaterAt: record.lastRetryLaterAt,
+    lastRetryLaterReason: record.lastRetryLaterReason,
+    lastRetryLaterWorkerId: record.lastRetryLaterWorkerId,
+    deadLetteredAt: record.deadLetteredAt,
+    deadLetterReason: record.deadLetterReason,
+    deadLetteredByWorkerId: record.deadLetteredByWorkerId,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     startedAt: record.startedAt,
@@ -616,6 +715,13 @@ function runRecordFromHash(hash: Record<string, string>): RunRecord {
     leaseToken: hash.leaseToken || undefined,
     leaseExpiresAt: hash.leaseExpiresAt || undefined,
     leaseGeneration: hash.leaseGeneration ? Number(hash.leaseGeneration) : undefined,
+    retryLaterCount: hash.retryLaterCount ? Number(hash.retryLaterCount) : undefined,
+    lastRetryLaterAt: hash.lastRetryLaterAt || undefined,
+    lastRetryLaterReason: hash.lastRetryLaterReason || undefined,
+    lastRetryLaterWorkerId: hash.lastRetryLaterWorkerId || undefined,
+    deadLetteredAt: hash.deadLetteredAt || undefined,
+    deadLetterReason: hash.deadLetterReason || undefined,
+    deadLetteredByWorkerId: hash.deadLetteredByWorkerId || undefined,
     createdAt: hash.createdAt,
     updatedAt: hash.updatedAt,
     startedAt: hash.startedAt || undefined,

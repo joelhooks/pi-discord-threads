@@ -14,6 +14,7 @@ import type {
   QueuedRunInput,
   RunJob,
   RunRecord,
+  RetryLaterRecordResult,
 } from "../run-control/types.js";
 import { Context, Effect, Option } from "effect";
 import type {
@@ -103,6 +104,13 @@ export interface RunQueueServiceShape {
   ) => Effect.Effect<boolean, RunQueueError>;
   readonly verifyRunOwnership: (runId: string, logicalThreadId: string, leaseToken: string) => Effect.Effect<boolean, RunQueueError>;
   readonly releaseRunLease: (runId: string, leaseToken: string) => Effect.Effect<boolean, RunQueueError>;
+  readonly recordRetryLater: (
+    run: RunRecord,
+    leaseToken: string,
+    workerId: string,
+    reason: string,
+    maxAttempts: number,
+  ) => Effect.Effect<RetryLaterRecordResult, RunQueueError>;
   readonly acquireFinalize: (runId: string, leaseToken: string) => Effect.Effect<FinalizeClaim, RunQueueError>;
   readonly completeFinalize: (runId: string, leaseToken: string) => Effect.Effect<boolean, RunQueueError>;
   readonly getRunLeaseTtl: (runId: string) => Effect.Effect<number, RunQueueError>;

@@ -41,6 +41,13 @@ export interface RunRecord {
   leaseToken?: string;
   leaseExpiresAt?: string;
   leaseGeneration?: number;
+  retryLaterCount?: number;
+  lastRetryLaterAt?: string;
+  lastRetryLaterReason?: string;
+  lastRetryLaterWorkerId?: string;
+  deadLetteredAt?: string;
+  deadLetterReason?: string;
+  deadLetteredByWorkerId?: string;
   createdAt: string;
   updatedAt: string;
   startedAt?: string;
@@ -84,6 +91,11 @@ export interface RunControlExecutionOptions {
   signal: AbortSignal;
 }
 
+export interface RetryLaterRecordResult {
+  attempts: number;
+  deadLettered: boolean;
+}
+
 export interface ActivePointer {
   logicalThreadId: string;
   runId: string;
@@ -118,6 +130,7 @@ export interface RunControlStorePort {
   heartbeatRunLease(runId: string, logicalThreadId: string, leaseToken: string, workerId: string): Promise<boolean>;
   verifyRunOwnership(runId: string, logicalThreadId: string, leaseToken: string): Promise<boolean>;
   releaseRunLease(runId: string, leaseToken: string): Promise<boolean>;
+  recordRetryLater(run: RunRecord, leaseToken: string, workerId: string, reason: string, maxAttempts: number): Promise<RetryLaterRecordResult>;
   acquireFinalize(runId: string, leaseToken: string): Promise<FinalizeClaim>;
   completeFinalize(runId: string, leaseToken: string): Promise<boolean>;
   getRunLeaseTtl(runId: string): Promise<number>;
