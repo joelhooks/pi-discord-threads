@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import { execFile } from "node:child_process";
-import { appendFile, chmod, copyFile, cp, mkdir, mkdtemp, readdir, readFile, readlink, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { appendFile, chmod, copyFile, cp, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
@@ -54,7 +55,7 @@ export interface ReleaseSnapshotManifest {
   artifacts: ReleaseArtifactFlags;
 }
 
-export interface ReleaseLedgerEntry {
+export interface ReleaseSnapshotLedgerEntry {
   event: "snapshot";
   version: typeof manifestVersion;
   releaseId: string;
@@ -71,6 +72,33 @@ export interface ReleaseLedgerEntry {
   artifacts: ReleaseArtifactFlags;
 }
 
+export interface ReleaseActivationLedgerEntry {
+  event: "activate";
+  version: typeof manifestVersion;
+  releaseId: string;
+  previousReleaseId?: string;
+  createdAt: string;
+  releasePath: string;
+  currentPath: string;
+  entryPath: string;
+  commit: string;
+  shortCommit: string;
+  branch: string;
+  distSha256: string;
+}
+
+export interface ReleaseConfigRestoreLedgerEntry {
+  event: "config-restore";
+  version: typeof manifestVersion;
+  releaseId: string;
+  createdAt: string;
+  configPath: string;
+  backupPath: string;
+  releasePath: string;
+}
+
+export type ReleaseLedgerEntry = ReleaseSnapshotLedgerEntry | ReleaseActivationLedgerEntry | ReleaseConfigRestoreLedgerEntry;
+
 export interface ReleaseSnapshotResult {
   releaseId: string;
   releasePath: string;
@@ -79,7 +107,59 @@ export interface ReleaseSnapshotResult {
   manifest: ReleaseSnapshotManifest;
 }
 
-export interface ListedReleaseSnapshot extends ReleaseLedgerEntry {
+export interface ResolveReleaseSnapshotOptions {
+  config: AppConfig;
+  target: string;
+}
+
+export interface ResolvedReleaseSnapshot {
+  releaseId: string;
+  releasePath: string;
+  manifestPath: string;
+  manifest: ReleaseSnapshotManifest;
+}
+
+export interface ActivateReleaseOptions extends ResolveReleaseSnapshotOptions {
+  projectRoot?: string;
+  now?: Date;
+}
+
+export interface ReleaseActivationResult {
+  release: ResolvedReleaseSnapshot;
+  previousReleaseId?: string;
+  currentPath: string;
+  entryPath: string;
+  nodeModulesLinkPath: string;
+  ledgerPath: string;
+}
+
+export interface ReleaseConfigRestoreOptions extends ResolveReleaseSnapshotOptions {
+  configPath: string;
+  now?: Date;
+}
+
+export interface ReleaseConfigRestoreResult {
+  release: ResolvedReleaseSnapshot;
+  configPath: string;
+  backupPath: string;
+  restoredFrom: string;
+  ledgerPath: string;
+}
+
+export interface ReleaseCanaryOptions extends ResolveReleaseSnapshotOptions {
+  configPath: string;
+  projectRoot?: string;
+  timeoutMs?: number;
+}
+
+export interface ReleaseCanaryResult {
+  release: ResolvedReleaseSnapshot;
+  entryPath: string;
+  distSha256: string;
+  doctorOutput: string;
+}
+
+export interface ListedReleaseSnapshot extends ReleaseSnapshotLedgerEntry {
   releasePath: string;
   artifactExists: ReleaseArtifactFlags;
 }
@@ -171,8 +251,7 @@ export async function createReleaseSnapshot(options: ReleaseSnapshotOptions): Pr
 
   const ledgerEntry = manifestToLedgerEntry(manifest, releasePath);
   try {
-    await appendFile(ledgerPath, `${JSON.stringify(ledgerEntry)}\n`, { encoding: "utf8", mode: privateFileMode });
-    await chmod(ledgerPath, privateFileMode);
+    await appendReleaseLedgerEntry(ledgerPath, ledgerEntry);
   } catch (error) {
     if (releasePathOwned) await rm(releasePath, { recursive: true, force: true }).catch(() => undefined);
     throw error;
@@ -191,7 +270,7 @@ export async function listReleaseSnapshots(options: ListReleaseSnapshotsOptions)
   const releasesDir = releaseSnapshotsDir(options.config);
   const entries = await readLedgerEntries(releaseLedgerPath(options.config));
   const snapshots = entries
-    .filter((entry) => entry.event === "snapshot")
+    .filter(isReleaseSnapshotLedgerEntry)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.releaseId.localeCompare(a.releaseId));
 
   return Promise.all(snapshots.map(async (entry) => {
@@ -209,6 +288,153 @@ export async function listReleaseSnapshots(options: ListReleaseSnapshotsOptions)
   }));
 }
 
+export async function resolveReleaseSnapshot(options: ResolveReleaseSnapshotOptions): Promise<ResolvedReleaseSnapshot> {
+  const target = options.target.trim();
+  if (!target) throw new Error("Release target is required");
+  const releaseTarget = target === "current" ? await requireCurrentReleaseId(options.config) : target;
+  const snapshots = (await readLedgerEntries(releaseLedgerPath(options.config))).filter(isReleaseSnapshotLedgerEntry);
+  const exact = snapshots.filter((entry) => entry.releaseId === releaseTarget);
+  const matches = exact.length > 0 ? exact : snapshots.filter((entry) =>
+    entry.releaseId.startsWith(releaseTarget) ||
+    entry.shortCommit === releaseTarget ||
+    entry.commit === releaseTarget ||
+    entry.shortCommit.startsWith(releaseTarget) ||
+    entry.commit.startsWith(releaseTarget)
+  );
+
+  if (matches.length === 0) throw new Error(`No release snapshot matches: ${target}`);
+  const uniqueByReleaseId = [...new Map(matches.map((entry) => [entry.releaseId, entry])).values()];
+  if (uniqueByReleaseId.length > 1) {
+    throw new Error(`Release target is ambiguous: ${target} matches ${uniqueByReleaseId.map((entry) => entry.releaseId).join(", ")}`);
+  }
+
+  const snapshot = uniqueByReleaseId[0];
+  const releasesDir = releaseSnapshotsDir(options.config);
+  const releasePath = join(releasesDir, snapshot.releaseId);
+  assertPathInside(releasesDir, releasePath, "release snapshot");
+  const manifestPath = join(releasePath, "manifest.json");
+  const manifest = await readReleaseManifest(manifestPath);
+  if (manifest.releaseId !== snapshot.releaseId) {
+    throw new Error(`Release manifest id mismatch: ${manifest.releaseId} !== ${snapshot.releaseId}`);
+  }
+  if (manifest.version !== manifestVersion) {
+    throw new Error(`Unsupported release manifest version: ${manifest.version}`);
+  }
+
+  return {
+    releaseId: snapshot.releaseId,
+    releasePath,
+    manifestPath,
+    manifest,
+  };
+}
+
+export async function activateRelease(options: ActivateReleaseOptions): Promise<ReleaseActivationResult> {
+  const release = await resolveReleaseSnapshot(options);
+  await assertReleaseRunnable(release);
+  await assertReleaseDistDigest(release);
+  const projectRoot = resolve(options.projectRoot ?? resolveProjectRoot());
+  const nodeModulesLinkPath = await ensureReleaseNodeModulesLink({ config: options.config, projectRoot });
+  const previousReleaseId = await readCurrentReleaseId(options.config);
+  const currentPath = releaseCurrentPath(options.config);
+  await writeCurrentReleaseSymlink(options.config, release.releaseId);
+  const ledgerPath = releaseLedgerPath(options.config);
+  await appendReleaseLedgerEntry(ledgerPath, {
+    event: "activate",
+    version: manifestVersion,
+    releaseId: release.releaseId,
+    ...(previousReleaseId ? { previousReleaseId } : {}),
+    createdAt: (options.now ?? new Date()).toISOString(),
+    releasePath: release.releasePath,
+    currentPath,
+    entryPath: releaseCurrentEntrypoint(options.config),
+    commit: release.manifest.commit,
+    shortCommit: release.manifest.shortCommit,
+    branch: release.manifest.branch,
+    distSha256: release.manifest.distSha256,
+  });
+
+  return {
+    release,
+    ...(previousReleaseId ? { previousReleaseId } : {}),
+    currentPath,
+    entryPath: releaseCurrentEntrypoint(options.config),
+    nodeModulesLinkPath,
+    ledgerPath,
+  };
+}
+
+export async function backupAndRestoreReleaseConfig(options: ReleaseConfigRestoreOptions): Promise<ReleaseConfigRestoreResult> {
+  const release = await resolveReleaseSnapshot(options);
+  await assertReleaseRunnable(release);
+  const configPath = resolve(options.configPath);
+  const manifestConfigPath = resolve(release.manifest.configPath);
+  if (manifestConfigPath !== configPath) {
+    throw new Error(`Refusing to restore config: release manifest configPath ${manifestConfigPath} does not match requested --config ${configPath}`);
+  }
+
+  const releaseConfigPath = join(release.releasePath, "config.json");
+  await assertFile(configPath, "Current config file");
+  await assertFile(releaseConfigPath, "Release config snapshot");
+  const timestamp = formatReleaseTimestamp((options.now ?? new Date()).toISOString());
+  const backupPath = await writeExclusiveConfigBackup(configPath, timestamp);
+  const tmpPath = join(dirname(configPath), `.${basename(configPath)}.restore-${process.pid}-${timestamp}`);
+  try {
+    await copyFile(releaseConfigPath, tmpPath);
+    await chmod(tmpPath, privateFileMode);
+    await rename(tmpPath, configPath);
+    await chmod(configPath, privateFileMode);
+  } catch (error) {
+    await rm(tmpPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+
+  const ledgerPath = releaseLedgerPath(options.config);
+  await appendReleaseLedgerEntry(ledgerPath, {
+    event: "config-restore",
+    version: manifestVersion,
+    releaseId: release.releaseId,
+    createdAt: (options.now ?? new Date()).toISOString(),
+    configPath,
+    backupPath,
+    releasePath: release.releasePath,
+  });
+
+  return {
+    release,
+    configPath,
+    backupPath,
+    restoredFrom: releaseConfigPath,
+    ledgerPath,
+  };
+}
+
+export async function runReleaseCanary(options: ReleaseCanaryOptions): Promise<ReleaseCanaryResult> {
+  const release = await resolveReleaseSnapshot(options);
+  await assertReleaseRunnable(release);
+  await ensureReleaseNodeModulesLink({ config: options.config, projectRoot: resolve(options.projectRoot ?? resolveProjectRoot()) });
+  const actualDistSha256 = await assertReleaseDistDigest(release);
+
+  const entryPath = join(release.releasePath, "dist", "index.js");
+  const configPath = resolve(options.configPath);
+  try {
+    const result = await execFileAsync(process.execPath, [entryPath, "doctor", "--config", configPath], {
+      cwd: release.releasePath,
+      timeout: options.timeoutMs ?? 15_000,
+      maxBuffer: 512 * 1024,
+    });
+    return {
+      release,
+      entryPath,
+      distSha256: actualDistSha256,
+      doctorOutput: clampOutput(`${result.stdout}${result.stderr ? `\n${result.stderr}` : ""}`),
+    };
+  } catch (error) {
+    const details = formatExecError(error);
+    throw new Error(`Release canary failed for ${release.releaseId}: ${details}`);
+  }
+}
+
 export function formatReleaseSnapshotResult(result: ReleaseSnapshotResult): string {
   return [
     `release snapshot: ${result.releaseId}`,
@@ -219,6 +445,38 @@ export function formatReleaseSnapshotResult(result: ReleaseSnapshotResult): stri
     `branch: ${result.manifest.branch}`,
     `dirty: ${String(result.manifest.dirty)}`,
     `distSha256: ${result.manifest.distSha256}`,
+  ].join("\n");
+}
+
+export function formatReleaseActivationResult(result: ReleaseActivationResult): string {
+  return [
+    `release activate: ${result.release.releaseId}`,
+    `previous: ${result.previousReleaseId ?? "(none)"}`,
+    `current: ${result.currentPath}`,
+    `entry: ${result.entryPath}`,
+    `nodeModules: ${result.nodeModulesLinkPath}`,
+    `distSha256: ${result.release.manifest.distSha256}`,
+    "launchctl: not called",
+  ].join("\n");
+}
+
+export function formatReleaseConfigRestoreResult(result: ReleaseConfigRestoreResult): string {
+  return [
+    `release config restore: ${result.release.releaseId}`,
+    `config: ${result.configPath}`,
+    `backup: ${result.backupPath}`,
+    `restoredFrom: ${result.restoredFrom}`,
+    `launchctl: not called`,
+  ].join("\n");
+}
+
+export function formatReleaseCanaryResult(result: ReleaseCanaryResult): string {
+  return [
+    `release canary: ${result.release.releaseId}`,
+    `entry: ${result.entryPath}`,
+    `distSha256: ${result.distSha256}`,
+    "doctor:",
+    result.doctorOutput || "(no output)",
   ].join("\n");
 }
 
@@ -251,6 +509,14 @@ export function releaseLedgerPath(config: AppConfig): string {
   return join(releaseSnapshotsDir(config), "ledger.jsonl");
 }
 
+export function releaseCurrentPath(config: AppConfig): string {
+  return join(releaseSnapshotsDir(config), "current");
+}
+
+export function releaseCurrentEntrypoint(config: AppConfig): string {
+  return join(releaseCurrentPath(config), "dist", "index.js");
+}
+
 function summarizeConfig(config: AppConfig): ReleaseConfigSummary {
   return {
     dataDir: config.dataDir,
@@ -260,7 +526,7 @@ function summarizeConfig(config: AppConfig): ReleaseConfigSummary {
   };
 }
 
-function manifestToLedgerEntry(manifest: ReleaseSnapshotManifest, releasePath: string): ReleaseLedgerEntry {
+function manifestToLedgerEntry(manifest: ReleaseSnapshotManifest, releasePath: string): ReleaseSnapshotLedgerEntry {
   return {
     event: "snapshot",
     version: manifest.version,
@@ -304,16 +570,177 @@ async function readLedgerEntries(ledgerPath: string): Promise<ReleaseLedgerEntry
   const entries: ReleaseLedgerEntry[] = [];
   for (const [index, line] of raw.split("\n").entries()) {
     if (!line.trim()) continue;
-    const parsed = JSON.parse(line) as ReleaseLedgerEntry;
-    if (parsed.version !== manifestVersion || parsed.event !== "snapshot" || !parsed.releaseId || !parsed.createdAt) {
+    const parsed = JSON.parse(line) as Partial<ReleaseLedgerEntry>;
+    if (parsed.version !== manifestVersion || !parsed.event || !parsed.createdAt) {
       throw new Error(`Invalid release ledger entry at ${ledgerPath}:${index + 1}`);
     }
-    entries.push({
-      ...parsed,
-      distSha256: typeof parsed.distSha256 === "string" && parsed.distSha256.length > 0 ? parsed.distSha256 : "unknown",
-    });
+    if (parsed.event === "snapshot") {
+      if (!parsed.releaseId || !parsed.releasePath || !parsed.shortCommit || !parsed.commit) {
+        throw new Error(`Invalid release snapshot ledger entry at ${ledgerPath}:${index + 1}`);
+      }
+      entries.push({
+        ...(parsed as ReleaseSnapshotLedgerEntry),
+        distSha256: typeof parsed.distSha256 === "string" && parsed.distSha256.length > 0 ? parsed.distSha256 : "unknown",
+      });
+      continue;
+    }
+    if (parsed.event === "activate") {
+      if (!parsed.releaseId || !parsed.releasePath || !parsed.currentPath || !parsed.entryPath) {
+        throw new Error(`Invalid release activation ledger entry at ${ledgerPath}:${index + 1}`);
+      }
+      entries.push(parsed as ReleaseActivationLedgerEntry);
+      continue;
+    }
+    if (parsed.event === "config-restore") {
+      if (!parsed.releaseId || !parsed.configPath || !parsed.backupPath || !parsed.releasePath) {
+        throw new Error(`Invalid release config restore ledger entry at ${ledgerPath}:${index + 1}`);
+      }
+      entries.push(parsed as ReleaseConfigRestoreLedgerEntry);
+      continue;
+    }
+    throw new Error(`Unknown release ledger event at ${ledgerPath}:${index + 1}`);
   }
   return entries;
+}
+
+function isReleaseSnapshotLedgerEntry(entry: ReleaseLedgerEntry): entry is ReleaseSnapshotLedgerEntry {
+  return entry.event === "snapshot";
+}
+
+async function appendReleaseLedgerEntry(ledgerPath: string, entry: ReleaseLedgerEntry): Promise<void> {
+  await appendFile(ledgerPath, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: privateFileMode });
+  await chmod(ledgerPath, privateFileMode);
+}
+
+async function readReleaseManifest(manifestPath: string): Promise<ReleaseSnapshotManifest> {
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as ReleaseSnapshotManifest;
+  if (!manifest.releaseId || !manifest.commit || !manifest.shortCommit || !manifest.configPath || !manifest.distSha256) {
+    throw new Error(`Invalid release manifest: ${manifestPath}`);
+  }
+  return manifest;
+}
+
+async function assertReleaseRunnable(release: ResolvedReleaseSnapshot): Promise<void> {
+  await assertDirectory(join(release.releasePath, "dist"), "Release dist directory");
+  await assertFile(join(release.releasePath, "dist", "index.js"), "Release entrypoint");
+  await assertFile(join(release.releasePath, "package.json"), "Release package.json");
+  await assertFile(join(release.releasePath, "package-lock.json"), "Release package-lock.json");
+  await assertFile(join(release.releasePath, "config.json"), "Release config snapshot");
+}
+
+async function assertReleaseDistDigest(release: ResolvedReleaseSnapshot): Promise<string> {
+  const actualDistSha256 = await digestDirectory(join(release.releasePath, "dist"));
+  if (actualDistSha256 !== release.manifest.distSha256) {
+    throw new Error(`Release dist digest mismatch for ${release.releaseId}: manifest=${release.manifest.distSha256} actual=${actualDistSha256}`);
+  }
+  return actualDistSha256;
+}
+
+async function writeExclusiveConfigBackup(configPath: string, timestamp: string): Promise<string> {
+  const basePath = join(dirname(configPath), `${basename(configPath)}.backup-${timestamp}`);
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const candidate = attempt === 0 ? basePath : `${basePath}-${attempt}`;
+    try {
+      await copyFile(configPath, candidate, fsConstants.COPYFILE_EXCL);
+      await chmod(candidate, privateFileMode);
+      return candidate;
+    } catch (error) {
+      if (isNodeError(error) && error.code === "EEXIST") continue;
+      throw error;
+    }
+  }
+  throw new Error(`Unable to reserve unique config backup path for ${configPath}`);
+}
+
+async function ensureReleaseNodeModulesLink(options: { config: AppConfig; projectRoot: string }): Promise<string> {
+  const releasesDir = releaseSnapshotsDir(options.config);
+  await mkdir(releasesDir, { recursive: true, mode: privateDirectoryMode });
+  await chmod(releasesDir, privateDirectoryMode);
+  const nodeModulesTarget = join(options.projectRoot, "node_modules");
+  await assertDirectory(nodeModulesTarget, "Project node_modules directory");
+  const linkPath = join(releasesDir, "node_modules");
+
+  try {
+    const existing = await lstat(linkPath);
+    if (!existing.isSymbolicLink()) {
+      throw new Error(`Release node_modules path exists and is not a symlink: ${linkPath}`);
+    }
+    const linkTarget = await readlink(linkPath);
+    const resolvedLinkTarget = resolve(dirname(linkPath), linkTarget);
+    if (resolvedLinkTarget !== resolve(nodeModulesTarget)) {
+      throw new Error(`Release node_modules symlink points at ${resolvedLinkTarget}, expected ${resolve(nodeModulesTarget)}`);
+    }
+    return linkPath;
+  } catch (error) {
+    if (!(isNodeError(error) && error.code === "ENOENT")) throw error;
+  }
+
+  await symlink(nodeModulesTarget, linkPath, "dir");
+  return linkPath;
+}
+
+async function requireCurrentReleaseId(config: AppConfig): Promise<string> {
+  const current = await readCurrentReleaseId(config);
+  if (!current) throw new Error(`No current release symlink found: ${releaseCurrentPath(config)}`);
+  return current;
+}
+
+async function readCurrentReleaseId(config: AppConfig): Promise<string | undefined> {
+  const currentPath = releaseCurrentPath(config);
+  try {
+    const current = await lstat(currentPath);
+    if (!current.isSymbolicLink()) throw new Error(`Current release path exists and is not a symlink: ${currentPath}`);
+    return basename(await readlink(currentPath));
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+async function writeCurrentReleaseSymlink(config: AppConfig, releaseId: string): Promise<void> {
+  const releasesDir = releaseSnapshotsDir(config);
+  await mkdir(releasesDir, { recursive: true, mode: privateDirectoryMode });
+  await chmod(releasesDir, privateDirectoryMode);
+  const currentPath = releaseCurrentPath(config);
+  try {
+    const current = await lstat(currentPath);
+    if (!current.isSymbolicLink()) throw new Error(`Current release path exists and is not a symlink: ${currentPath}`);
+  } catch (error) {
+    if (!(isNodeError(error) && error.code === "ENOENT")) throw error;
+  }
+
+  const tmpPath = join(releasesDir, `.current.tmp-${process.pid}-${Date.now()}`);
+  try {
+    await symlink(releaseId, tmpPath, "dir");
+    await rename(tmpPath, currentPath);
+  } catch (error) {
+    await rm(tmpPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+function assertPathInside(rootPath: string, candidatePath: string, label: string): void {
+  const relativePath = relative(resolve(rootPath), resolve(candidatePath));
+  if (!relativePath || relativePath.startsWith("..") || relativePath.startsWith("/")) {
+    throw new Error(`${label} path escapes release root: ${candidatePath}`);
+  }
+}
+
+function clampOutput(value: string): string {
+  const lines = value.trim().split("\n").slice(0, 80);
+  const text = lines.join("\n");
+  return text.length > 20_000 ? `${text.slice(0, 20_000)}\n… truncated …` : text;
+}
+
+function formatExecError(error: unknown): string {
+  if (error && typeof error === "object") {
+    const maybe = error as { code?: unknown; signal?: unknown; stdout?: unknown; stderr?: unknown; message?: unknown };
+    const code = maybe.code === undefined ? "unknown" : String(maybe.code);
+    const signal = maybe.signal === undefined ? "none" : String(maybe.signal);
+    const output = clampOutput(`${typeof maybe.stdout === "string" ? maybe.stdout : ""}${typeof maybe.stderr === "string" ? `\n${maybe.stderr}` : ""}`);
+    return `exit=${code} signal=${signal}${output ? ` output=${JSON.stringify(output)}` : ""}`;
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function readGitState(projectRoot: string): Promise<{ commit: string; shortCommit: string; branch: string; dirty: boolean }> {

@@ -101,7 +101,7 @@ export interface AppConfig {
   runControl: RunControlConfig;
 }
 
-export type ReleaseCommand = "snapshot" | "list" | "deploy" | "rollback";
+export type ReleaseCommand = "snapshot" | "list" | "activate" | "canary" | "deploy" | "rollback";
 
 export interface CliOptions {
   command: "start" | "init-config" | "doctor" | "reconcile" | "daily-post" | "install-launch-agent" | "uninstall-launch-agent" | "launch-agent-status" | "release" | "help";
@@ -573,7 +573,7 @@ function parseReleaseCliArgs(args: string[]): CliOptions {
       releaseCommand = parseReleaseCommand(arg);
       continue;
     }
-    if (releaseCommand === "rollback" && !releaseTarget) {
+    if ((releaseCommand === "activate" || releaseCommand === "canary" || releaseCommand === "rollback") && !releaseTarget) {
       releaseTarget = arg;
       continue;
     }
@@ -581,13 +581,13 @@ function parseReleaseCliArgs(args: string[]): CliOptions {
   }
 
   if (!releaseCommand) {
-    throw new Error("release requires a subcommand: snapshot, list, deploy, or rollback");
+    throw new Error("release requires a subcommand: snapshot, list, activate, canary, deploy, or rollback");
   }
   if (releaseAllowDirty && releaseCommand !== "snapshot") {
     throw new Error("--allow-dirty is only valid for release snapshot");
   }
-  if (releaseCommand === "rollback" && !releaseTarget) {
-    throw new Error("release rollback requires a release id or commit");
+  if ((releaseCommand === "activate" || releaseCommand === "canary" || releaseCommand === "rollback") && !releaseTarget) {
+    throw new Error(`release ${releaseCommand} requires a release id, commit, or current`);
   }
 
   return baseCliOptions("release", {
@@ -600,7 +600,7 @@ function parseReleaseCliArgs(args: string[]): CliOptions {
 
 function parseReleaseCommand(value: string): ReleaseCommand {
   const normalized = value.trim().toLowerCase();
-  if (normalized === "snapshot" || normalized === "list" || normalized === "deploy" || normalized === "rollback") return normalized;
+  if (normalized === "snapshot" || normalized === "list" || normalized === "activate" || normalized === "canary" || normalized === "deploy" || normalized === "rollback") return normalized;
   throw new Error(`Unknown release subcommand: ${value}`);
 }
 

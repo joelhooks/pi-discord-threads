@@ -2,16 +2,42 @@
 
 Durable build/setup knowledge and validation receipts for Pi Discord Threads.
 
-## Rig bootstrap
+## Current validation map
 
-Installed the pi-notes Brain rig.
+Use the smallest check that proves the touched seam.
 
-Validation:
+| Change | Check |
+| --- | --- |
+| Brain/docs only | `npm run brain:check` |
+| Any TypeScript edit | `npm run typecheck` |
+| Release snapshot/activate/canary/rollback-helper behavior | `npm run test:release-snapshot` |
+| Restart/recovery prompt behavior | `npm run test:recovery-prompt` |
+| Thread run state | `npm run test:thread-run-state` |
+| Discord HUD/final rendering | `npm run test:progress-hud`, `npm run test:final-answer-outbox` |
+| Pi runtime/service boundaries | `npm run test:pi-runtime`, `npm run test:pi-session-service`, `npm run test:engine-layer` |
+| Redis run control | `npm run test:run-control-lua-scripts`, `npm run test:run-control-store`, `npm run test:run-control-worker`, `npm run test:run-control-doctor` |
+| Whole CLI build artifact | `npm run build` |
+
+## Operator smoke checks
+
+Use these when touching live daemon/release docs, but do not mutate LaunchAgent or live Redis casually from inside an active Discord-carried run.
 
 ```bash
-pi-notes brain check
+npm run build
+node dist/index.js doctor --config ~/.config/pi-discord-threads/config.json
+node dist/index.js launch-agent-status --config ~/.config/pi-discord-threads/config.json
+```
+
+For release snapshots and current handoff:
+
+```bash
+node dist/index.js release snapshot --config ~/.config/pi-discord-threads/config.json
+node dist/index.js release list --config ~/.config/pi-discord-threads/config.json
+node dist/index.js release activate <release-id> --config ~/.config/pi-discord-threads/config.json
+node dist/index.js release canary current --config ~/.config/pi-discord-threads/config.json
 ```
 
 ## Receipts
 
-Add durable setup commands, surprising constraints, failed paths, and validation results here.
+- 2026-06-20 gardening pass: replaced bootstrap placeholder with the current validation map from `package.json`, `AGENTS.md`, and `README.md`.
+- Keep future receipts short: command, why it was run, pass/fail, and the seam it protects.

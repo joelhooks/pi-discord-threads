@@ -58,6 +58,8 @@ See `config.example.json` for the full config shape.
 
 Use the LaunchAgent for normal local operation. Do not use random `nohup` shells unless you enjoy future pain.
 
+The LaunchAgent prefers `config.dataDir/releases/current/dist/index.js` after you activate a release and rewrite the plist with `install-launch-agent`. If no current release exists yet, it falls back to the repo `dist/index.js`.
+
 ```bash
 npm run build
 node dist/index.js install-launch-agent --config ~/.config/pi-discord-threads/config.json
@@ -223,7 +225,7 @@ If `runControl.enabled` is false, the bridge does not connect to Redis.
 
 ## Release snapshots
 
-Release snapshots are local rollback bundles. They do not deploy yet.
+Release snapshots are local rollback bundles. Activation can now flip the local `releases/current` symlink, but it still does not restart or deploy by itself.
 
 Create one:
 
@@ -238,6 +240,18 @@ List snapshots:
 node dist/index.js release list --config ~/.config/pi-discord-threads/config.json
 ```
 
+Activate one without restarting anything:
+
+```bash
+node dist/index.js release activate <release-id-or-sha> --config ~/.config/pi-discord-threads/config.json
+```
+
+Run a no-Discord-start, no-`launchctl` canary from an activated/current release:
+
+```bash
+node dist/index.js release canary current --config ~/.config/pi-discord-threads/config.json
+```
+
 Current behavior:
 
 - copies built `dist/`
@@ -246,9 +260,11 @@ Current behavior:
 - writes safe manifest/ledger metadata
 - records `distSha256`
 - refuses dirty worktrees unless `--allow-dirty` is explicit
-- does **not** mutate LaunchAgent
-- does **not** create or flip `releases/current`
-- `release deploy` and `release rollback` are planned, not implemented
+- `release activate` flips `releases/current` atomically and creates a `releases/node_modules` symlink back to the repo install
+- LaunchAgent install/status understands the `releases/current` entrypoint
+- `release canary` verifies `distSha256` and runs `doctor` from the release artifact without starting Discord or calling `launchctl`; it may create/verify the `releases/node_modules` dependency symlink
+- config restore helper exists for future deploy/rollback, but the public `release rollback` restart flow is still planned
+- `release deploy` and full `release rollback` are planned, not implemented
 
 Target framing: **zero lost work + fast rollback**, not true zero downtime. The Discord Gateway is still a singleton, so restarts can reconnect.
 

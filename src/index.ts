@@ -10,7 +10,7 @@ import { buildRunControlDoctorReport, formatRunControlDoctorReport, loadRunContr
 import { checkRunControlRedisHealth, getRunControlWorkerId } from "./run-control/redis-client.js";
 import { formatReconcileReport, reconcileRunControl } from "./run-control/reconcile.js";
 import { installLaunchAgent, printLaunchAgentStatus, uninstallLaunchAgent } from "./launch-agent.js";
-import { createReleaseSnapshot, formatReleaseSnapshotList, formatReleaseSnapshotResult, listReleaseSnapshots } from "./release-snapshots.js";
+import { activateRelease, createReleaseSnapshot, formatReleaseActivationResult, formatReleaseCanaryResult, formatReleaseSnapshotList, formatReleaseSnapshotResult, listReleaseSnapshots, runReleaseCanary } from "./release-snapshots.js";
 
 installProcessGuards();
 
@@ -61,7 +61,7 @@ async function main(): Promise<void> {
   }
 
   if (cli.command === "release" && (cli.releaseCommand === "deploy" || cli.releaseCommand === "rollback")) {
-    throw new Error(`release ${cli.releaseCommand} is not implemented yet. First slice only supports release snapshot and release list.`);
+    throw new Error(`release ${cli.releaseCommand} restart flow is not implemented yet. Use release snapshot, release list, release activate, or release canary.`);
   }
 
   const config = await loadConfig(cli.configPath);
@@ -197,7 +197,26 @@ async function releaseCommand(cli: CliOptions, config: AppConfig): Promise<void>
     return;
   }
 
-  throw new Error(`release ${cli.releaseCommand ?? "(missing)"} is not implemented yet. First slice only supports release snapshot and release list.`);
+  if (cli.releaseCommand === "activate") {
+    if (!cli.releaseTarget) throw new Error("release activate requires a release id, commit, or current");
+    console.log(formatReleaseActivationResult(await activateRelease({
+      config,
+      target: cli.releaseTarget,
+    })));
+    return;
+  }
+
+  if (cli.releaseCommand === "canary") {
+    if (!cli.releaseTarget) throw new Error("release canary requires a release id, commit, or current");
+    console.log(formatReleaseCanaryResult(await runReleaseCanary({
+      config,
+      configPath: expandPath(cli.configPath),
+      target: cli.releaseTarget,
+    })));
+    return;
+  }
+
+  throw new Error(`release ${cli.releaseCommand ?? "(missing)"} restart flow is not implemented yet. Use release snapshot, release list, release activate, or release canary.`);
 }
 
 function printHelp(): void {
@@ -219,6 +238,10 @@ Commands:
   release snapshot [--config path] [--allow-dirty]
                               Snapshot built dist/package/config under config.dataDir/releases
   release list [--config path] List release snapshots without printing secrets
+  release activate <release-id|sha> [--config path]
+                              Flip config.dataDir/releases/current without restart or launchctl
+  release canary <release-id|sha|current> [--config path]
+                              Run doctor from a release artifact without starting Discord
   init-config [--config path]  Write a default JSON config
   doctor [--config path]       Print non-secret runtime diagnostics
 

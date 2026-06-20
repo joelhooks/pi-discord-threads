@@ -3,6 +3,7 @@ title: "Pi Discord Threads Glossary"
 type: "resource"
 status: "active"
 created_at: "2026-06-14"
+updated_at: "2026-06-20"
 tags:
   - learning
   - glossary
@@ -11,8 +12,54 @@ tags:
 
 # Pi Discord Threads Glossary
 
-Compressed language for the Discord bridge. Terms get added only after Joel demonstrates understanding in an exercise or debugging pass.
+Compressed project language for the Discord bridge. Terms get added when they prevent future mistakes in implementation, operations, docs, tests, or agent handoffs.
 
 ## Terms
 
-_No captured terms yet._
+### Pi session JSONL
+
+The durable Pi transcript/session file. It is the conversation truth: messages, tool calls, assistant output, and recovery evidence live here.
+
+### Registry projection
+
+The local JSON registry maps Discord threads/DMs to Pi sessions and visible Discord state. It is projection truth, not conversation truth.
+
+### Discord operator surface
+
+Discord threads, messages, slash/prefix commands, buttons, HUD cards, and final answers. Discord shows work; it does not own the canonical conversation.
+
+### Redis run control
+
+Optional process-boundary coordination for queued jobs, active run pointers, leases, heartbeats, input pumps, finalization guards, and dead-letter behavior.
+
+### At-least-once run control
+
+The run-control model. Jobs may retry/reclaim, so side effects must be ownership-checked and idempotent. Do not describe this as exactly-once magic.
+
+### Idempotent finalization
+
+Final assistant output is reserved/persisted before content write, then retried by editing the reserved Discord message. This prevents duplicate final answers across retries.
+
+### XState lifecycle truth
+
+Finite lifecycle state belongs in explicit XState v5 machines when illegal combinations, retries, cancellation, or resource lifetimes matter.
+
+### Effect resource seam
+
+Effect owns service/resource/finalizer boundaries around runtime clients, registries, Pi session services, and run queue wiring. It does not need to wrap every pure helper.
+
+### LaunchAgent boundary
+
+The macOS user LaunchAgent owns the long-running daemon process. Restart/kickstart behavior must stay outside the active daemon process tree.
+
+### Release snapshot
+
+A local rollback bundle under `config.dataDir/releases/<release-id>/` containing built `dist/`, package files, exact private config copy, safe manifest, ledger entry, and build digest.
+
+### `releases/current`
+
+Deferred stable entrypoint symlink for release activation. It should be owned by release commands, not ad hoc LaunchAgent side effects.
+
+### Zero lost work + fast rollback
+
+The release/deploy target. Current architecture can make restarts safe and rollback fast; it does not provide true Discord Gateway zero downtime.

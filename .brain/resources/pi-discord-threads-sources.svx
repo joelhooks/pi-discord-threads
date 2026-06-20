@@ -22,28 +22,34 @@ tags:
   Covers: Brain usage rules for this repo. Use when: deciding where to capture learning, decisions, and receipts.
 
 - [`src/index.ts`](../../src/index.ts)
-  Covers: CLI commands, startup flow, config/secrets loading, registry setup, optional Redis wiring, LaunchAgent/reconcile commands, and process guards. Use when: debugging daemon startup or command behavior.
+  Covers: CLI command dispatch, config/secrets loading, runtime warmup, doctor/reconcile, release commands, and LaunchAgent command routing. Use when: debugging daemon startup or command behavior.
+
+- [`src/app-lifecycle-machine.ts`](../../src/app-lifecycle-machine.ts) and [`src/app-runtime.ts`](../../src/app-runtime.ts)
+  Covers: process lifecycle, role startup, startup recovery mode, signal handling, runtime clients, and foreground daemon orchestration. Use when: debugging startup/shutdown readiness.
 
 - [`src/discord-bot.ts`](../../src/discord-bot.ts)
-  Covers: Discord client setup, slash/prefix/message ingress, thread creation/resume/fork, status/debug/compact/abort controls, placeholder/final response behavior, auto-resume after restarts, async subagent result publishing, HUD integration, and thread-title evaluation hooks. Use when: debugging what Discord users see or how incoming Discord actions become Pi prompts.
+  Covers: Discord client setup, slash/prefix/message ingress, thread creation/resume/fork, status/debug/compact/abort controls, attachment/link-ingest ingress, and adapter wiring to extracted Discord seams. Use when: debugging what Discord users see or how Discord actions become Pi prompts.
 
-- [`src/pi-runtime.ts`](../../src/pi-runtime.ts)
-  Covers: Pi `AgentSession` creation/reuse, per-thread in-memory queueing, appended Discord Thread Mode system prompt, progress event translation, auth reload, dangling assistant leaf repair, prompt execution, compaction, and abort. Use when: debugging Pi session execution or transcript/session recovery.
+- [`src/discord/run-surface.ts`](../../src/discord/run-surface.ts), [`src/discord/final-answer-outbox.ts`](../../src/discord/final-answer-outbox.ts), and [`src/discord/progress-hud-machine.ts`](../../src/discord/progress-hud-machine.ts)
+  Covers: Discord run surface projection, idempotent final-answer policy, HUD/progress lifecycle, and message rendering seams. Use when: changing visible run/final answer behavior.
 
-- [`src/registry.ts`](../../src/registry.ts)
-  Covers: durable JSON registry shape for Discord thread ↔ Pi session mapping, active run metadata, message IDs, title state, work graph metadata, and stale running-thread interruption marking. Use when: debugging bridge memory across restarts.
+- [`src/discord/thread-title.ts`](../../src/discord/thread-title.ts)
+  Covers: placeholder-title replacement, completed-turn evidence capture, conservative evaluator cadence, human-title protection, and rename cooldown rules. Use when: changing Discord thread renaming behavior.
 
-- [`src/run-hud.ts`](../../src/run-hud.ts)
-  Covers: scoped in-process HUD narrator agent, `set_run_hud` tool, live run feed, fallback frame, and safety boundaries. Use when: changing live status cards.
+- [`src/pi-runtime.ts`](../../src/pi-runtime.ts), [`src/engine/domain.ts`](../../src/engine/domain.ts), [`src/engine/services.ts`](../../src/engine/services.ts), [`src/engine/layers.ts`](../../src/engine/layers.ts), and [`src/engine/runtime.ts`](../../src/engine/runtime.ts)
+  Covers: Pi `AgentSession` creation/reuse, prompt execution, compaction/retry guards, abort, Effect service ports/layers, and runtime clients. Use when: debugging Pi session execution or Effect-backed seams.
 
-- [`src/thread-title-evaluator.ts`](../../src/thread-title-evaluator.ts)
-  Covers: scoped in-process title evaluator agent, `propose_thread_title` tool, conservative rename prompt, normalization, and evidence shape. Use when: changing Discord thread renaming behavior.
+- [`src/registry.ts`](../../src/registry.ts), [`src/work-graph.ts`](../../src/work-graph.ts), and [`src/thread-run-state.ts`](../../src/thread-run-state.ts)
+  Covers: durable Discord thread ↔ Pi session mapping, active run metadata, title/work-graph metadata, and thread run lifecycle decisions. Use when: debugging projection memory or prompt queue/running transitions.
 
-- [`src/run-control/types.ts`](../../src/run-control/types.ts) and [`src/run-control/worker.ts`](../../src/run-control/worker.ts)
-  Covers: optional Redis run-control state model, worker lease/heartbeat loop, input pump, finalization guard, and terminal run status. Use when: understanding restart/process-boundary resilience.
+- [`src/run-control/lua-scripts.ts`](../../src/run-control/lua-scripts.ts), [`src/run-control/store.ts`](../../src/run-control/store.ts), and [`src/run-control/*-machine.ts`](../../src/run-control/)
+  Covers: Redis Lua invariants, store command boundaries, worker lane/job/leased-run XState machines, lease heartbeat, input pump, finalization guard, retry-later/dead-letter behavior, and terminal run status. Use when: understanding restart/process-boundary resilience.
 
-- [`src/work-graph.ts`](../../src/work-graph.ts)
-  Covers: Discord projection of Pi session forks/work graph. Use when: debugging `/pi fork` or future tree/clone behavior.
+- [`src/release-snapshots.ts`](../../src/release-snapshots.ts) and [`src/launch-agent.ts`](../../src/launch-agent.ts)
+  Covers: release snapshot/list storage, `release activate`, `release canary`, `releases/current`, manifest/ledger safety, private config copy/restore helper, LaunchAgent plist/status/install/restart guard, and future deploy/rollback restart seams.
+
+- [`src/link-ingest.ts`](../../src/link-ingest.ts) and [`src/link-ingest-status-bridge.ts`](../../src/link-ingest-status-bridge.ts)
+  Covers: explicit Discord URL capture requests and local status projection. Use when: changing `/pi ingest`, `/pi capture`, or status bridge behavior.
 
 - [State ownership D2 source](../data/diagrams/pi-discord-state-ownership.d2) and [restart recovery D2 source](../data/diagrams/pi-discord-restart-recovery.d2)
   Covers: lesson diagrams rendered into SVGs for pi-notes. Use when: teaching or revising the state/recovery mental models.
@@ -63,3 +69,4 @@ tags:
 
 - Need a stable project-local pi-notes Document Host Tailscale route before promising phone-safe lesson URLs for every repo Brain page.
 - Need Pi SDK source inspection before teaching deeper `AgentSession`, `SessionManager`, or extension binding internals.
+- Request Spine and State Ownership tutorials need a source refresh before being used as current startup/recovery teaching material.

@@ -44,7 +44,7 @@ Start here before non-trivial work:
 ## Current work tracks
 
 - Architecture: typed Lua command builders next, starting with `recordRetryLaterScript`. Keep it behavior-preserving and boring.
-- Deploy: LaunchAgent `releases/current` handoff, then `release deploy`, then `release rollback`. Call the target **zero lost work + fast rollback**, not zero downtime.
+- Deploy: `release activate` + LaunchAgent `releases/current` handoff are implemented. Next is full `release deploy`, then full `release rollback`. Call the target **zero lost work + fast rollback**, not zero downtime.
 - Cleanup: improve orientation and prune only evidence-backed dead code. No directory shuffle without tests and a clear PRD slice.
 
 ## Hard safety rules
@@ -62,7 +62,7 @@ Run the smallest useful check, then report it:
 
 - Brain/docs only: `npm run brain:check`
 - Any TypeScript source edit: `npm run typecheck`
-- Release snapshot/list: `npm run test:release-snapshot`
+- Release snapshot/activate/canary/rollback helpers: `npm run test:release-snapshot`
 - Redis Lua/store/worker: `npm run test:run-control-lua-scripts`, `npm run test:run-control-store`, `npm run test:run-control-worker`
 - Pi runtime/layers: `npm run test:pi-runtime`, `npm run test:pi-session-service`, `npm run test:engine-layer`
 - Discord final output/HUD: `npm run test:final-answer-outbox`, `npm run test:progress-hud`

@@ -1,7 +1,7 @@
 ---
 title: "Pi Discord Threads: Request Spine"
 type: "resource"
-status: "active"
+status: "needs-refresh"
 created_at: "2026-06-14"
 tags:
   - learning
@@ -12,6 +12,8 @@ tags:
 ---
 
 # Pi Discord Threads: Request Spine
+
+> Gardening note, 2026-06-20: this tutorial needs a source refresh before teaching current startup flow. The bridge now has app lifecycle/runtime seams beyond the older direct `index.ts -> runBot(...)` story. Use `README.md`, `AGENTS.md`, `.brain/resources/pi-discord-threads-sources.svx`, and current source for live operator guidance.
 
 ## Anchor
 

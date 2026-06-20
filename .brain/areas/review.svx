@@ -4,15 +4,27 @@ Current findings, risks, and next decisions for Pi Discord Threads.
 
 ## Current assessment
 
-This graph is newly bootstrapped. Replace this section with grounded findings from the repo.
+The repo Brain is now useful enough to steer work, but the live entrypoints matter more than a full taxonomy cleanup.
 
-## Risks
+Current truth:
 
-- Missing receipts for important decisions.
-- Brain pages drifting away from actual code behavior.
-- Large source dumps pasted into `.svx` instead of `.brain/data/**`.
+- `README.md` is the operator guide.
+- `AGENTS.md` is the agent safety/source map.
+- `.brain/resources/pi-discord-threads-architecture-review.svx` is the current architecture review.
+- `.brain/projects/run-control-lua-command-builders.svx` is the next architecture implementation slice.
+- `.brain/projects/release-snapshot-deploy-rollback.svx` is the next release/deploy/rollback plan.
+- `.brain/projects/project-structure-cleanup.svx` is the cleanup policy and first slice receipt.
+
+## Current risks
+
+- Old learning pages can drift from current code. `Request Spine` and `State Ownership` are marked `needs-refresh` until their startup/recovery details match the current app lifecycle and gated startup recovery behavior.
+- Private live receipts exist in project Brain. Do not copy Discord IDs, local config paths, private thread/run IDs, or local transcript snippets into public docs, Wzrrd pages, README, issue trackers, or customer-facing copy.
+- Release snapshot/list plus activate/canary handoff are shipped, but deploy/rollback restart automation is still deferred. Keep saying **zero lost work + fast rollback**, not true zero downtime.
+- Broad directory cleanup is still dangerous without tests. Keep pruning narrow and evidence-backed.
 
 ## Next decisions
 
-- What project concepts deserve first-class Brain entries?
-- Which repeated note shapes should become `.brain/components`?
+1. Implement the typed Lua command builder slice for `recordRetryLaterScript`.
+2. Implement full `release deploy` and full `release rollback` restart flows now that `release activate`, current handoff, canary, and config restore helper exist.
+3. Refresh the two learning tutorials only after the current startup/recovery source paths are re-read.
+4. Decide whether implemented project PRDs should eventually move to an archive folder, or stay in `projects/` with `implemented-*` status for stable inbound links.

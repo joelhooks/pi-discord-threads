@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { existsSync, lstatSync, readlinkSync } from "node:fs";
+import { mkdir, readFile, readlink, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AppConfig, RunControlRole } from "./config.js";
 import { expandPath } from "./config.js";
+import { releaseCurrentEntrypoint, releaseCurrentPath } from "./release-snapshots.js";
 
 export const launchAgentLabel = "com.joelhooks.pi-discord-threads";
 
@@ -18,15 +19,24 @@ export interface LaunchAgentOptions {
   force: boolean;
 }
 
-interface LaunchAgentPaths {
+export interface LaunchAgentEntrypoint {
+  mode: "release-current" | "repo-dist";
+  entryPath: string;
+  projectRoot: string;
+}
+
+export interface LaunchAgentPaths {
   label: string;
   plistPath: string;
   domain: string;
   serviceTarget: string;
   entryPath: string;
+  entryMode: LaunchAgentEntrypoint["mode"];
   projectRoot: string;
   logPath: string;
   errorLogPath: string;
+  currentPath: string;
+  daemonEntryPaths: string[];
 }
 
 interface CommandResult {
@@ -73,7 +83,14 @@ export async function printLaunchAgentStatus(config: AppConfig): Promise<void> {
   console.log(`label: ${paths.label}`);
   console.log(`plist: ${paths.plistPath}${existsSync(paths.plistPath) ? "" : " (missing)"}`);
   console.log(`domain: ${paths.domain}`);
+  console.log(`entryMode: ${paths.entryMode}`);
   console.log(`entry: ${paths.entryPath}${existsSync(paths.entryPath) ? "" : " (missing)"}`);
+  console.log(`current: ${paths.currentPath}${existsSync(paths.currentPath) ? ` -> ${await readCurrentLink(paths.currentPath)}` : " (missing)"}`);
+  const plistProgram = await readPlistProgramArgument(paths.plistPath);
+  if (plistProgram) {
+    console.log(`plistProgram: ${plistProgram}`);
+    if (plistProgram !== paths.entryPath) console.log(`plistProgramMismatch: expected ${paths.entryPath}`);
+  }
   console.log(`logs: ${paths.logPath} / ${paths.errorLogPath}`);
 
   const loaded = await runCommand("launchctl", ["print", paths.serviceTarget]);
@@ -89,7 +106,7 @@ export async function printLaunchAgentStatus(config: AppConfig): Promise<void> {
     console.log("launchctl: not loaded");
   }
 
-  const pids = await findExistingDaemonProcesses(paths.entryPath);
+  const pids = await findExistingDaemonProcesses(paths);
   if (pids.length > 0) {
     console.log("matching daemon process(es):");
     for (const process of pids) console.log(`  ${process}`);
@@ -98,29 +115,70 @@ export async function printLaunchAgentStatus(config: AppConfig): Promise<void> {
   }
 }
 
-function getLaunchAgentPaths(config: AppConfig): LaunchAgentPaths {
+export function resolveLaunchAgentEntrypoint(config: AppConfig): LaunchAgentEntrypoint {
+  const currentPath = releaseCurrentPath(config);
+  const currentEntryPath = releaseCurrentEntrypoint(config);
+  let current;
+  try {
+    current = lstatSync(currentPath);
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  }
+  if (current) {
+    if (!current.isSymbolicLink()) {
+      throw new Error(`Current release path exists and is not a symlink: ${currentPath}`);
+    }
+    const releaseTarget = resolve(dirname(currentPath), readlinkSync(currentPath));
+    const releasesDir = resolve(dirname(currentPath));
+    const relativeTarget = relative(releasesDir, releaseTarget);
+    if (!relativeTarget || relativeTarget.startsWith("..") || relativeTarget.startsWith("/")) {
+      throw new Error(`Current release symlink escapes release root: ${currentPath} -> ${releaseTarget}`);
+    }
+    if (!existsSync(join(releaseTarget, "manifest.json"))) {
+      throw new Error(`Current release target is missing manifest.json: ${releaseTarget}`);
+    }
+    return {
+      mode: "release-current",
+      entryPath: currentEntryPath,
+      projectRoot: resolve(dirname(currentEntryPath), ".."),
+    };
+  }
+
+  const entryPath = resolveEntrypoint();
+  return {
+    mode: "repo-dist",
+    entryPath,
+    projectRoot: resolveProjectRoot(entryPath),
+  };
+}
+
+export function getLaunchAgentPaths(config: AppConfig): LaunchAgentPaths {
   const uid = process.getuid?.() ?? Number(process.env.UID ?? "501");
   const label = launchAgentLabel;
   const plistPath = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
   const domain = `gui/${uid}`;
   const serviceTarget = `${domain}/${label}`;
-  const entryPath = resolveEntrypoint();
-  const projectRoot = resolveProjectRoot(entryPath);
+  const entrypoint = resolveLaunchAgentEntrypoint(config);
+  const repoEntryPath = resolveEntrypoint();
+  const currentEntryPath = releaseCurrentEntrypoint(config);
   return {
     label,
     plistPath,
     domain,
     serviceTarget,
-    entryPath,
-    projectRoot,
+    entryPath: entrypoint.entryPath,
+    entryMode: entrypoint.mode,
+    projectRoot: entrypoint.projectRoot,
     logPath: join(config.dataDir, "daemon.log"),
     errorLogPath: join(config.dataDir, "daemon.err.log"),
+    currentPath: releaseCurrentPath(config),
+    daemonEntryPaths: [...new Set([entrypoint.entryPath, repoEntryPath, currentEntryPath])],
   };
 }
 
 async function startLaunchAgent(paths: LaunchAgentPaths, force: boolean, restart: boolean): Promise<void> {
   const loaded = await isLaunchAgentLoaded(paths);
-  if (await isRunningInsideDaemon(paths.entryPath)) {
+  if (await isRunningInsideDaemon(paths)) {
     throw new Error([
       "Refusing to start or restart the LaunchAgent from inside the active Discord bridge process tree.",
       "That would SIGTERM the daemon that is currently carrying this Discord turn.",
@@ -134,7 +192,7 @@ async function startLaunchAgent(paths: LaunchAgentPaths, force: boolean, restart
 
   const loadedAfterRestart = restart ? false : loaded;
   if (!loadedAfterRestart) {
-    const existing = await findExistingDaemonProcesses(paths.entryPath);
+    const existing = await findExistingDaemonProcesses(paths);
     if (existing.length > 0 && !force) {
       throw new Error([
         "Refusing to start LaunchAgent because a non-launchd daemon already appears to be running.",
@@ -173,7 +231,7 @@ async function bootoutLaunchAgent(paths: LaunchAgentPaths): Promise<void> {
   }
 }
 
-function renderLaunchAgentPlist(paths: LaunchAgentPaths, configPath: string, roles: RunControlRole[] | undefined): string {
+export function renderLaunchAgentPlist(paths: LaunchAgentPaths, configPath: string, roles: RunControlRole[] | undefined): string {
   const args = [process.execPath, paths.entryPath, "start", "--config", configPath];
   if (roles && roles.length > 0) args.push("--roles", roles.join(","));
 
@@ -255,16 +313,16 @@ function launchAgentPath(): string {
   return [...new Set(paths)].join(":");
 }
 
-async function findExistingDaemonProcesses(entryPath: string): Promise<string[]> {
+async function findExistingDaemonProcesses(paths: LaunchAgentPaths): Promise<string[]> {
   const processes = await listProcesses();
   const currentPid = String(process.pid);
   return processes
     .filter((process) => process.pid !== currentPid)
-    .filter((process) => isDaemonCommand(process.command, entryPath))
+    .filter((process) => isDaemonCommand(process.command, paths.daemonEntryPaths))
     .map((process) => process.line);
 }
 
-async function isRunningInsideDaemon(entryPath: string): Promise<boolean> {
+async function isRunningInsideDaemon(paths: LaunchAgentPaths): Promise<boolean> {
   const processes = await listProcesses();
   if (processes.length === 0) return false;
 
@@ -275,7 +333,7 @@ async function isRunningInsideDaemon(entryPath: string): Promise<boolean> {
     seen.add(parentPid);
     const parent = byPid.get(parentPid);
     if (!parent) return false;
-    if (isDaemonCommand(parent.command, entryPath)) return true;
+    if (isDaemonCommand(parent.command, paths.daemonEntryPaths)) return true;
     parentPid = parent.ppid;
   }
   return false;
@@ -295,8 +353,32 @@ async function listProcesses(): Promise<Array<{ pid: string; ppid: string; comma
     });
 }
 
-function isDaemonCommand(command: string, entryPath: string): boolean {
-  return command.includes(entryPath) && /\sstart(\s|$)/.test(command);
+function isDaemonCommand(command: string, entryPaths: string[]): boolean {
+  return entryPaths.some((entryPath) => command.includes(entryPath)) && /\sstart(\s|$)/.test(command);
+}
+
+async function readCurrentLink(currentPath: string): Promise<string> {
+  try {
+    return await readlink(currentPath);
+  } catch (error) {
+    return error instanceof Error ? `unreadable (${error.message})` : "unreadable";
+  }
+}
+
+async function readPlistProgramArgument(plistPath: string): Promise<string | undefined> {
+  if (!existsSync(plistPath)) return undefined;
+  const raw = await readFile(plistPath, "utf8").catch(() => "");
+  const strings = [...raw.matchAll(/<string>([^<]+)<\/string>/g)].map((match) => unescapeXml(match[1]));
+  return strings.find((value) => value.endsWith("/dist/index.js"));
+}
+
+function unescapeXml(value: string): string {
+  return value
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&gt;/g, ">")
+    .replace(/&lt;/g, "<")
+    .replace(/&amp;/g, "&");
 }
 
 function runCommand(command: string, args: string[]): Promise<CommandResult> {

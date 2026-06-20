@@ -3,22 +3,52 @@ title: "pi-discord-threads Brain"
 type: "index"
 status: "active"
 created_at: "2026-06-03"
+updated_at: "2026-06-20"
 ---
 
 # pi-discord-threads Brain
 
-## Projects
+Use this as the repo memory front door. Place notes by usefulness, not topic: Projects are active outcomes; Areas are ongoing standards; Resources are reusable references; Archives/superseded notes preserve history.
 
-- [Discord Run HUD](./projects/discord-run-hud.svx)
-- [Personal Workroom DM Prototype](./projects/personal-workroom-dm-prototype.svx)
-- [Pi Discord Threads Learning Path](./projects/pi-discord-threads-learning-path.svx)
-- [Redis Run Control Plane](./projects/redis-run-control-plane.svx)
-- [Thread Title Intelligence](./projects/thread-title-intelligence.svx)
+## Start here
+
+- [Project README](../README.md) — human operator setup, run, Discord usage, release snapshots, and checks.
+- [Agent guide](../AGENTS.md) — source map, safety rules, validation map, and current work tracks for agents.
+- [Sources](./resources/pi-discord-threads-sources.svx) — current module/source map.
+- [Architecture review](./resources/pi-discord-threads-architecture-review.svx) — current architecture status and next slice recommendation.
+
+## Active projects
+
+- [Run-Control Typed Lua Command Builders PRD](./projects/run-control-lua-command-builders.svx) — next architecture slice; start with `recordRetryLaterScript`.
+- [Release Snapshot Deploy/Rollback PRD](./projects/release-snapshot-deploy-rollback.svx) — snapshot/list and activate/canary handoff implemented; next edge is full deploy/rollback restart flow.
+- [Project Structure Cleanup PRD](./projects/project-structure-cleanup.svx) — slice 1 shipped; keep future cleanup evidence-backed and narrow.
+- [Redis Run Control Plane](./projects/redis-run-control-plane.svx) — implemented V1 plus live reliability/deploy target receipts.
+
+## Implemented or paused project references
+
+Keep these out of the active project queue unless a new outcome is named.
+
+- [Discord Run HUD](./projects/discord-run-hud.svx) — implemented reference for HUD behavior.
+- [Thread Title Intelligence](./projects/thread-title-intelligence.svx) — implemented V1; future tuning depends on live use.
+- [Personal Workroom DM Prototype](./projects/personal-workroom-dm-prototype.svx) — config-gated implemented prototype.
+- [Effect End-to-End Spike PRD](./projects/effect-end-to-end-spike-prd.svx) — implemented spike receipts; newer architecture work is narrower.
+- [Link Ingest Discord Surface](./projects/link-ingest-discord-surface-2026-06-17.svx) — implemented private Discord surface; Central/publishing follow-ups belong outside this repo.
+- [Pi Discord Threads Learning Path](./projects/pi-discord-threads-learning-path.svx) — paused learning-path resource.
+
+## Areas
+
+- [Architecture](./areas/architecture.svx) — ongoing standards for XState, Effect, runtime ownership, and extracted seams.
+- [Build Process](./areas/build-process.svx) — validation/check map.
+- [Concepts](./areas/concepts.svx) — terminology hygiene and glossary ownership.
+- [Review](./areas/review.svx) — current assessment, risks, and next decisions.
 
 ## Resources
 
-- [OpenAI OAuth Cycle Handling](./resources/openai-oauth-cycle-handling.svx)
-- [Pi Discord Threads Sources](./resources/pi-discord-threads-sources.svx)
-- [Pi Discord Threads Glossary](./resources/pi-discord-threads-glossary.svx)
-- [Pi Discord Threads: Request Spine](./resources/tutorials/pi-discord-threads-request-spine.svx)
-- [Pi Discord Threads: State Ownership](./resources/tutorials/pi-discord-threads-state-ownership.svx)
+- [Pi Discord Threads Glossary](./resources/pi-discord-threads-glossary.svx) — canonical project terms.
+- [Pi Discord Threads Sources](./resources/pi-discord-threads-sources.svx) — current source/file map.
+- [Pi Discord Runtime Architecture Options](./resources/pi-discord-runtime-architecture-options-2026-06-17.svx) — superseded historical options brief.
+- [OpenAI OAuth Cycle Handling](./resources/openai-oauth-cycle-handling.svx) — reusable auth failure note.
+- [Component Library](./resources/component-library.svx) — Brain component rules.
+- [Learning Records](./resources/learning-records/pi-discord-threads/index.svx) — local lesson receipts.
+- [Request Spine tutorial](./resources/tutorials/pi-discord-threads-request-spine.svx) — needs refresh before teaching current startup flow.
+- [State Ownership tutorial](./resources/tutorials/pi-discord-threads-state-ownership.svx) — needs refresh before teaching current recovery defaults.

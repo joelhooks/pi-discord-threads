@@ -63,7 +63,7 @@ This is not a generalized deployment platform. It is a dev/operator feature for 
   - Heroku release = build artifact + config vars + append-only ledger: https://devcenter.heroku.com/articles/releases
   - Kubernetes rollout history/readiness/undo ideas: https://www.bluematador.com/blog/kubernetes-deployments-rolling-update-configuration
 
-## Current status — 2026-06-19
+## Current status — 2026-06-20
 
 Slice 1 shipped in `042d96a`:
 
@@ -72,14 +72,20 @@ Slice 1 shipped in `042d96a`:
 - Snapshot artifacts include built `dist/`, `package.json`, `package-lock.json`, exact private config copy, safe manifest, and `distSha256`.
 - Release root and release dirs are tightened to `0700`; copied private config is `0600`.
 - Dirty worktrees are refused by default unless `--allow-dirty` is explicit.
-- `release deploy` and `release rollback` still reject as not implemented.
-- No LaunchAgent mutation and no `releases/current` symlink exist yet.
 
-Next work should continue in three slices:
+Slice 2 is implemented in the current working slice:
 
-1. `release activate <release-id>` as a no-restart owner for `releases/current`, plus LaunchAgent handoff to that stable entrypoint.
-2. shared rollback helper for config backup/restore, then `release deploy` with preflight, postflight, and automatic rollback evidence.
-3. `release rollback <release-id>` with config restore, postflight proof, and ledger event.
+- `release activate <release-id|sha>` resolves a snapshot and flips `releases/current` without restart or `launchctl`.
+- Activation creates `releases/node_modules -> <repo>/node_modules` so release dirs can resolve unbundled package dependencies.
+- LaunchAgent install/status prefers `config.dataDir/releases/current/dist/index.js` when a current release exists, with repo `dist/index.js` fallback for first setup.
+- `release canary <release-id|sha|current>` verifies `distSha256` and runs `doctor` from the release artifact without starting Discord.
+- A rollback config helper backs up the current expanded `--config` file, restores a release config snapshot with `0600`, and refuses manifest/requested config path mismatch.
+- `release deploy` and full `release rollback` still reject as restart flows not implemented.
+
+Next work should continue in two slices:
+
+1. `release deploy` with preflight, canary, LaunchAgent restart from outside the active daemon tree, postflight proof, and automatic rollback using the shared config helper.
+2. Full `release rollback <release-id>` with symlink flip, config restore, restart, postflight proof, and ledger event.
 
 Keep the framing precise: this is **zero lost work + fast rollback**, not true zero downtime. The singleton Discord Gateway can still reconnect during restart.
 
@@ -240,6 +246,15 @@ The manifest must not include Discord tokens, secret values, full config JSON, o
 - First slice is snapshot/list only. No LaunchAgent mutation yet.
 - Do not call this true zero downtime. The target is zero lost work + fast rollback.
 
+## Deferred edge cases from shipped snapshot/list slice
+
+These are accepted residual risks from the implementation/review history. They are not deploy blockers, but future release work should not accidentally assume different behavior.
+
+- Malformed `releases/ledger.jsonl` tolerance is deferred. Current list behavior expects valid ledger lines; add tolerance only as an explicit recovery slice.
+- Same-second same-commit release id collisions fail safely instead of auto-disambiguating. If this becomes noisy, add a suffix policy with tests.
+- A process crash after final release-path reservation can leave an empty release directory that blocks that release id. Cleanup should stay conservative and ownership-checked.
+- Deploy/full rollback restart behavior is still deferred; `release activate` now owns `releases/current` without `launchctl`.
+
 ## Open questions
 
 ### Should V1 run `npm run build` inside `release snapshot`?
@@ -248,7 +263,7 @@ Recommendation: not in the first slice. Require existing `dist/` and record the 
 
 ### Should snapshots include `node_modules`?
 
-Recommendation: no for V1. Rollback runs from the repo's current dependency install, so dependency rollback is not perfect. Accept that as a dev-rig tradeoff for now; revisit only if dependency changes make rollback flaky.
+Decision: no for V1. Release activation instead maintains `releases/node_modules -> <repo>/node_modules` because TypeScript output is not bundled and release `dist/` imports package dependencies. This preserves fast local snapshots without copying dependencies; dependency rollback remains imperfect by design.
 
 ### Should release ids be timestamp-first or commit-first?
 
@@ -268,7 +283,7 @@ Recommendation: timestamp + short SHA, e.g. `20260619T153000Z-8a21bbe`. It sorts
 - Existing `npm run typecheck` passes.
 - `npm run brain:check` passes after docs updates.
 
-## Acceptance criteria — slice 2 `release activate` + LaunchAgent `releases/current` handoff
+## Acceptance criteria — slice 2 `release activate` + LaunchAgent `releases/current` handoff — implemented
 
 - CLI parsing accepts `release activate <release-id>` and rejects missing/extra activate arguments.
 - `release activate` resolves a release by id or unambiguous short commit.
@@ -281,6 +296,26 @@ Recommendation: timestamp + short SHA, e.g. `20260619T153000Z-8a21bbe`. It sorts
 - Status output makes the active entrypoint obvious and does not print secrets.
 - Regression tests cover symlink activation and plist rendering/current-entrypoint behavior without calling `launchctl`.
 - No deploy/rollback restart behavior is smuggled into this slice unless explicitly accepted.
+
+## Implementation receipt — slice 2 — 2026-06-20
+
+Implemented:
+
+- CLI parsing and dispatch for `release activate <target>` and `release canary <target>`.
+- Release resolver by release id, release id prefix, commit, or unambiguous short commit.
+- Atomic `releases/current` symlink update with refusal for non-symlink current paths.
+- `release activate` verifies `distSha256` before flipping `current` so a tampered release artifact cannot become current.
+- `releases/node_modules` dependency symlink guard.
+- LaunchAgent path/plist logic that prefers `releases/current/dist/index.js` when active, refuses broken/unsafe current symlink state, and reports `entryMode`, current target, plist program, and plist mismatch in status.
+- Config backup/restore helper with exclusive timestamped backup, suffix collision handling, `0600` restore, and manifest/requested config path guard.
+- Canary command that verifies `distSha256` and runs `doctor` from the release artifact without starting Discord or calling `launchctl`.
+
+Verification receipt:
+
+- `npm run test:release-snapshot` — 18/18 passed after build.
+- Fresh-context review findings resolved: activate digest check, broken current LaunchAgent fallback, same-second config backup collision, and plist rewrite/mismatch clarity.
+
+Live safety note: no live LaunchAgent restart/kickstart and no live config restore were performed during implementation.
 
 ## Acceptance criteria — slice 3 deploy
 

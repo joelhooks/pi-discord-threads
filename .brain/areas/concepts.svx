@@ -1,23 +1,27 @@
 # Concepts
 
-Canonical vocabulary for Pi Discord Threads.
+Ongoing terminology hygiene for Pi Discord Threads.
 
-## Project
+## Rule
 
-Pi Discord Threads is the current project context for this repository.
+Project terms live in [Pi Discord Threads Glossary](../resources/pi-discord-threads-glossary.svx). This Area owns the standard for when a term graduates into the glossary.
 
-## Brain
+Add a term when it prevents future mistakes in code, docs, tests, operations, or agent handoffs. Do not add generic programming vocabulary.
 
-The project-local knowledge graph under `.brain/`. Brain pages are authored as `.svx` and rendered by pi-notes.
+## Current canonical terms
 
-## Brain Data
+- Pi session JSONL
+- Registry projection
+- Redis run control
+- At-least-once run control
+- Idempotent finalization
+- XState lifecycle truth
+- Effect resource seam
+- LaunchAgent boundary
+- Release snapshot
+- `releases/current`
+- Zero lost work + fast rollback
 
-Large or structured source material under `.brain/data/**`. Keep raw dumps out of `.svx` pages.
+## Review cadence
 
-## Brain Component
-
-A reusable Svelte renderer under `.brain/components/**/*.svelte` for MDSvX notes and review surfaces.
-
-## Review Batch
-
-A structured browser feedback payload that should be handled with a receipt.
+Revisit this area after any slice that adds a durable state owner, lifecycle state, release/deploy concept, or public operator command.
