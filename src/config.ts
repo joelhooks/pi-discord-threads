@@ -104,7 +104,7 @@ export interface AppConfig {
 export type ReleaseCommand = "snapshot" | "list" | "deploy" | "rollback";
 
 export interface CliOptions {
-  command: "start" | "init-config" | "doctor" | "status" | "reconcile" | "daily-post" | "install-launch-agent" | "uninstall-launch-agent" | "launch-agent-status" | "release" | "help";
+  command: "start" | "init-config" | "doctor" | "reconcile" | "daily-post" | "install-launch-agent" | "uninstall-launch-agent" | "launch-agent-status" | "release" | "help";
   configPath: string;
   dailyPostRequestPath?: string;
   roles?: RunControlRole[];
@@ -525,7 +525,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     }
   }
 
-  if (!["start", "init-config", "doctor", "status", "reconcile", "daily-post", "install-launch-agent", "uninstall-launch-agent", "launch-agent-status", "help"].includes(command)) {
+  if (!["start", "init-config", "doctor", "reconcile", "daily-post", "install-launch-agent", "uninstall-launch-agent", "launch-agent-status", "help"].includes(command)) {
     throw new Error(`Unknown command: ${command}`);
   }
 

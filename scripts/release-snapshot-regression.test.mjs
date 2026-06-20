@@ -344,6 +344,7 @@ test("release CLI parsing is strict for release subcommands", () => {
   assert.equal(rollback.releaseCommand, "rollback");
   assert.equal(rollback.releaseTarget, "20260619T153000Z-abc1234");
 
+  assert.throws(() => parseCliArgs(["status"]), /Unknown command: status/);
   assert.throws(() => parseCliArgs(["release", "list", "--allow-dirty"]), /only valid for release snapshot/);
   assert.throws(() => parseCliArgs(["release", "snapshot", "--wat"]), /Unknown release option/);
   assert.throws(() => parseCliArgs(["release", "snapshot", "extra"]), /Unexpected release argument/);

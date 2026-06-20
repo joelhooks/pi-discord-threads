@@ -38,6 +38,8 @@ Current Brain decisions still hold:
 - `src/discord-bot.ts` — remaining Discord gateway/router/orchestration mega-module.
 - `src/engine/layers.ts` / `src/engine/runtime.ts` / `src/pi-runtime.ts` — current Effect service/runtime seam and Pi runtime ownership.
 - `.brain/projects/release-snapshot-deploy-rollback.svx` — deploy/rollback PRD and snapshot/list acceptance criteria.
+- `.brain/projects/run-control-lua-command-builders.svx` — typed Lua command builders PRD for the next architecture slice.
+- `.brain/projects/project-structure-cleanup.svx` — repo organization, operator README, agent orientation, and dead-code cleanup PRD.
 - `src/release-snapshots.ts` / `scripts/release-snapshot-regression.test.mjs` — current release snapshot/list implementation and safety regressions.
 
 ## Current status — 2026-06-19

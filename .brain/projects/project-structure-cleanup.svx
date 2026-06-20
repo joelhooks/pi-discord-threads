@@ -1,0 +1,147 @@
+---
+title: "Project Structure Cleanup PRD"
+type: "project"
+status: "active"
+created_at: "2026-06-19"
+tags:
+  - prd
+  - cleanup
+  - docs
+  - architecture
+---
+
+# Project Structure Cleanup PRD
+
+## Problem
+
+`pi-discord-threads` has grown from a small Discord bridge into a local operator daemon with Discord commands, Pi runtime ownership, Redis run control, release snapshots, LaunchAgent management, link ingest, HUD rendering, and Brain planning.
+
+The code has real seams now, but the repo orientation still makes a new agent or human operator spelunk through everything at once:
+
+- `README.md` is accurate but too dense for direct setup/use.
+- `AGENTS.md` only says “read Brain first”; it does not orient agents to the risky seams.
+- Release/deploy work is planned, but future agents need stronger boundaries around LaunchAgent mutation, Redis invariants, and single-writer cleanup.
+- Dead code should be pruned only when evidence-backed, not by vibes.
+
+## Desired outcome
+
+A human operator can open the repo and answer, fast:
+
+1. What is this?
+2. How do I set it up?
+3. How do I run/check/restart it safely?
+4. How do I use it in Discord?
+5. Where should I edit for a specific kind of change?
+
+An agent can open the repo and answer, fast:
+
+1. Which Brain docs are canonical?
+2. Which modules own which seams?
+3. What must not be touched casually?
+4. Which tests prove the risky behavior?
+5. How to prune dead code safely?
+
+## Non-goals
+
+- Do not reorganize directories in the same slice as docs cleanup unless the moved modules are tiny and tests prove imports.
+- Do not split `src/discord-bot.ts` blindly. Extract behavior only behind tests and Brain-backed slices.
+- Do not delete code just because it has low grep counts.
+- Do not mutate LaunchAgent, `releases/current`, or live Redis state during docs/organization work.
+- Do not turn the repo into a generic framework.
+
+## Source receipts
+
+- `AGENTS.md` — current agent instructions are only the pi-notes Brain block.
+- `README.md` — current operator guide is dense and mixes setup, features, Discord commands, and design invariants.
+- `.brain/resources/pi-discord-threads-architecture-review.svx` — current architecture direction and next Lua/deploy slices.
+- `.brain/projects/run-control-lua-command-builders.svx` — next architecture PRD.
+- `.brain/projects/release-snapshot-deploy-rollback.svx` — release/deploy/rollback PRD.
+- `src/index.ts` — CLI entrypoint and command dispatch.
+- `src/config.ts` — config, CLI parsing, and command union.
+- `src/discord-bot.ts` and `src/discord/**` — Discord operator surface and extracted Discord helper seams.
+- `src/run-control/**` — Redis/XState run-control plane.
+- `src/engine/**` and `src/pi-runtime.ts` — Effect service layer and Pi runtime ownership.
+- `src/release-snapshots.ts` and `src/launch-agent.ts` — release storage and LaunchAgent lifecycle.
+- `package.json` — validation command map.
+
+## Organization map
+
+Use this map in docs and future PRDs:
+
+| Area | Files | Owns |
+| --- | --- | --- |
+| CLI/config | `src/index.ts`, `src/config.ts` | command parsing, dispatch, config defaults |
+| Discord surface | `src/discord-bot.ts`, `src/discord/**` | Discord commands, thread UX, HUD/final message rendering |
+| Pi runtime | `src/pi-runtime.ts`, `src/engine/**` | runtime ownership, Effect layers, service ports |
+| Redis run control | `src/run-control/**` | leases, worker state machines, Lua scripts, doctor/reconcile |
+| Registry/work graph | `src/registry.ts`, `src/work-graph.ts`, `src/thread-run-state.ts` | Discord ↔ Pi session projection |
+| Release/daemon ops | `src/release-snapshots.ts`, `src/launch-agent.ts` | local release bundles, LaunchAgent plist/status/restart guard |
+| Link ingest | `src/link-ingest*.ts`, `src/daily-post.ts` | explicit URL capture and status bridge |
+| Human/agent docs | `README.md`, `AGENTS.md`, `.brain/**/*.svx` | operator setup, agent orientation, durable decisions |
+
+## Cleanup policy
+
+Dead code pruning requires evidence:
+
+1. Find a candidate with source search, import graph, tests, and command help/docs.
+2. Prefer removing narrow unused aliases/branches before deleting modules.
+3. Run `npm run typecheck` after code deletions.
+4. Run the focused regression tests for touched areas.
+5. If a file is only used by tests as a public barrel or fixture, do not call it dead without deciding to remove that public surface too.
+
+## Immediate cleanup slice
+
+- Rewrite `README.md` as an ELI5 operator guide: direct setup, run, use, check, release snapshot, and project map.
+- Expand `AGENTS.md` with agentic orientation: Brain sources, source map, safe commands, invariants, dead-code policy, and validation map.
+- Remove only obvious dead code found by inspection. First candidate: the unhandled CLI `status` command in `src/config.ts`, because it is accepted by parsing but not handled by `src/index.ts`, not shown in help, and conflicts with the explicit `launch-agent-status`/Discord `status` surfaces.
+- Keep broader directory moves deferred to implementation PRDs.
+
+## Implementation receipt — 2026-06-19
+
+This docs/cleanup slice did the first narrow pass:
+
+- Rewrote `README.md` as a direct operator guide for setup, running, Discord usage, health checks, release snapshots, project map, and validation commands.
+- Expanded `AGENTS.md` with source map, active work tracks, safety rules, validation map, and commit discipline.
+- Added this PRD as the durable structure/cleanup target.
+- Removed the dead CLI `status` command from `src/config.ts`. Evidence: parser accepted it, `src/index.ts` had no handler, help did not list it, and the project already has `launch-agent-status` plus Discord `/pi status`/`!pi status`.
+- Did not move directories or split `src/discord-bot.ts`; that needs behavior-specific slices and tests.
+
+
+## Acceptance criteria
+
+- `README.md` tells a human operator how to install, configure, run, use Discord commands, inspect health, and create/list release snapshots without reading the whole codebase.
+- `AGENTS.md` tells future agents where to look, what not to mutate casually, and which checks map to which area.
+- Brain PRDs link the cleanup and organization work to the Lua/deploy slices.
+- Any dead code removal is narrow, source-backed, and typechecked.
+- `npm run brain:check` passes.
+- `npm run typecheck` passes if source code is touched.
+
+## Validation plan
+
+```sh
+npm run brain:check
+npm run typecheck
+```
+
+If release docs or release source behavior changes later, also run:
+
+```sh
+npm run test:release-snapshot
+```
+
+If run-control source behavior changes later, also run:
+
+```sh
+npm run test:run-control-lua-scripts
+npm run test:run-control-store
+npm run test:run-control-worker
+```
+
+## Tracker mirror plan
+
+Brain is canonical. If mirrored later, create small issues:
+
+1. `docs: rewrite operator README`
+2. `docs: add agent orientation to AGENTS`
+3. `chore: prune evidence-backed dead code`
+4. `refactor: split the next Discord/run-control module only with tests`

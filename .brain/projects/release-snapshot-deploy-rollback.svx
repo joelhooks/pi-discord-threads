@@ -63,9 +63,29 @@ This is not a generalized deployment platform. It is a dev/operator feature for 
   - Heroku release = build artifact + config vars + append-only ledger: https://devcenter.heroku.com/articles/releases
   - Kubernetes rollout history/readiness/undo ideas: https://www.bluematador.com/blog/kubernetes-deployments-rolling-update-configuration
 
+## Current status — 2026-06-19
+
+Slice 1 shipped in `042d96a`:
+
+- `release snapshot` creates local release bundles under `config.dataDir/releases`.
+- `release list` prints newest-first safe ledger metadata.
+- Snapshot artifacts include built `dist/`, `package.json`, `package-lock.json`, exact private config copy, safe manifest, and `distSha256`.
+- Release root and release dirs are tightened to `0700`; copied private config is `0600`.
+- Dirty worktrees are refused by default unless `--allow-dirty` is explicit.
+- `release deploy` and `release rollback` still reject as not implemented.
+- No LaunchAgent mutation and no `releases/current` symlink exist yet.
+
+Next work should continue in three slices:
+
+1. `release activate <release-id>` as a no-restart owner for `releases/current`, plus LaunchAgent handoff to that stable entrypoint.
+2. shared rollback helper for config backup/restore, then `release deploy` with preflight, postflight, and automatic rollback evidence.
+3. `release rollback <release-id>` with config restore, postflight proof, and ledger event.
+
+Keep the framing precise: this is **zero lost work + fast rollback**, not true zero downtime. The singleton Discord Gateway can still reconnect during restart.
+
 ## Operator workflows
 
-### Slice 1: snapshot current build
+### Slice 1: snapshot current build — shipped
 
 ```sh
 node dist/index.js release snapshot --config ~/.config/pi-discord-threads/config.json
@@ -98,35 +118,54 @@ Expected behavior:
 - Show release id, commit, branch, dirty flag, created timestamp, config path, and whether build/config artifacts exist.
 - Never print secrets or full config contents.
 
-### Later: deploy
+### Slice 2: activate current release + LaunchAgent handoff
+
+```sh
+node dist/index.js release activate <release-id> --config ~/.config/pi-discord-threads/config.json
+```
+
+Expected behavior:
+
+1. Resolve the requested release snapshot.
+2. Create or flip `releases/current` to that release without restarting the daemon.
+3. Add a LaunchAgent-safe entrypoint path that runs from `config.dataDir/releases/current/dist/index.js`.
+4. Keep `WorkingDirectory` and log paths explicit.
+5. Do not call `launchctl` from `release activate`.
+6. Preserve the existing guard that refuses restart from inside the active bridge process tree for commands that do restart.
+7. Make status/doctor output show whether the LaunchAgent entry points at the repo `dist/` or `releases/current`.
+
+### Slice 3: deploy
 
 ```sh
 node dist/index.js release deploy --config ~/.config/pi-discord-threads/config.json
 ```
 
-Expected behavior later:
+Expected behavior:
 
-1. Create a release snapshot.
-2. Run doctor/preflight.
+1. Create a release snapshot or select a fresh snapshot made by the command.
+2. Run doctor/preflight and show Redis/run-control safety evidence.
 3. Flip `releases/current` to the selected release.
-4. Restart/kickstart LaunchAgent.
+4. Restart/kickstart LaunchAgent from outside the active daemon process tree.
 5. Run doctor/postflight.
-6. If postflight cannot prove active-run safety, automatically rollback to previous release and show evidence.
+6. If postflight cannot prove active-run safety, automatically rollback to the previous release using the same config backup/restore helper as manual rollback.
+7. Automatic rollback writes a timestamped backup of the current expanded `--config` file, restores the previous release's `config.json` with restrictive permissions, flips `releases/current` back, restarts from outside the daemon tree, runs postflight, and shows rollback evidence.
+8. Append deploy and automatic-rollback events to the ledger with previous/current release ids, config backup path, postflight result summary, and no secrets.
 
-### Later: rollback
+### Slice 4: rollback
 
 ```sh
 node dist/index.js release rollback <sha-or-release-id> --config ~/.config/pi-discord-threads/config.json
 ```
 
-Expected behavior later:
+Expected behavior:
 
 1. Resolve the requested release.
 2. Flip `releases/current` back.
-3. Restore exact private config copy.
-4. Restart/kickstart LaunchAgent.
-5. Run doctor/postflight.
-6. Append rollback event to the ledger.
+3. Restore the exact private config copy to the expanded `--config` path after writing a timestamped backup of the previous file.
+4. Refuse rollback if the target release manifest's `configPath` conflicts with the requested `--config` path unless an explicit future force flag exists.
+5. Restart/kickstart LaunchAgent from outside the active daemon process tree.
+6. Run doctor/postflight.
+7. Append rollback event to the ledger with previous/current release ids, config backup path, and postflight result summary.
 
 ## Implementation shape
 
@@ -172,9 +211,10 @@ Expected behavior later:
   "allowDirty": false,
   "nodeVersion": "v24.16.0",
   "buildCommand": "npm run build",
-  "configPath": "/Users/joel/.config/pi-discord-threads/config.json",
+  "distSha256": "<sha256>",
+  "configPath": "<expanded-config-path>",
   "configSummary": {
-    "dataDir": "/Users/joel/.local/share/pi-discord-threads",
+    "dataDir": "<config.dataDir>",
     "runControlEnabled": true,
     "roles": ["bot", "worker", "reconcile"],
     "keyPrefix": "pi-discord-threads"
@@ -188,7 +228,7 @@ Expected behavior later:
 }
 ```
 
-The manifest must not include Discord tokens, secret values, full config JSON, or anything leased from `agent-secrets`.
+The manifest must not include Discord tokens, secret values, full config JSON, or anything leased from the local secret manager.
 
 ## Decisions already made
 
@@ -214,22 +254,62 @@ Recommendation: no for V1. Rollback runs from the repo's current dependency inst
 
 Recommendation: timestamp + short SHA, e.g. `20260619T153000Z-8a21bbe`. It sorts naturally and still maps to Git.
 
-## Acceptance criteria — slice 1
+## Acceptance criteria — slice 1 snapshot/list — shipped
 
-- `release snapshot` creates `<config.dataDir>/releases/<release-id>/` using a temp directory then atomic rename where practical.
+- `release snapshot` creates `<config.dataDir>/releases/<release-id>/` using safe temporary staging and collision refusal.
 - Snapshot copies `dist/`, `package.json`, `package-lock.json`, and exact private config file.
 - Snapshot writes `manifest.json` with safe metadata and no secrets.
 - Snapshot appends one valid JSON line to `releases/ledger.jsonl`.
 - Snapshot refuses dirty worktree unless `--allow-dirty` is present.
 - `release list` prints newest-first safe metadata and no secrets.
-- Private config snapshot is written local-only with restrictive permissions, ideally `0600`.
+- Private config snapshot is written local-only with restrictive permissions, `0600`.
+- Release root and release dirs are `0700`.
 - Tests use a temp `dataDir` and temp config; no LaunchAgent mutation.
-- Existing `npm run typecheck` still passes.
+- Existing `npm run typecheck` passes.
 - `npm run brain:check` passes after docs updates.
+
+## Acceptance criteria — slice 2 `release activate` + LaunchAgent `releases/current` handoff
+
+- CLI parsing accepts `release activate <release-id>` and rejects missing/extra activate arguments.
+- `release activate` resolves a release by id or unambiguous short commit.
+- `release activate` creates/updates `releases/current` and refuses when the target release lacks `dist/index.js`.
+- `release activate` does not call `launchctl` and does not restart the daemon.
+- LaunchAgent install/status can point at `config.dataDir/releases/current/dist/index.js` without hardcoding one release id.
+- The current symlink is created/updated only by release commands, not by ad hoc install side effects.
+- The command refuses to install/start when `releases/current/dist/index.js` is missing.
+- Existing inside-daemon restart guard remains intact.
+- Status output makes the active entrypoint obvious and does not print secrets.
+- Regression tests cover symlink activation and plist rendering/current-entrypoint behavior without calling `launchctl`.
+- No deploy/rollback restart behavior is smuggled into this slice unless explicitly accepted.
+
+## Acceptance criteria — slice 3 deploy
+
+- `release deploy` creates/selects a release snapshot and records previous/current release ids.
+- Preflight runs before flipping `current` and includes doctor/run-control evidence.
+- `releases/current` flips atomically where practical.
+- LaunchAgent restart happens only from outside the active daemon process tree.
+- Postflight runs after restart and reports active-run safety evidence: reclaimed, pending, finalized, terminal, or explicitly unsafe.
+- Deploy implementation has a shared rollback helper before automatic rollback is wired.
+- If postflight cannot prove safety, deploy automatically rolls back to the previous release using that helper.
+- Automatic rollback backs up the current expanded `--config` file, restores the previous release's config snapshot with restrictive permissions, flips `releases/current` back, restarts, runs postflight, and records the backup path/result.
+- Ledger records deploy success/failure and automatic rollback events without secrets.
+- Tests use fake LaunchAgent/doctor adapters; no real `launchctl` in regression tests.
+
+## Acceptance criteria — slice 4 rollback
+
+- `release rollback <release-id>` resolves by release id or unambiguous short commit.
+- Rollback flips `releases/current` to the selected release.
+- Rollback writes a timestamped backup of the current expanded `--config` file before restore.
+- Rollback restores the exact private config copy to the expanded `--config` path with restrictive permissions.
+- Rollback refuses config path mismatches between the release manifest and requested `--config` path unless a future explicit force flag exists.
+- LaunchAgent restart happens only from outside the active daemon process tree.
+- Postflight proves active-run safety or reports an explicit unsafe state.
+- Ledger records rollback event without secrets, including backup path and postflight result summary.
+- Tests use fake LaunchAgent/doctor adapters; no real `launchctl` in regression tests.
 
 ## Validation plan
 
-Slice 1 should run:
+Always run after release PRD implementation slices:
 
 ```sh
 npm run typecheck
@@ -237,7 +317,20 @@ npm run test:release-snapshot
 npm run brain:check
 ```
 
-Manual smoke after implementation:
+Additional checks by slice:
+
+```sh
+# LaunchAgent current handoff
+npm run build
+node --test scripts/<launch-agent-current-regression>.test.mjs
+
+# Deploy/rollback once implemented
+# Run regression tests with fake LaunchAgent/doctor adapters instead of real launchctl.
+node --test scripts/<release-deploy-regression>.test.mjs
+node --test scripts/<release-rollback-regression>.test.mjs
+```
+
+Manual smoke for the already-shipped snapshot/list slice:
 
 ```sh
 npm run build
@@ -245,15 +338,16 @@ node dist/index.js release snapshot --config ~/.config/pi-discord-threads/config
 node dist/index.js release list --config ~/.config/pi-discord-threads/config.json
 ```
 
-Confirm generated manifest/list output redacts config secrets and does not print leased secret values.
+Confirm generated manifest/list/ledger output redacts config secrets and does not print leased secret values.
 
 ## Tracker mirror plan
 
 Brain is canonical. If this gets mirrored to issues later, create vertical slices:
 
-1. `release snapshot/list` storage foundation.
-2. LaunchAgent entrypoint switch to `releases/current`.
+1. `release snapshot/list` storage foundation — shipped in `042d96a`.
+2. `release activate <release-id>` plus LaunchAgent entrypoint switch to `releases/current`.
 3. `release deploy` with preflight/postflight and automatic rollback.
-4. Running-session deploy smoke harness.
+4. `release rollback <release-id>` with config backup/restore and postflight proof.
+5. Running-session deploy smoke harness.
 
 Each issue should link back to this PRD.

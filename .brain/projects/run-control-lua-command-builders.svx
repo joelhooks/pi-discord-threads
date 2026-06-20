@@ -1,0 +1,190 @@
+---
+title: "Run-Control Typed Lua Command Builders PRD"
+type: "project"
+status: "active"
+created_at: "2026-06-19"
+tags:
+  - prd
+  - architecture
+  - run-control
+  - redis
+---
+
+# Run-Control Typed Lua Command Builders PRD
+
+## Problem
+
+Redis run control now uses named Lua scripts, but the TypeScript callsites still hand-build positional `EVAL` commands. That means the most fragile part of the contract — `KEYS`/`ARGV` order — lives away from the script text.
+
+The first concrete case is `recordRetryLaterScript`:
+
+- `src/run-control/lua-scripts.ts` names and exports the script.
+- `src/run-control/store.ts` still assembles the `EVAL` array inline inside `RunControlStore.recordRetryLater()`.
+- That script owns safety-sensitive behavior: verify active pointer, verify lease token, increment retry-later count, release lease below threshold, and dead-letter/clear active state after max attempts.
+
+This is a small bug-prevention move. Not a Lua framework. Not a storage rewrite.
+
+## Desired outcome
+
+`recordRetryLaterScript` has a typed command builder beside the script, and `RunControlStore.recordRetryLater()` calls that builder instead of hand-building positional Redis command arrays.
+
+The builder result becomes the local contract for:
+
+- number of keys;
+- key order;
+- argument order;
+- bounded `maxAttempts` formatting;
+- the exact bounded value reused by retry/dead-letter event metadata;
+- script source association.
+
+After this slice, future Lua scripts can move one at a time to the same boring pattern.
+
+## Non-goals
+
+- Do not change Redis behavior or Lua semantics in the first slice.
+- Do not convert every Lua script at once.
+- Do not introduce a generic Redis/Lua framework.
+- Do not move Redis key construction out of `RunControlKeys`.
+- Do not touch Discord finalization behavior, LaunchAgent behavior, deploy/rollback, or live Redis state.
+- Do not rename run-control statuses or lifecycle states.
+
+## Source receipts
+
+- `.brain/resources/pi-discord-threads-architecture-review.svx` — current recommendation: typed Lua command builders are the next architecture slice; start with `recordRetryLaterScript`.
+- `.brain/projects/redis-run-control-plane.svx` — dead-letter and doctor hardening receipt; `recordRetryLater` is the atomic retry-later/dead-letter transition.
+- `src/run-control/lua-scripts.ts` — named Lua scripts, including `recordRetryLaterScript`.
+- `src/run-control/store.ts` — current hand-built `EVAL` command arrays, including `RunControlStore.recordRetryLater()`.
+- `scripts/run-control-lua-scripts-regression.test.mjs` — current script-level regression coverage.
+- `scripts/run-control-store-regression.test.mjs` — current store-level run-control regression coverage.
+- `package.json` — validation scripts: `test:run-control-lua-scripts`, `test:run-control-store`, `test:run-control-worker`, `typecheck`, `brain:check`.
+
+## Developer workflow
+
+### Slice 1: `recordRetryLaterScript` command builder
+
+Implementation shape:
+
+1. Add a typed builder in `src/run-control/lua-scripts.ts`, close to `recordRetryLaterScript`.
+2. Give the builder an explicit input object. Include only the values needed to build the Redis command:
+   - active pointer key;
+   - lease key;
+   - run hash key;
+   - run id;
+   - lease token;
+   - worker id;
+   - timestamp;
+   - reason;
+   - max attempts.
+3. Return the complete `EVAL` command array in the exact order expected by the script.
+4. Switch `RunControlStore.recordRetryLater()` to call the builder.
+5. Add focused tests that fail loudly on positional drift.
+
+Recommended shape:
+
+```ts
+export interface RecordRetryLaterEvalInput {
+  activeKey: string;
+  leaseKey: string;
+  runKey: string;
+  runId: string;
+  leaseToken: string;
+  workerId: string;
+  now: string;
+  reason: string;
+  maxAttempts: number;
+}
+
+export interface RecordRetryLaterEval {
+  command: string[];
+  boundedMaxAttempts: number;
+}
+
+export function buildRecordRetryLaterEval(input: RecordRetryLaterEvalInput): RecordRetryLaterEval;
+```
+
+The exact type names can change. The important bit is that the builder lives beside the script, owns the positional contract, and exposes the bounded max-attempt value so Redis `ARGV[6]` and appended run-event metadata cannot drift.
+
+### Later slices: expand one script at a time
+
+After the first builder proves the pattern, convert the next scripts by risk/usefulness rather than by file order:
+
+1. `claimRunLeaseScript`
+2. `heartbeatRunLeaseScript`
+3. `verifyRunOwnershipScript`
+4. `atomicEnqueueRunScript`
+5. smaller cleanup scripts only if they remain worth it
+
+Each conversion should be a small behavior-preserving diff with tests.
+
+## Decisions already made
+
+- Start with `recordRetryLaterScript` because it owns retry-later/dead-letter safety.
+- Keep the scripts named in `lua-scripts.ts`.
+- Keep `store.ts` as the Redis behavior facade.
+- Keep `RunControlKeys` as the key-construction authority.
+- Treat this as architecture locality work, not feature behavior.
+
+## Open questions
+
+### Should builders return raw `string[]` or a branded command type?
+
+Recommendation: start with raw `string[]` plus explicit input types and exact shape tests. A branded type can come later if more scripts move and accidental misuse appears.
+
+### Should the builder compute `now`?
+
+Recommendation: no. Let `store.ts` continue to choose timestamps so tests can inject deterministic time later if needed. The builder should only map already-decided values into Redis command shape.
+
+### Should the builder bound `maxAttempts`?
+
+Recommendation: yes, but preserve current behavior exactly: `Math.max(1, Math.floor(maxAttempts))`, stringified in the Redis command. The builder should return the bounded number too, so store event metadata uses the same value. Add a test for fractional/zero values so this safety behavior does not drift.
+
+## Acceptance criteria — slice 1
+
+- `src/run-control/lua-scripts.ts` exports a typed builder for `recordRetryLaterScript`.
+- `RunControlStore.recordRetryLater()` no longer hand-builds that `EVAL` array inline.
+- The builder result returns the exact command order:
+  - `EVAL`
+  - `recordRetryLaterScript.source`
+  - `3`
+  - active pointer key
+  - run lease key
+  - run hash key
+  - run id
+  - lease token
+  - worker id
+  - timestamp
+  - reason
+  - bounded max attempts string
+- The builder result exposes `boundedMaxAttempts` as a number, and `RunControlStore.recordRetryLater()` uses it for appended retry/dead-letter event metadata.
+- Tests assert the exact command shape and max-attempt bounding, including event metadata using the same bounded value.
+- Existing retry-later/dead-letter behavior stays unchanged.
+- Existing run-control store/worker/lua-script tests still pass.
+- Typecheck and Brain check pass.
+
+## Validation plan
+
+Run after implementation:
+
+```sh
+npm run typecheck
+npm run test:run-control-lua-scripts
+npm run test:run-control-store
+npm run test:run-control-worker
+npm run brain:check
+```
+
+Focused manual review:
+
+```sh
+rg -n "recordRetryLaterScript\.source|buildRecordRetryLater" src/run-control/lua-scripts.ts src/run-control/store.ts scripts/run-control-*.mjs
+```
+
+Expected manual review result: script source appears in `lua-scripts.ts`, the builder is used by `store.ts`, and tests cover the positional command contract.
+
+## Tracker mirror plan
+
+Brain is canonical. If mirrored to issues later, use one vertical slice:
+
+1. `refactor: add typed Redis Lua builder for recordRetryLater`
+
+Acceptance should link back to this PRD and include the validation commands above.

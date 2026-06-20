@@ -1,208 +1,328 @@
 # pi-discord-threads
 
-Portable local Discord bridge for durable Pi coding-agent sessions.
+A local Discord bot that lets Joel talk to Pi coding-agent sessions from Discord threads.
 
-## Current MVP
+ELI5: Discord is the remote control. Pi is the worker. This bridge keeps a thread mapped to a real Pi session file so the conversation can continue later instead of becoming a disposable chat blob.
 
-- `!pi <prompt>` in a server text channel creates a Discord thread and a persistent Pi session.
-- `/pi workspace name:<workspace>` or `!pi workspace <workspace>` creates a thread rooted in a configured workspace cwd.
-- `/pi compose` opens a multi-line prompt modal; active run messages include only a minimal ESC button.
-- Message context menu `Ask Pi about message` starts a Pi thread from a selected Discord message.
-- Messages inside a registered Discord thread continue that Pi session. Daily SHITRAT date threads are registered too, so replying in the daily thread resumes an agent instead of leaving a static log dump.
-- Bot DMs can be wired to a single-user Personal Workroom prototype through config, disabled by default.
-- Pi skills behave normally, including model auto-invocation. Discord slash equivalent is `/pi skill name:<skill>`.
-- Link ingest has explicit out-of-phase paths: `/pi ingest url:<url>`, `/pi capture url:<url> note:<optional>`, or `!pi ingest <url> [note]` sends `link/ingest.requested` to Central Inngest and records the Discord ↔ source mapping locally.
-- Local secrets are leased from `secrets`; values are never printed.
-- Registry stores `discord_thread_id -> pi_session_file` and message-to-entry IDs when available.
-- Run status uses a native Discord HUD with an LLM narrator while running; final answers are posted as fresh Discord messages so thread notifications fire.
+## What you can do right now
+
+- Start a Pi session from Discord with `!pi <prompt>` or `/pi ask`.
+- Keep talking in the created Discord thread to continue the same Pi session.
+- Point a thread at a local workspace with `/pi workspace` or `!pi workspace`.
+- Stop/escape active runs with `/pi esc`, `/pi abort`, `!pi esc`, or `!pi abort`.
+- Attach files; allowed files are saved locally and passed to Pi as paths.
+- Capture explicit URLs with `/pi ingest`, `/pi capture`, or `!pi ingest`.
+- Run as a macOS user LaunchAgent for long-lived local use.
+- Snapshot the current built release with `release snapshot` and list snapshots with `release list`.
 
 ## Requirements
 
 - Node.js `>=22.19.0`
-- Local `pi` credentials/settings already configured
-- Local `secrets` daemon with `discord_bot_token`
-- Discord bot with:
-  - Message Content Intent enabled for prefix/normal-thread messages
-  - `applications.commands` scope for slash commands
-  - permissions to read/send messages
-  - permission to create public threads
+- Local Pi configured and usable from this machine
+- Local `secrets` daemon with a Discord bot token
+- A Discord bot with:
+  - Message Content Intent
+  - `applications.commands` scope
+  - read/send message permissions
+  - public thread creation permission
 
-Optional local secret:
+Optional but recommended:
 
-- `discord_allowed_user_id` to restrict access
+- an allowed-user secret so only Joel can use the bot
+- a config file at `~/.config/pi-discord-threads/config.json`
 
-## Setup
+## Fast setup
 
 ```bash
 npm install
 npm run build
-npm run start -- start
+npm run start -- init-config
+npm run start -- doctor
 ```
 
-Write a config file:
+Start in the foreground:
 
 ```bash
-npm run start -- init-config
+npm run start -- start --config ~/.config/pi-discord-threads/config.json
 ```
 
-Default config path:
+The default config path is:
 
 ```text
 ~/.config/pi-discord-threads/config.json
 ```
 
-See `config.example.json` for the full shape. If the config file is missing, the daemon uses the same defaults.
+See `config.example.json` for the full config shape.
 
-### macOS LaunchAgent daemon
+## Run it as a macOS daemon
 
-For long-running local use on macOS, run the bridge as a user LaunchAgent instead of an orphaned shell/nohup process. This keeps the daemon in the GUI user session so local CLIs that depend on the login keychain, like Macroscope, can read their normal auth.
+Use the LaunchAgent for normal local operation. Do not use random `nohup` shells unless you enjoy future pain.
 
 ```bash
 npm run build
-pi-discord-threads install-launch-agent --config ~/.config/pi-discord-threads/config.json
-pi-discord-threads install-launch-agent --config ~/.config/pi-discord-threads/config.json --start
-pi-discord-threads launch-agent-status --config ~/.config/pi-discord-threads/config.json
+node dist/index.js install-launch-agent --config ~/.config/pi-discord-threads/config.json
+node dist/index.js install-launch-agent --config ~/.config/pi-discord-threads/config.json --start
+node dist/index.js launch-agent-status --config ~/.config/pi-discord-threads/config.json
 ```
 
-Use `--restart` when intentionally replacing the loaded LaunchAgent from a normal terminal, and `uninstall-launch-agent` to boot it out and remove the plist. The start command refuses to launch when it sees another matching daemon process unless `--force` is passed, because duplicate Discord bot connections are fucky. It also refuses to restart from inside an active Discord-run process tree, because that kills the daemon currently carrying the turn.
-
-Workspace aliases are configured under `pi.workspaces`:
-
-```json
-{
-  "pi": {
-    "workspaces": {
-      "aihero": "~/Code/badass-courses/aihero-support"
-    }
-  }
-}
-```
-
-Discord context-channel defaults are configured under `discord.contextChannels`. They apply when creating a new/unmapped Pi thread from that Discord channel, one of its child threads, or a `daily-post` date thread. Explicit `cwd`, `/pi workspace`, compose-modal workspace, and existing thread registry records still win.
-
-```json
-{
-  "discord": {
-    "contextChannels": {
-      "1234567890123456789": { "workspace": "aihero" }
-    }
-  }
-}
-```
-
-Attachment ingestion is controlled under `attachments` with an enabled flag, maximum byte size, content-type prefixes, and extension allowlist. Defaults accept common text, image, audio, video, and PDF uploads up to 25 MB; use `"*"` in `allowedContentTypePrefixes` if you intentionally want to accept every file type.
-
-Link ingest is controlled under `linkIngest`. It is explicit-only; the bridge does not auto-capture random URLs from normal conversation. Bare or lightly annotated URLs stay in-phase as normal Pi thread messages. `/pi capture url:<url> note:<optional>` is a human-facing alias for a standalone durable source capture; it reuses the same `link/ingest.requested` pipeline as `/pi ingest` and does not inherit active thread/workstream context unless the note says so. The event key and signing key come from env vars or configured local secret names, not from committed config. The status bridge listens for Central Inngest `link/ingest.accepted` and `link/ingest.classified` events and posts them back into the originating Discord thread.
-
-```json
-{
-  "linkIngest": {
-    "enabled": true,
-    "inngestUrl": "http://127.0.0.1:8288",
-    "eventKeyEnv": "INNGEST_EVENT_KEY",
-    "eventKeySecretName": "inngest_event_key",
-    "eventKeyLeaseTtl": "12h",
-    "signingKeyEnv": "INNGEST_SIGNING_KEY",
-    "signingKeySecretName": "inngest_signing_key",
-    "signingKeyLeaseTtl": "12h",
-    "statusBridgeEnabled": true,
-    "defaultVisibility": "private",
-    "defaultSite": "joelclaw",
-    "wzrrdCandidate": false,
-    "requestTimeoutMs": 10000
-  }
-}
-```
-
-Live run HUD narration is controlled under `render.hud`. It defaults to `openai-codex/gpt-5.5` and updates only the active placeholder message. When the run completes, the bridge posts the final answer as a fresh Discord message and retires the placeholder.
-
-Thread title evaluation is controlled under `render.threadTitles`. It defaults to `openai-codex/gpt-5.4-mini` and runs as a post-turn online Pi hook after turn 2, then every 8 completed turns. The evaluator proposes titles only; deterministic bridge guardrails decide whether to call Discord `thread.setName()`.
-
-Redis run control is configured under `runControl` and is **disabled by default**. When enabled, ingress atomically writes the active-thread pointer, run hash, and job stream entry before showing a queued Discord card. The card only switches to active after a worker claims the run lease. Redis commands are bounded by `runControl.commandTimeoutMs` so a blackholed TCP forward fails fast instead of wedging the bridge. `runControl.maxConcurrentRuns` controls worker lanes across different threads while Redis preserves one active run per logical thread. The process can run `bot`, `worker`, and `reconcile` roles together or separately:
+Restart intentionally from a normal terminal:
 
 ```bash
-pi-discord-threads start --roles bot,worker,reconcile
-pi-discord-threads reconcile --dry-run
-pi-discord-threads reconcile --apply
+node dist/index.js install-launch-agent --config ~/.config/pi-discord-threads/config.json --restart
 ```
 
-`doctor` checks Redis only when `runControl.enabled` is true. With run control disabled, the bridge does not connect to Redis and continues using the original in-process runtime queue. The daemon reconcile role applies safe local cleanup for stale Redis and registry pointers; use `reconcile --dry-run` when you only want a report.
+Remove it:
+
+```bash
+node dist/index.js uninstall-launch-agent --config ~/.config/pi-discord-threads/config.json
+```
+
+Safety notes:
+
+- The start/restart path refuses to run from inside the active bridge process tree. That prevents the bot from killing the Discord turn that asked for the restart. Good.
+- It also refuses to start when another matching daemon is already running unless you pass `--force`. Duplicate Discord bot connections are fucky.
 
 ## Discord usage
 
 Slash commands:
 
 ```text
-/pi ask prompt:<prompt> cwd:<optional>                  create/continue a Discord thread + durable Pi session
-/pi skill name:<skill> args:<optional> cwd:<optional>   invoke a Pi skill as /skill:name
-/pi workspace name:<optional> prompt:<optional>         create a workspace-rooted thread; no name shows a picker
-/pi workspaces                                          list configured workspace aliases
-/pi ingest url:<url> note:<optional>                    send a link to joelclaw's Inngest capture pipeline
-/pi capture url:<url> note:<optional>                   capture a standalone durable source via the same pipeline
-/pi sessions                                            list recent Discord ↔ Pi session mappings
-/pi resume session:<session> prompt:<optional>          resume a recent Pi session, with autocomplete
-/pi fork prompt:<optional>                              create a child thread with a true Pi fork when a source session file exists
-/pi compose                                             open a multi-line prompt modal
-/pi status                                              show the current thread mapping
-/pi debug                                               show full ephemeral bridge/session debug details
-/pi reload                                              reload Pi resources for the current thread session
-/pi compact instructions:<optional>                    compact the current thread session context
-/pi esc                                                 escape/stop the active Pi run in the current thread
-/pi abort                                               abort the active Pi run in the current thread
-/pi help                                                show help
+/pi ask prompt:<prompt> cwd:<optional>
+/pi compose
+/pi workspace name:<optional> prompt:<optional>
+/pi workspaces
+/pi sessions
+/pi resume session:<session> prompt:<optional>
+/pi fork prompt:<optional>
+/pi ingest url:<url> note:<optional>
+/pi capture url:<url> note:<optional>
+/pi skill name:<skill> args:<optional> cwd:<optional>
+/pi status
+/pi debug
+/pi reload
+/pi compact instructions:<optional>
+/pi esc
+/pi abort
+/pi help
 ```
 
-`cwd` supports absolute paths, `~`, and `@` as home-relative shorthand, e.g. `@Code/badass-courses/second-brain`.
-
-Discord message context menu:
+Message context menu:
 
 ```text
-Apps → Ask Pi about message                             create/run a Pi thread from the selected message
+Apps → Ask Pi about message
 ```
 
 Prefix fallback:
 
 ```text
-!pi <prompt>                         create a Discord thread + durable Pi session
-!pi --cwd @Code/project <prompt>     create a session rooted in that cwd
-!pi workspace <workspace> [prompt]   create a workspace-rooted thread; without prompt it waits for the next message
-!pi ingest <url> [note]              send a link to joelclaw's Inngest capture pipeline
-!pi status                           show the current thread mapping
-!pi reload                           reload Pi resources for the current thread session
-!pi compact [instructions]           compact the current thread session context
-!pi esc                              escape/stop the active Pi run in the current thread
-!pi abort                            abort the active Pi run in the current thread
-!pi help                             show help
+!pi <prompt>
+!pi --cwd @Code/project <prompt>
+!pi workspace <workspace> [prompt]
+!pi ingest <url> [note]
+!pi status
+!pi reload
+!pi compact [instructions]
+!pi esc
+!pi abort
+!pi help
 ```
 
-In a registered thread, normal messages are sent to the Pi session. If a turn is already running, new messages are queued as steering messages for the active turn; slash/modal/context-menu prompts get an ephemeral queue receipt, while normal Discord messages get a quiet reaction because message-created events cannot be ephemeral. Prefix a message with `followup:` or `after:` to queue it as a follow-up after the current turn completes. With Redis run control enabled, that active-run decision and queued input stream are shared across bridge processes.
+In a registered Discord thread, normal messages go to the same Pi session. If a run is already active, messages become steering input. Prefix with `followup:` or `after:` to queue work after the current turn.
 
-In a bot DM, normal messages can route to a single-user Personal Workroom record (`dm:<discordUserId>`) when `discord.personalWorkroom.enabled` is true. Configure its `workspace` or `cwd`, `sessionName`, and optional `extensionPaths` for the local deployment. DM `status`, `reload`, `compact [instructions]`, `esc`, and `abort` operate on that Personal Workroom session.
+## Workspaces
 
-Attachments on normal thread messages, DM messages, workspace messages, and context-menu-selected messages are downloaded into the bridge data directory and appended to the prompt as local file paths when they pass the configured size/type allowlist. Supported images are also attached inline for model vision when small enough; audio/video/PDF uploads are saved and surfaced with guidance for Pi to inspect/extract/process them with local tools when needed.
+Workspace aliases live under `pi.workspaces`:
 
-## Discord thread mode system prompt
+```json
+{
+  "pi": {
+    "workspaces": {
+      "my-project": "~/Code/my-project"
+    }
+  }
+}
+```
 
-Pi sessions created by this bridge receive an appended Discord Thread Mode system prompt so the model understands the operator is using Discord, not the terminal TUI.
+Use them from Discord:
 
-- Source of truth: `src/discord-system-prompt.ts`
-- Generated Markdown: `docs/discord-thread-mode-system-prompt.md`
-- Review URL: https://pi-discord-system-prompt.wzrrd.sh/
+```text
+/pi workspace name:my-project prompt:fix the failing test
+!pi workspace my-project fix the failing test
+```
 
-Update/publish it with:
+`cwd` accepts absolute paths, `~`, and `@` as home-relative shorthand:
+
+```text
+/pi ask prompt:check this cwd:@Code/my-project
+```
+
+## Context channels
+
+A Discord channel can default to a workspace for new Pi threads. Configure it under `discord.contextChannels`:
+
+```json
+{
+  "discord": {
+    "contextChannels": {
+      "DISCORD_CHANNEL_ID": { "workspace": "my-project" }
+    }
+  }
+}
+```
+
+Explicit `cwd`, `/pi workspace`, compose-modal workspace, and existing thread registry records still win.
+
+## Attachments
+
+Attachments are controlled by the `attachments` config block.
+
+The bridge downloads allowed files into the local data directory and adds local file paths to the Pi prompt. Small supported images are also attached inline for model vision.
+
+## Link ingest
+
+URL capture is explicit only. The bridge does not silently ingest every URL.
+
+Use:
+
+```text
+/pi ingest url:<url> note:<optional>
+/pi capture url:<url> note:<optional>
+!pi ingest <url> [note]
+```
+
+`/pi capture` is the human-facing “save this source” alias. The event key and signing key come from env vars or local secrets, not committed config.
+
+## Redis run control
+
+Redis run control is disabled by default.
+
+When enabled, Redis owns active run coordination across bridge processes:
+
+- one active run per logical Discord thread/workroom
+- queued vs running HUD truth
+- worker leases and heartbeats
+- at-least-once execution
+- idempotent final-answer posting
+- doctor/reconcile reporting
+
+Run with roles:
 
 ```bash
-npm run publish-system-prompt
+node dist/index.js start --roles bot,worker,reconcile
+node dist/index.js reconcile --dry-run
+node dist/index.js reconcile --apply
+```
+
+Check health:
+
+```bash
+node dist/index.js doctor --config ~/.config/pi-discord-threads/config.json
+```
+
+If `runControl.enabled` is false, the bridge does not connect to Redis.
+
+## Release snapshots
+
+Release snapshots are local rollback bundles. They do not deploy yet.
+
+Create one:
+
+```bash
+npm run build
+node dist/index.js release snapshot --config ~/.config/pi-discord-threads/config.json
+```
+
+List snapshots:
+
+```bash
+node dist/index.js release list --config ~/.config/pi-discord-threads/config.json
+```
+
+Current behavior:
+
+- copies built `dist/`
+- copies `package.json` and `package-lock.json`
+- copies the exact private config file for local rollback
+- writes safe manifest/ledger metadata
+- records `distSha256`
+- refuses dirty worktrees unless `--allow-dirty` is explicit
+- does **not** mutate LaunchAgent
+- does **not** create or flip `releases/current`
+- `release deploy` and `release rollback` are planned, not implemented
+
+Target framing: **zero lost work + fast rollback**, not true zero downtime. The Discord Gateway is still a singleton, so restarts can reconnect.
+
+## Project map
+
+| Area | Files | What lives there |
+| --- | --- | --- |
+| CLI/config | `src/index.ts`, `src/config.ts` | command parsing, config defaults, dispatch |
+| Discord | `src/discord-bot.ts`, `src/discord/**` | slash/prefix commands, thread UX, HUD/final rendering |
+| Pi runtime | `src/pi-runtime.ts`, `src/engine/**` | Pi runtime manager, Effect layers/services |
+| Redis run control | `src/run-control/**` | leases, Lua scripts, worker state machines, doctor/reconcile |
+| Registry/work graph | `src/registry.ts`, `src/work-graph.ts`, `src/thread-run-state.ts` | Discord ↔ Pi session mapping |
+| Release/daemon ops | `src/release-snapshots.ts`, `src/launch-agent.ts` | release bundles, LaunchAgent plist/status/restart guard |
+| Link ingest | `src/link-ingest*.ts`, `src/daily-post.ts` | explicit source capture and status bridge |
+| Docs/Brain | `README.md`, `AGENTS.md`, `.brain/**/*.svx` | human setup, agent orientation, durable decisions |
+
+## Checks
+
+Docs/Brain only:
+
+```bash
+npm run brain:check
+```
+
+Any TypeScript edit:
+
+```bash
+npm run typecheck
+```
+
+Release snapshots:
+
+```bash
+npm run test:release-snapshot
+```
+
+Run control:
+
+```bash
+npm run test:run-control-lua-scripts
+npm run test:run-control-store
+npm run test:run-control-worker
+```
+
+Pi runtime/effect layer:
+
+```bash
+npm run test:pi-runtime
+npm run test:pi-session-service
+npm run test:engine-layer
+```
+
+Discord final/HUD:
+
+```bash
+npm run test:final-answer-outbox
+npm run test:progress-hud
 ```
 
 ## Design invariants
 
-- Runs locally and is portable; no host-specific assumptions.
-- Pi SDK is the control plane.
-- Pi session JSONL is the durable source of truth.
-- Runtime instances are lazy and disposed after idle TTL.
-- Redis run control, when enabled, owns in-flight run coordination; Pi JSONL remains canonical history.
-- Run-control HUD cards distinguish queued from running: queued means waiting for worker claim, running means a worker owns a live lease.
-- Run control uses at-least-once execution with idempotent finalization rather than exactly-once promises.
-- `/pi fork` creates a child Discord thread and, when possible, a true Pi forked session with `parentSession` lineage.
-- `/tree` is a future command that should navigate the current session in-place.
+- Pi session JSONL is durable conversation truth.
+- Discord is the operator surface.
+- Registry maps Discord threads to Pi sessions.
+- Redis run control, when enabled, owns in-flight coordination.
+- Run control is at-least-once with idempotent finalization, not exactly-once magic.
+- XState owns lifecycle state machines.
+- Effect owns resource/service/finalizer seams.
+- Do not casually mutate LaunchAgent or live Redis state from inside a Discord-carried run.
+
+## Current planning docs
+
+- `.brain/resources/pi-discord-threads-architecture-review.svx`
+- `.brain/projects/redis-run-control-plane.svx`
+- `.brain/projects/run-control-lua-command-builders.svx`
+- `.brain/projects/release-snapshot-deploy-rollback.svx`
+- `.brain/projects/project-structure-cleanup.svx`

@@ -16,7 +16,7 @@ tags:
 ## Knowledge
 
 - [Project README](../../README.md)
-  Covers: product shape, setup, Discord commands, attachment behavior, run HUD, thread titles, run-control intent, and design invariants. Use when: orienting or checking operator-facing behavior.
+  Covers: direct operator setup, foreground/LaunchAgent run commands, Discord usage, workspaces, attachments, explicit link ingest, Redis run-control basics, release snapshots, project map, checks, and design invariants. Use when: orienting humans or checking operator-facing behavior.
 
 - [Project Brain](../../BRAIN.md)
   Covers: Brain usage rules for this repo. Use when: deciding where to capture learning, decisions, and receipts.
