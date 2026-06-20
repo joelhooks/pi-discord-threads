@@ -10,6 +10,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:release-snapshot": "npm run build && node --test scripts/release-snapshot-regression.test.mjs",
+    "test:release-transition": "npm run build && node --test scripts/release-transition-regression.test.mjs",
     "test:recovery-prompt": "npm run build && node --test scripts/recovery-prompt-regression.test.mjs",
     "test:thread-run-state": "npm run build && node --test scripts/thread-run-state-regression.test.mjs",
     "test:progress-event-bus": "npm run build && node --test scripts/progress-event-bus-regression.test.mjs",

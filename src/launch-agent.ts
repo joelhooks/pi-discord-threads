@@ -45,8 +45,21 @@ interface CommandResult {
   stderr: string;
 }
 
-export async function installLaunchAgent(options: LaunchAgentOptions): Promise<void> {
-  const paths = getLaunchAgentPaths(options.config);
+export interface WriteLaunchAgentPlistOptions {
+  config: AppConfig;
+  configPath: string;
+  roles?: RunControlRole[];
+  paths?: LaunchAgentPaths;
+}
+
+export interface WriteLaunchAgentPlistResult {
+  paths: LaunchAgentPaths;
+  plistPath: string;
+  entryPath: string;
+}
+
+export async function writeLaunchAgentPlist(options: WriteLaunchAgentPlistOptions): Promise<WriteLaunchAgentPlistResult> {
+  const paths = options.paths ?? getLaunchAgentPaths(options.config);
   await mkdir(dirname(paths.plistPath), { recursive: true });
   await mkdir(dirname(paths.logPath), { recursive: true });
 
@@ -57,6 +70,16 @@ export async function installLaunchAgent(options: LaunchAgentOptions): Promise<v
   const configPath = expandPath(options.configPath);
   const plist = renderLaunchAgentPlist(paths, configPath, options.roles);
   await writeFile(paths.plistPath, plist, "utf8");
+  return { paths, plistPath: paths.plistPath, entryPath: paths.entryPath };
+}
+
+export async function installLaunchAgent(options: LaunchAgentOptions): Promise<void> {
+  const { paths } = await writeLaunchAgentPlist({
+    config: options.config,
+    configPath: options.configPath,
+    roles: options.roles,
+  });
+  const configPath = expandPath(options.configPath);
   console.log(`wrote LaunchAgent: ${paths.plistPath}`);
   console.log(`label: ${paths.label}`);
   console.log(`logs: ${paths.logPath} / ${paths.errorLogPath}`);
@@ -177,14 +200,8 @@ export function getLaunchAgentPaths(config: AppConfig): LaunchAgentPaths {
 }
 
 async function startLaunchAgent(paths: LaunchAgentPaths, force: boolean, restart: boolean): Promise<void> {
+  await assertOutsideLaunchAgentDaemon(paths);
   const loaded = await isLaunchAgentLoaded(paths);
-  if (await isRunningInsideDaemon(paths)) {
-    throw new Error([
-      "Refusing to start or restart the LaunchAgent from inside the active Discord bridge process tree.",
-      "That would SIGTERM the daemon that is currently carrying this Discord turn.",
-      "Build and commit the code first, then restart from a terminal after this Discord run is idle.",
-    ].join("\n"));
-  }
 
   if (restart && loaded) {
     await bootoutLaunchAgent(paths);
@@ -214,6 +231,16 @@ async function startLaunchAgent(paths: LaunchAgentPaths, force: boolean, restart
     throw new Error(`launchctl kickstart failed: ${kickstart.stderr.trim() || kickstart.stdout.trim()}`);
   }
   console.log(`LaunchAgent running: ${paths.serviceTarget}`);
+}
+
+export async function assertOutsideLaunchAgentDaemon(paths: LaunchAgentPaths): Promise<void> {
+  if (await isRunningInsideDaemon(paths)) {
+    throw new Error([
+      "Refusing to start or restart the LaunchAgent from inside the active Discord bridge process tree.",
+      "That would SIGTERM the daemon that is currently carrying this Discord turn.",
+      "Build and commit the code first, then restart from a terminal after this Discord run is idle.",
+    ].join("\n"));
+  }
 }
 
 async function isLaunchAgentLoaded(paths: LaunchAgentPaths): Promise<boolean> {

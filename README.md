@@ -275,9 +275,9 @@ Target framing: **zero lost work + fast rollback**, not true zero downtime. The 
 | CLI/config | `src/index.ts`, `src/config.ts` | command parsing, config defaults, dispatch |
 | Discord | `src/discord-bot.ts`, `src/discord/**` | slash/prefix commands, thread UX, HUD/final rendering |
 | Pi runtime | `src/pi-runtime.ts`, `src/engine/**` | Pi runtime manager, Effect layers/services |
-| Redis run control | `src/run-control/**` | leases, Lua scripts, worker state machines, doctor/reconcile |
+| Redis run control | `src/run-control/**` | leases, Lua scripts, worker state machines, doctor/reconcile, deploy safety inspection |
 | Registry/work graph | `src/registry.ts`, `src/work-graph.ts`, `src/thread-run-state.ts` | Discord ↔ Pi session mapping |
-| Release/daemon ops | `src/release-snapshots.ts`, `src/launch-agent.ts` | release bundles, LaunchAgent plist/status/restart guard |
+| Release/daemon ops | `src/release-snapshots.ts`, `src/release-transition.ts`, `src/launch-agent.ts` | release bundles, fakeable deploy transition state machine, LaunchAgent plist/status/restart guard |
 | Link ingest | `src/link-ingest*.ts`, `src/daily-post.ts` | explicit source capture and status bridge |
 | Docs/Brain | `README.md`, `AGENTS.md`, `.brain/**/*.svx` | human setup, agent orientation, durable decisions |
 
@@ -295,10 +295,11 @@ Any TypeScript edit:
 npm run typecheck
 ```
 
-Release snapshots:
+Release snapshots and transition seams:
 
 ```bash
 npm run test:release-snapshot
+npm run test:release-transition
 ```
 
 Run control:

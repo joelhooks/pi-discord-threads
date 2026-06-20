@@ -157,6 +157,23 @@ Concretely:
 
 This is the smallest move that prevents the next implementation from becoming a fragile pile of shell-ish side effects.
 
+## Implementation receipt — transition core — 2026-06-20
+
+Implemented the internal seam without exposing public deploy/rollback:
+
+- [`src/release-transition.ts`](../../src/release-transition.ts) adds a fakeable XState deploy transition core: preflight, guard, canary, activate, plist write, restart, postflight, classify, rollback adapter handoff.
+- [`src/run-control/inspection.ts`](../../src/run-control/inspection.ts) adds structured deploy safety snapshots and `safe` / `waiting` / `unsafe` / `unknown` classification.
+- [`src/launch-agent.ts`](../../src/launch-agent.ts) now exposes `writeLaunchAgentPlist` and `assertOutsideLaunchAgentDaemon` so future deploy wiring can guard before state mutation.
+- [`scripts/release-transition-regression.test.mjs`](../../scripts/release-transition-regression.test.mjs) proves guard-first ordering, no mutation after guard failure, safety classification, elapsed-time escalation, and fake rollback handoff with post-rollback safety proof.
+
+Public `release deploy` and `release rollback` still reject. No live `launchctl`, config restore, current flip, or daemon restart happened in this slice.
+
+Validation receipt:
+
+- `npm run typecheck` — passed.
+- `npm run test:release-transition` — 9/9 passed.
+- `npm run test:release-snapshot` — 18/18 passed.
+
 ## Open decisions before implementation
 
 - Should `release deploy` run `npm run build` itself before snapshot? Recommendation: yes.

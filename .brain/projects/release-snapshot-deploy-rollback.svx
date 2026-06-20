@@ -73,7 +73,7 @@ Slice 1 shipped in `042d96a`:
 - Release root and release dirs are tightened to `0700`; copied private config is `0600`.
 - Dirty worktrees are refused by default unless `--allow-dirty` is explicit.
 
-Slice 2 is implemented in the current working slice:
+Slice 2 is implemented:
 
 - `release activate <release-id|sha>` resolves a snapshot and flips `releases/current` without restart or `launchctl`.
 - Activation creates `releases/node_modules -> <repo>/node_modules` so release dirs can resolve unbundled package dependencies.
@@ -82,9 +82,16 @@ Slice 2 is implemented in the current working slice:
 - A rollback config helper backs up the current expanded `--config` file, restores a release config snapshot with `0600`, and refuses manifest/requested config path mismatch.
 - `release deploy` and full `release rollback` still reject as restart flows not implemented.
 
+Slice 2.5 is implemented as an internal seam:
+
+- `src/release-transition.ts` defines a fakeable XState deploy transition core: preflight, guard, canary, activate, plist write, restart, postflight, classify, and rollback-on-unsafe adapter handoff.
+- `src/run-control/inspection.ts` classifies structured doctor-like snapshots as `safe`, `waiting`, `unsafe`, or `unknown` without parsing human text.
+- `src/launch-agent.ts` exposes guard-first LaunchAgent seams for future deploy wiring.
+- `npm run test:release-transition` proves guard-first ordering with fake adapters, elapsed-time escalation after the reclaim window, rollback safety proof, and no real `launchctl`.
+
 Next work should continue in two slices:
 
-1. `release deploy` with preflight, canary, LaunchAgent restart from outside the active daemon tree, postflight proof, and automatic rollback using the shared config helper.
+1. Wire public `release deploy` to the transition core with preflight, canary, LaunchAgent restart from outside the active daemon tree, postflight proof, and automatic rollback using the shared config helper.
 2. Full `release rollback <release-id>` with symlink flip, config restore, restart, postflight proof, and ledger event.
 
 Keep the framing precise: this is **zero lost work + fast rollback**, not true zero downtime. The singleton Discord Gateway can still reconnect during restart.
@@ -324,7 +331,7 @@ Live safety note: no live LaunchAgent restart/kickstart and no live config resto
 - `releases/current` flips atomically where practical.
 - LaunchAgent restart happens only from outside the active daemon process tree.
 - Postflight runs after restart and reports active-run safety evidence: reclaimed, pending, finalized, terminal, or explicitly unsafe.
-- Deploy implementation has a shared rollback helper before automatic rollback is wired.
+- Deploy implementation uses the fakeable transition core and a shared rollback helper before automatic rollback is wired.
 - If postflight cannot prove safety, deploy automatically rolls back to the previous release using that helper.
 - Automatic rollback backs up the current expanded `--config` file, restores the previous release's config snapshot with restrictive permissions, flips `releases/current` back, restarts, runs postflight, and records the backup path/result.
 - Ledger records deploy success/failure and automatic rollback events without secrets.
@@ -349,6 +356,7 @@ Always run after release PRD implementation slices:
 ```sh
 npm run typecheck
 npm run test:release-snapshot
+npm run test:release-transition
 npm run brain:check
 ```
 
@@ -358,6 +366,9 @@ Additional checks by slice:
 # LaunchAgent current handoff
 npm run build
 node --test scripts/<launch-agent-current-regression>.test.mjs
+
+# Deploy transition core
+npm run test:release-transition
 
 # Deploy/rollback once implemented
 # Run regression tests with fake LaunchAgent/doctor adapters instead of real launchctl.

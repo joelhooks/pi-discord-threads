@@ -11,6 +11,7 @@ Use the smallest check that proves the touched seam.
 | Brain/docs only | `npm run brain:check` |
 | Any TypeScript edit | `npm run typecheck` |
 | Release snapshot/activate/canary/rollback-helper behavior | `npm run test:release-snapshot` |
+| Release deploy transition/safety classifier seams | `npm run test:release-transition` |
 | Restart/recovery prompt behavior | `npm run test:recovery-prompt` |
 | Thread run state | `npm run test:thread-run-state` |
 | Discord HUD/final rendering | `npm run test:progress-hud`, `npm run test:final-answer-outbox` |
@@ -39,5 +40,6 @@ node dist/index.js release canary current --config ~/.config/pi-discord-threads/
 
 ## Receipts
 
+- 2026-06-20 release transition core: added `npm run test:release-transition` for fake LaunchAgent/no-`launchctl` transition ordering and deploy safety classification.
 - 2026-06-20 gardening pass: replaced bootstrap placeholder with the current validation map from `package.json`, `AGENTS.md`, and `README.md`.
 - Keep future receipts short: command, why it was run, pass/fail, and the seam it protects.
