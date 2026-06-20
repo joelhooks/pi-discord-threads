@@ -16,6 +16,7 @@ Use this as the repo memory front door. Place notes by usefulness, not topic: Pr
 - [Agent guide](../AGENTS.md) — source map, safety rules, validation map, and current work tracks for agents.
 - [Sources](./resources/pi-discord-threads-sources.svx) — current module/source map.
 - [Architecture review](./resources/pi-discord-threads-architecture-review.svx) — current architecture status and next slice recommendation.
+- [Release Deploy Architecture Review](./resources/release-deploy-architecture-review.svx) — next deploy/rollback module seams after activate/canary.
 
 ## Active projects
 
@@ -46,6 +47,7 @@ Keep these out of the active project queue unless a new outcome is named.
 
 - [Pi Discord Threads Glossary](./resources/pi-discord-threads-glossary.svx) — canonical project terms.
 - [Pi Discord Threads Sources](./resources/pi-discord-threads-sources.svx) — current source/file map.
+- [Release Deploy Architecture Review](./resources/release-deploy-architecture-review.svx) — deploy/rollback transition seams and candidate module split.
 - [Pi Discord Runtime Architecture Options](./resources/pi-discord-runtime-architecture-options-2026-06-17.svx) — superseded historical options brief.
 - [OpenAI OAuth Cycle Handling](./resources/openai-oauth-cycle-handling.svx) — reusable auth failure note.
 - [Component Library](./resources/component-library.svx) — Brain component rules.

@@ -1,0 +1,165 @@
+---
+title: "Release Deploy Architecture Review"
+type: "resource"
+status: "active"
+created_at: "2026-06-20"
+tags:
+  - architecture
+  - release
+  - deploy
+  - rollback
+  - launch-agent
+  - run-control
+---
+
+# Release Deploy Architecture Review
+
+Focused architecture pass after `801d756 feat: add release activation canary`.
+
+## Question
+
+What architecture slice should come before wiring public `release deploy` and full `release rollback` for `pi-discord-threads`?
+
+## Current truth
+
+- `release snapshot`, `release list`, `release activate`, and `release canary` exist.
+- LaunchAgent path resolution can hand off to `config.dataDir/releases/current/dist/index.js` after activation and plist rewrite.
+- Config backup/restore helper exists, but public rollback restart flow still rejects.
+- No live `launchctl` mutation should happen from an active Discord-carried run unless explicitly approved.
+- The target remains **zero lost work + fast rollback**, not true zero downtime.
+
+## Source receipts
+
+- [`AGENTS.md`](../../AGENTS.md) — deploy track and hard safety rule against unapproved LaunchAgent mutation.
+- [`README.md`](../../README.md) — operator release snapshot/current/canary behavior.
+- [`release-snapshot-deploy-rollback.svx`](../projects/release-snapshot-deploy-rollback.svx) — canonical deploy/rollback acceptance criteria.
+- [`redis-run-control-plane.svx`](../projects/redis-run-control-plane.svx) — running-session deploy and safe deploy gate terms.
+- [`pi-discord-threads-architecture-review.svx`](./pi-discord-threads-architecture-review.svx) — existing module/depth guidance.
+- [`src/release-snapshots.ts`](../../src/release-snapshots.ts) — release filesystem, ledger, current symlink, config restore, canary.
+- [`src/launch-agent.ts`](../../src/launch-agent.ts) — LaunchAgent plist/status/start/restart guardrails and direct `launchctl` implementation.
+- [`src/index.ts`](../../src/index.ts) — current release CLI dispatch; deploy/rollback still rejected.
+- [`src/run-control/doctor.ts`](../../src/run-control/doctor.ts) and [`src/run-control/reconcile.ts`](../../src/run-control/reconcile.ts) — structured run-control inspection and dry-run repair signals.
+- [`scripts/release-snapshot-regression.test.mjs`](../../scripts/release-snapshot-regression.test.mjs) — snapshot/activate/canary/config restore/LaunchAgent handoff regression coverage.
+- Session search note: local transcripts confirmed the recent release handoff review; remote `dark-wizard` session lookup still fails because that hostname is not resolvable from this machine.
+- Subagent receipts: `tmp/subagents/release-deploy-architecture-scout.md` and `tmp/subagents/release-deploy-architecture-oracle.md`.
+
+## Architecture candidates
+
+### 1. Add a release transition orchestrator before public deploy
+
+**Files/modules:** new `src/release-deploy.ts` or `src/release-transition.ts`, `src/index.ts`, `src/config.ts`, `scripts/release-snapshot-regression.test.mjs` or a new release-deploy regression script.
+
+**Observed friction:** `index.ts` is still shallow dispatch glue. Public deploy adds preflight, snapshot/build, canary, current flip, plist rewrite, restart, postflight, rollback-on-unsafe, and ledger events. Inlining that in `index.ts` would flatten the riskiest lifecycle into CLI sludge.
+
+**Proposed change:** Add a transition module with one interface:
+
+```ts
+deployRelease(options, deps): Promise<ReleaseDeployResult>
+rollbackRelease(options, deps): Promise<ReleaseRollbackResult>
+```
+
+Deps should be fakeable: release store, LaunchAgent controller, runtime inspection adapter, clock, and optional build adapter. The implementation should have explicit states, preferably XState v5 or a small state-shaped equivalent: `preflight -> canary -> activate -> writePlist -> restart -> postflight -> rollbackOnUnsafe`.
+
+**Why this improves locality/leverage/tests:** Deploy/rollback lifecycle policy lives in one module with fake adapters. `index.ts` stays boring. Tests can prove ordering and rollback behavior without real `launchctl`.
+
+**Risk:** Overbuilding a mini platform. Keep it repo-local and only expose the two public commands.
+
+**First reversible step:** Add the orchestrator with fake adapters and keep public `release deploy`/`rollback` rejected until transition tests pass.
+
+### 2. Split release store/ledger operations from command-shaped helpers
+
+**Files/modules:** `src/release-snapshots.ts`, potential new `src/release-store.ts` or private exported functions in the same module.
+
+**Observed friction:** `activateRelease()` flips `current` and writes an `activate` event. `backupAndRestoreReleaseConfig()` restores config and writes `config-restore`. Deploy/rollback need composite events with preflight/postflight and automatic rollback result, not only intermediate command events.
+
+**Proposed change:** Extract low-level operations:
+
+- `resolveRelease(target)`
+- `setCurrentRelease(releaseId)` returning previous/current ids
+- `backupAndRestoreConfigSnapshot(releaseId, configPath)` returning backup metadata
+- `appendReleaseLedgerEntry(...)` or narrower `appendDeploy/appendRollback/appendAutomaticRollback`
+
+Keep public `release activate` as composition of `setCurrentRelease + appendActivate`.
+
+**Why this improves locality/leverage/tests:** Release filesystem invariants stay local, while deploy owns the policy-level event. Tests can assert deploy ledger events without fake-parsing activate/config-restore side effects.
+
+**Risk:** API churn in a module that just stabilized. Move only the smallest helpers needed by the orchestrator.
+
+**First reversible step:** Extract `setCurrentRelease()` internally and update `activateRelease()` with no behavior change.
+
+### 3. Make LaunchAgent a guard-first fakeable adapter
+
+**Files/modules:** `src/launch-agent.ts`, deploy transition tests.
+
+**Observed friction:** `installLaunchAgent()` writes the plist before `startLaunchAgent()` checks whether the current process is inside the active daemon tree. That is okay for explicit install, but deploy/rollback needs to prove it is outside the daemon before flipping `current`, restoring config, writing plist, or calling `launchctl`.
+
+**Proposed change:** Add a `LaunchAgentController` interface with a real adapter and fake test adapter:
+
+- `getPaths(config)`
+- `getStatus(config): Promise<LaunchAgentStatus>`
+- `assertOutsideDaemon(paths): Promise<void>`
+- `writePlist({ config, configPath, roles })`
+- `restart(paths, { force })`
+
+**Why this improves locality/leverage/tests:** Direct `launchctl` stays in one implementation. Deploy can gate before any state mutation. Tests can prove no real `launchctl` is called.
+
+**Risk:** Duplicating existing install/start behavior. Prefer extracting existing private functions rather than reimplementing.
+
+**First reversible step:** Export/adapterize `assertOutsideDaemon` and plist write behavior, then cover it with a fake command runner test.
+
+### 4. Add structured preflight/postflight safety classification
+
+**Files/modules:** new `src/run-control/inspection.ts` or `src/release-deploy-safety.ts`, `src/run-control/doctor.ts`, `src/run-control/reconcile.ts`, deploy tests.
+
+**Observed friction:** `runReleaseCanary()` returns human doctor text. `doctor.ts` already builds structured data, but deploy needs a named safety decision, not string parsing. `doctor` and `reconcile` also duplicate read-only snapshot work.
+
+**Proposed change:** Add read-only inspection helpers:
+
+- `loadRunControlInspectionSnapshot(store)`
+- `classifyDeploySafety(before, after, config): DeploySafetyReport`
+- `formatDeploySafetyReport(report)`
+
+Suggested decision vocabulary: `safe`, `waiting`, `unsafe`, `unknown`, with evidence items like `pending`, `reclaimed`, `finalizing`, `terminal`, `deadLettered`, `reconcileError`, and `registryMismatch`.
+
+**Why this improves locality/leverage/tests:** Run-control state remains the source of truth. Deploy consumes a report and decides whether to rollback. Cleanup/mutation stays in reconcile and worker state machines.
+
+**Risk:** False rollback if postflight checks too early. The classifier should support waiting/retry at least through `runControl.leaseTtlMs` before declaring active work unsafe.
+
+**First reversible step:** Build classifier tests from fixture snapshots before wiring it to LaunchAgent restart.
+
+### 5. Decide deploy CLI target/build behavior before implementation
+
+**Files/modules:** `src/config.ts`, `src/index.ts`, README/Brain docs.
+
+**Observed friction:** The PRD says deploy can create a release snapshot or select a fresh snapshot. Current parser has no `release deploy <target>` shape. Hidden behavior here will confuse future agents.
+
+**Proposed change:** Pick one command contract:
+
+1. `release deploy` always runs build/snapshot/canary/deploy current worktree. Recommended for the first public deploy.
+2. `release deploy <release-id|sha>` deploys an existing snapshot. Useful but easier to confuse with `activate`.
+
+**Why this improves locality/leverage/tests:** Parser reflects operator intent. Deploy state machine gets one input shape instead of guesswork.
+
+**Risk:** Too many options too early. Keep V1 targetless unless there is a real operator need to deploy older snapshots without saying rollback.
+
+**First reversible step:** Document targetless deploy and keep selected-release deploy deferred.
+
+## Recommended next slice
+
+Do **candidate 1 + the minimum of candidates 2, 3, and 4 needed to support it**, but keep public deploy/rollback rejected until tests prove ordering.
+
+Concretely:
+
+1. Add a release transition module with fakeable deps.
+2. Extract guard-first LaunchAgent adapter calls.
+3. Add structured safety classifier with fixture tests.
+4. Keep public CLI behavior unchanged until the transition module passes tests.
+
+This is the smallest move that prevents the next implementation from becoming a fragile pile of shell-ish side effects.
+
+## Open decisions before implementation
+
+- Should `release deploy` run `npm run build` itself before snapshot? Recommendation: yes.
+- Should V1 deploy accept a target? Recommendation: no; targetless deploy snapshots the current build, while rollback handles older releases.
+- What postflight states trigger automatic rollback versus explicit unsafe report? Recommendation: retry/wait through at least `leaseTtlMs`, rollback on unresolved `unsafe`/`unknown`, and report terminal/dead-lettered runs without pretending they are success.
+- Should public rollback land before deploy? Recommendation: no. Build the shared rollback helper inside deploy tests first, then expose public rollback once postflight + ledger behavior are proven.
