@@ -78,7 +78,7 @@ export interface LinkIngestRecord {
   discordMessageId?: string;
   interactionId?: string;
   authorId?: string;
-  status: "accepted" | "classified" | "archived" | "video_metadata" | "video_media" | "audio_transcript" | "article_extracted" | "x_snapshot" | "transcript_processed" | "summarized" | "ready" | "indexed" | "failed" | "send_failed";
+  status: "accepted" | "classified" | "archived" | "video_metadata" | "video_media" | "audio_transcript" | "article_extracted" | "x_snapshot" | "transcript_processed" | "summarized" | "ready" | "indexed" | "needs_human" | "failed" | "send_failed";
   statusUpdates?: Record<string, LinkIngestStatusUpdateRecord>;
   inngestEventIds?: string[];
   error?: string;
@@ -91,8 +91,9 @@ export interface LinkIngestStatusUpdateRecord {
   eventName: string;
   sourceId: string;
   mentionId: string;
-  status: "accepted" | "classified" | "archived" | "video_metadata" | "video_media" | "audio_transcript" | "article_extracted" | "x_snapshot" | "transcript_processed" | "summarized" | "ready" | "indexed" | "failed";
-  discordMessageId: string;
+  status: "accepted" | "classified" | "archived" | "video_metadata" | "video_media" | "audio_transcript" | "article_extracted" | "x_snapshot" | "transcript_processed" | "summarized" | "ready" | "indexed" | "needs_human" | "failed";
+  discordMessageId?: string;
+  discordPostSkippedReason?: string;
   brainPath?: string;
   manifestPath?: string;
   sourceType?: string;
@@ -377,7 +378,7 @@ function normalizeLinkIngests(records: Record<string, LinkIngestRecord>): Record
 }
 
 function normalizeLinkIngestStatus(status: string | undefined): LinkIngestRecord["status"] {
-  if (status === "classified" || status === "archived" || status === "video_metadata" || status === "video_media" || status === "audio_transcript" || status === "article_extracted" || status === "x_snapshot" || status === "transcript_processed" || status === "summarized" || status === "ready" || status === "indexed" || status === "failed" || status === "send_failed") return status;
+  if (status === "classified" || status === "archived" || status === "video_metadata" || status === "video_media" || status === "audio_transcript" || status === "article_extracted" || status === "x_snapshot" || status === "transcript_processed" || status === "summarized" || status === "ready" || status === "indexed" || status === "needs_human" || status === "failed" || status === "send_failed") return status;
   return "accepted";
 }
 
@@ -387,11 +388,11 @@ function normalizeLinkIngestStatusUpdates(
   if (!updates || typeof updates !== "object") return undefined;
   const normalized: Record<string, LinkIngestStatusUpdateRecord> = {};
   for (const [statusKey, update] of Object.entries(updates)) {
-    if (!update?.eventName || !update.sourceId || !update.mentionId || !update.discordMessageId) continue;
+    if (!update?.eventName || !update.sourceId || !update.mentionId) continue;
     normalized[statusKey] = {
       ...update,
       statusKey,
-      status: update.status === "classified" || update.status === "archived" || update.status === "video_metadata" || update.status === "video_media" || update.status === "audio_transcript" || update.status === "article_extracted" || update.status === "x_snapshot" || update.status === "transcript_processed" || update.status === "summarized" || update.status === "ready" || update.status === "indexed" || update.status === "failed" ? update.status : "accepted",
+      status: update.status === "classified" || update.status === "archived" || update.status === "video_metadata" || update.status === "video_media" || update.status === "audio_transcript" || update.status === "article_extracted" || update.status === "x_snapshot" || update.status === "transcript_processed" || update.status === "summarized" || update.status === "ready" || update.status === "indexed" || update.status === "needs_human" || update.status === "failed" ? update.status : "accepted",
       postedAt: update.postedAt ?? new Date(0).toISOString(),
     };
   }

@@ -1387,6 +1387,12 @@ async function handleDirectMessage(
     return;
   }
 
+  const linkIngestCommand = parsePrefixLinkIngestCommand(content);
+  if (linkIngestCommand) {
+    await ingestLinkDirectMessage(message, options, linkIngestCommand.text, linkIngestCommand.mode);
+    return;
+  }
+
   const prompt = content || "Please inspect the attached file(s).";
   const attachmentContext = await appendAttachmentContext(prompt, message, options.config, record.threadId);
   await options.registry.recordMessage({
@@ -1497,12 +1503,12 @@ async function ingestLinkInteraction(
     direction: "assistant",
     createdAt: new Date().toISOString(),
   });
-  await interaction.editReply(`${linkIngestAcceptedTitle(mode)} in <#${thread.id}>.\nsourceId: \`${result.sourceId}\``);
+  await interaction.editReply(`${linkIngestAcceptedTitle(mode)} in <#${thread.id}>. I'll post completion there.`);
 }
 
 async function ingestLinkMessage(message: Message, options: RunBotOptions, text: string, mode: LinkIngestCommandMode = "ingest"): Promise<void> {
   if (!message.inGuild()) {
-    await safeReply(message, "Use `ingest` in a server channel or thread.");
+    await ingestLinkDirectMessage(message, options, text, mode);
     return;
   }
   if (!extractFirstUrl(text)) {
@@ -1550,6 +1556,51 @@ async function ingestLinkMessage(message: Message, options: RunBotOptions, text:
     direction: "assistant",
     createdAt: new Date().toISOString(),
   });
+}
+
+async function ingestLinkDirectMessage(message: Message, options: RunBotOptions, text: string, mode: LinkIngestCommandMode = "ingest"): Promise<void> {
+  if (!extractFirstUrl(text)) {
+    await safeReply(message, "No URL found. Use `ingest https://...`.");
+    return;
+  }
+
+  const prepared = prepareLinkIngest({
+    text,
+    origin: {
+      channelId: message.channel.id,
+      threadId: message.channel.id,
+      messageId: message.id,
+      authorId: message.author.id,
+    },
+    config: options.config.linkIngest,
+  });
+  await recordLinkIngest(options, prepared, message.channel.id, message.channel.id, undefined, message.id, undefined, message.author.id);
+  let result: LinkIngestSendResult;
+  try {
+    const posted = await postPreparedLinkIngest({
+      prepared,
+      config: options.config.linkIngest,
+    });
+    result = { ...prepared, ...posted };
+    await recordLinkIngest(options, result, message.channel.id, message.channel.id, undefined, message.id, undefined, message.author.id);
+  } catch (error) {
+    const text = error instanceof Error ? error.message : String(error);
+    await recordLinkIngest(options, prepared, message.channel.id, message.channel.id, undefined, message.id, undefined, message.author.id, {
+      status: "send_failed",
+      error: text,
+    });
+    throw error;
+  }
+
+  const status = await sendReplyOrChannelMessage(message, buildLinkIngestAcceptedPayload(result, mode));
+  if (status) {
+    await options.registry.recordMessage({
+      discordMessageId: status.id,
+      threadId: message.channel.id,
+      direction: "assistant",
+      createdAt: new Date().toISOString(),
+    });
+  }
 }
 
 async function recordLinkIngest(
@@ -2374,18 +2425,12 @@ function buildWorkspaceReadyPayload(record: ThreadRecord): RichPayload {
 
 function buildLinkIngestAcceptedPayload(result: LinkIngestSendResult, mode: LinkIngestCommandMode = "ingest"): MessageCreateOptions {
   return {
-    embeds: [
-      new EmbedBuilder()
-        .setColor(0x57f287)
-        .setTitle(linkIngestAcceptedTitle(mode))
-        .setDescription("Central Inngest has the standalone capture request. Processing status should come back to this thread as the worker path lands.")
-        .addFields(
-          { name: "URL", value: truncateForEmbed(result.normalizedUrl, 900) },
-          { name: "sourceId", value: inlineCode(result.sourceId) },
-          { name: "event", value: inlineCode("link/ingest.requested") },
-        )
-        .setTimestamp(new Date()),
-    ],
+    content: [
+      `✅ ${linkIngestAcceptedTitle(mode)}.`,
+      `Central Inngest accepted ${truncateForEmbed(result.normalizedUrl, 500)}.`,
+      "I'll post back here when the capture is indexed or failed.",
+    ].join("\n"),
+    allowedMentions: { parse: [] },
   };
 }
 
@@ -2802,6 +2847,17 @@ async function safeReply(message: Message, text: string): Promise<void> {
   }
 }
 
+async function sendReplyOrChannelMessage(message: Message, payload: string | MessageCreateOptions): Promise<Message | undefined> {
+  try {
+    return await message.reply(payload);
+  } catch {
+    if (message.channel.isSendable()) {
+      return message.channel.send(payload);
+    }
+    return undefined;
+  }
+}
+
 type EphemeralInteraction = ChatInputCommandInteraction | ButtonInteraction | StringSelectMenuInteraction | ModalSubmitInteraction | MessageContextMenuCommandInteraction;
 
 async function replyEphemeral(interaction: EphemeralInteraction, text: string): Promise<void> {
@@ -2843,7 +2899,7 @@ function helpText(prefix: string): string {
     `- Slash: \`/pi status\`, \`/pi debug\`, \`/pi reload\`, \`/pi compact\`, \`/pi esc\`, \`/pi abort\`, \`/pi help\`.`,
     `- Prefix fallback: \`${prefix} <prompt>\`, \`${prefix} workspace <name> [prompt]\`, \`${prefix} ingest <url> [note]\`, \`${prefix} status\`, \`${prefix} reload\`, \`${prefix} compact [instructions]\`, \`${prefix} esc\`, \`${prefix} help\`.`,
     "- In a registered thread, normal messages continue the Pi session; while active they queue as steering messages.",
-    "- In DM, normal messages continue the configured Personal Workroom prototype.",
+    "- In DM, `ingest <url> [note]` captures a source directly; other normal messages continue the configured Personal Workroom prototype.",
     "- Pi skills work normally in messages; Discord slash equivalent is `/pi skill`",
   ].join("\n");
 }

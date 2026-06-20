@@ -53,6 +53,7 @@ export interface LinkIngestConfig {
   signingKeySecretName?: string;
   signingKeyLeaseTtl: string;
   statusBridgeEnabled: boolean;
+  brainRoot?: string;
   defaultVisibility: string;
   defaultSite: string;
   wzrrdCandidate: boolean;
@@ -193,6 +194,7 @@ export function defaultConfig(): AppConfig {
       signingKeySecretName: "inngest_signing_key",
       signingKeyLeaseTtl: "12h",
       statusBridgeEnabled: true,
+      brainRoot: process.env.LINK_INGEST_BRAIN_ROOT,
       defaultVisibility: "private",
       defaultSite: "joelclaw",
       wzrrdCandidate: false,
@@ -401,6 +403,7 @@ function normalizeLinkIngest(linkIngest: LinkIngestConfig | undefined): LinkInge
     signingKeySecretName: merged.signingKeySecretName?.trim() || undefined,
     signingKeyLeaseTtl: merged.signingKeyLeaseTtl?.trim() || defaults.signingKeyLeaseTtl,
     statusBridgeEnabled: merged.statusBridgeEnabled !== false,
+    brainRoot: merged.brainRoot?.trim() || undefined,
     defaultVisibility: merged.defaultVisibility?.trim() || defaults.defaultVisibility,
     defaultSite: merged.defaultSite?.trim() || defaults.defaultSite,
     wzrrdCandidate: merged.wzrrdCandidate === true,

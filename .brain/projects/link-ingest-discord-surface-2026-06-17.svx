@@ -3,7 +3,7 @@ title: "Link Ingest Discord Surface"
 kind: project
 status: active
 created: 2026-06-17
-updated: 2026-06-18
+updated: 2026-06-20
 area: architecture
 privacy: private
 tags:
@@ -115,7 +115,7 @@ capture/index.completed
 capture/item.failed
 ```
 
-The bridge posts one Discord status per logical event/mention and records the Discord message ID in the local registry.
+The bridge records every logical status event/mention in the local registry. Discord should stay quiet for progress events: acknowledge the request once, then post only terminal completion/failure.
 
 2026-06-17 failure bridge receipt:
 
@@ -249,4 +249,24 @@ Verification passed:
 npm run typecheck
 npm run build
 node dist/index.js install-launch-agent --config ~/.config/pi-discord-threads/config.json --start --restart
+```
+
+2026-06-20 quiet Discord link ingest UX receipt:
+
+- Adjusted the Discord surface to avoid link-ingest process-card spam.
+- `/pi ingest`, `/pi capture`, and `!pi ingest` now send a plain acknowledgement after Central Inngest accepts the request.
+- The status bridge still records every Central progress event in `Registry.linkIngests[*].statusUpdates`, including events that do not create Discord messages.
+- The bridge posts only terminal user-facing events to Discord: `capture/index.completed` and `capture/item.failed`.
+- Completion now reads the Brain capture manifest, formats the capture summary/highlights in Joel's plain operator style, and answers: why it is interesting, how to use it, and whether to watch/read/open it.
+- Personal Workroom DMs now intercept explicit `ingest <url> [note]` before the message reaches the Pi prompt runtime, so DM ingest uses the same quiet Discord link-ingest path instead of producing agent monologue/operator receipt spam.
+- This keeps the human proof path intact while making the operator UX: acknowledge request, then confirm completion or failure with actual context instead of process-card confetti.
+
+Verification passed:
+
+```sh
+npm run typecheck
+npm run test:link-ingest-status-bridge
+npm run test:registry-lifecycle
+npm run smoke:capture
+npm run brain:check
 ```
