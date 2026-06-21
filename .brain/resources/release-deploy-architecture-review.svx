@@ -222,3 +222,17 @@ After `cf89bf8 refactor: move prompt intake helpers`, explicit public deploy suc
 - Follow-up `doctor` reported run-control Redis reachable, no active pointers, no pending jobs, no dead-lettered runs, and no reconcile issues.
 
 This receipt proves the prompt-intake refactor deployed through the public release path with the zero-lost-work safety checks clean.
+
+## Live cutover receipt — soak telemetry deploy — 2026-06-21
+
+After `d616259 feat: expose run-control soak telemetry`, explicit public deploy succeeded:
+
+- Command path: `node dist/index.js release deploy --config ~/.config/pi-discord-threads/config.json`.
+- Release: `20260621T155053Z-d616259`.
+- Previous release: `20260621T145316Z-cf89bf8`.
+- Outcome: `safe`.
+- Postflight safety: `idle-postflight`, with `preflightActiveRuns=0`, `postflightActiveRuns=0`, and `postflightPendingJobs=0`.
+- LaunchAgent reported `current -> 20260621T155053Z-d616259` and running from `releases/current/dist/index.js`.
+- Follow-up `doctor` reported Redis reachable, no active pointers, no pending jobs, event summary/high-volume/warning counts visible, and daemon stdout/stderr byte watermarks visible.
+
+This receipt proves the telemetry hardening is live and ready for a multi-day soak. The existing Redis event stream length was still above the new cap at deploy time; it will trim on subsequent run-event writes because Redis `MAXLEN ~` is applied by `appendRunEvent()`.
