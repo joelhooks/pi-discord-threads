@@ -211,6 +211,11 @@ function createStore(fake = new FakeRedis()) {
   return { store: new RunControlStore(fake, config), fake };
 }
 
+function streamField(args, field) {
+  const index = args.indexOf(field);
+  return index === -1 ? undefined : args[index + 1];
+}
+
 test("tryEnqueueRun creates active pointer, run hash, and job atomically", async () => {
   const { store, fake } = createStore();
   const run = createRun("run-1");
@@ -309,6 +314,24 @@ test("recordRetryLater increments attempts and releases the lease below threshol
   assert.equal(persisted.lastRetryLaterReason, "registry mismatch");
   assert.equal(fake.strings.get("pi-discord-threads:thread:thread-1:active"), run.runId);
   assert.equal(fake.strings.has("pi-discord-threads:leases:run:run-retry-later"), false);
+});
+
+test("recordRetryLater uses bounded builder max attempts in retry-later event metadata", async () => {
+  const { store, fake } = createStore();
+  const run = createRun("run-retry-bounded", "running");
+  fake.strings.set("pi-discord-threads:thread:thread-1:active", run.runId);
+  fake.strings.set("pi-discord-threads:leases:run:run-retry-bounded", "lease-1");
+  fake.hashes.set("pi-discord-threads:runs:run-retry-bounded", new Map(Object.entries({
+    ...run,
+    imagesJson: "[]",
+  })));
+
+  await store.recordRetryLater(run, "lease-1", "worker-1", "registry mismatch", 2.9);
+
+  const retryEvent = fake.streams.find((entry) => entry.key === "pi-discord-threads:run:events" && streamField(entry.args, "type") === "retry_later");
+  const evalCommand = fake.commands.find((args) => args[0] === "EVAL" && args[1].includes("'lastRetryLaterAt'"));
+  assert.equal(evalCommand.at(-1), "2");
+  assert.equal(streamField(retryEvent.args, "maxAttempts"), "2");
 });
 
 test("recordRetryLater dead-letters atomically before releasing ownership", async () => {

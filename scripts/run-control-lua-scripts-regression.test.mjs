@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   atomicEnqueueRunScript,
+  buildRecordRetryLaterEval,
   claimRunLeaseScript,
   completeFinalizeScript,
   heartbeatRunLeaseScript,
@@ -40,6 +41,53 @@ test("ownership-sensitive scripts check active pointer and lease before side eff
 test("enqueue and lease scripts clean up partial state on Redis write errors", () => {
   assert.match(atomicEnqueueRunScript.source, /redis\.call\('DEL', KEYS\[1\]\)[\s\S]*redis\.call\('DEL', KEYS\[2\]\)[\s\S]*return \{'error'/);
   assert.match(claimRunLeaseScript.source, /redis\.call\('DEL', KEYS\[2\]\)[\s\S]*return \{'error'/);
+});
+
+test("recordRetryLater command builder owns exact Redis EVAL shape", () => {
+  const result = buildRecordRetryLaterEval({
+    activeKey: "active-key",
+    leaseKey: "lease-key",
+    runKey: "run-key",
+    runId: "run-1",
+    leaseToken: "lease-1",
+    workerId: "worker-1",
+    now: "2026-06-21T00:00:00.000Z",
+    reason: "registry mismatch",
+    maxAttempts: 3.9,
+  });
+
+  assert.equal(result.boundedMaxAttempts, 3);
+  assert.deepEqual(result.command, [
+    "EVAL",
+    recordRetryLaterScript.source,
+    "3",
+    "active-key",
+    "lease-key",
+    "run-key",
+    "run-1",
+    "lease-1",
+    "worker-1",
+    "2026-06-21T00:00:00.000Z",
+    "registry mismatch",
+    "3",
+  ]);
+});
+
+test("recordRetryLater command builder bounds max attempts before stringifying", () => {
+  const result = buildRecordRetryLaterEval({
+    activeKey: "active-key",
+    leaseKey: "lease-key",
+    runKey: "run-key",
+    runId: "run-1",
+    leaseToken: "lease-1",
+    workerId: "worker-1",
+    now: "2026-06-21T00:00:00.000Z",
+    reason: "registry mismatch",
+    maxAttempts: 0.5,
+  });
+
+  assert.equal(result.boundedMaxAttempts, 1);
+  assert.equal(result.command.at(-1), "1");
 });
 
 test("heartbeat, idle, and finalize scripts preserve existing invariants", () => {

@@ -161,6 +161,22 @@ Recommendation: yes, but preserve current behavior exactly: `Math.max(1, Math.fl
 - Existing run-control store/worker/lua-script tests still pass.
 - Typecheck and Brain check pass.
 
+## Implementation receipt — slice 1 — 2026-06-21
+
+Implemented:
+
+- `src/run-control/lua-scripts.ts` exports `buildRecordRetryLaterEval(input)` beside `recordRetryLaterScript`.
+- `RunControlStore.recordRetryLater()` now calls the builder instead of hand-building the positional Redis `EVAL` command.
+- The builder returns `boundedMaxAttempts` and the store uses that same number for retry/dead-letter event metadata.
+- Regression coverage asserts exact command shape, max-attempt bounding, store command usage, and event metadata drift protection.
+
+Verification receipt:
+
+- `npm run typecheck` — passed.
+- `npm run test:run-control-lua-scripts` — 6/6 passed.
+- `npm run test:run-control-store` — 15/15 passed.
+- `npm run test:run-control-worker` — 21/21 passed.
+
 ## Validation plan
 
 Run after implementation:

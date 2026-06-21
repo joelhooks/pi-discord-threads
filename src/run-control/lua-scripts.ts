@@ -134,6 +134,44 @@ return {'retry_later', tostring(attempts)}
 `,
 };
 
+export interface RecordRetryLaterEvalInput {
+  activeKey: string;
+  leaseKey: string;
+  runKey: string;
+  runId: string;
+  leaseToken: string;
+  workerId: string;
+  now: string;
+  reason: string;
+  maxAttempts: number;
+}
+
+export interface RecordRetryLaterEval {
+  command: string[];
+  boundedMaxAttempts: number;
+}
+
+export function buildRecordRetryLaterEval(input: RecordRetryLaterEvalInput): RecordRetryLaterEval {
+  const boundedMaxAttempts = Math.max(1, Math.floor(input.maxAttempts));
+  return {
+    boundedMaxAttempts,
+    command: [
+      "EVAL",
+      recordRetryLaterScript.source,
+      "3",
+      input.activeKey,
+      input.leaseKey,
+      input.runKey,
+      input.runId,
+      input.leaseToken,
+      input.workerId,
+      input.now,
+      input.reason,
+      String(boundedMaxAttempts),
+    ],
+  };
+}
+
 export const heartbeatRunLeaseScript: RunControlLuaScript = {
   name: "heartbeatRunLease",
   source: `

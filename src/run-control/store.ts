@@ -3,11 +3,11 @@ import type { RedisCommandClient } from "./redis-client.js";
 import { RetryRunLaterError } from "./errors.js";
 import {
   atomicEnqueueRunScript,
+  buildRecordRetryLaterEval,
   claimRunLeaseScript,
   clearActiveIfMatchesScript,
   completeFinalizeScript,
   heartbeatRunLeaseScript,
-  recordRetryLaterScript,
   recordWorkerIdleScript,
   releaseRunLeaseScript,
   verifyRunOwnershipScript,
@@ -334,21 +334,18 @@ export class RunControlStore {
 
   async recordRetryLater(run: RunRecord, leaseToken: string, workerId: string, reason: string, maxAttempts: number): Promise<RetryLaterRecordResult> {
     const now = new Date().toISOString();
-    const boundedMaxAttempts = String(Math.max(1, Math.floor(maxAttempts)));
-    const reply = await this.command([
-      "EVAL",
-      recordRetryLaterScript.source,
-      "3",
-      this.keys.active(run.logicalThreadId),
-      this.keys.runLease(run.runId),
-      this.keys.run(run.runId),
-      run.runId,
+    const { command, boundedMaxAttempts } = buildRecordRetryLaterEval({
+      activeKey: this.keys.active(run.logicalThreadId),
+      leaseKey: this.keys.runLease(run.runId),
+      runKey: this.keys.run(run.runId),
+      runId: run.runId,
       leaseToken,
       workerId,
       now,
       reason,
-      boundedMaxAttempts,
-    ]);
+      maxAttempts,
+    });
+    const reply = await this.command(command);
     const [status, attemptsOrReason] = parseEvalArray(reply);
     if (status === "retry_later" || status === "dead_lettered") {
       const attempts = Number(attemptsOrReason);
@@ -356,7 +353,7 @@ export class RunControlStore {
         logicalThreadId: run.logicalThreadId,
         workerId,
         attempts,
-        maxAttempts: Number(boundedMaxAttempts),
+        maxAttempts: boundedMaxAttempts,
         reason,
       }).catch(() => undefined);
       if (status === "dead_lettered") {
@@ -364,7 +361,7 @@ export class RunControlStore {
           logicalThreadId: run.logicalThreadId,
           workerId,
           attempts,
-          maxAttempts: Number(boundedMaxAttempts),
+          maxAttempts: boundedMaxAttempts,
           reason,
         }).catch(() => undefined);
       }
