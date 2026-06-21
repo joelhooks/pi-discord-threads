@@ -1,5 +1,5 @@
 import { createMachine } from "xstate";
-import type { ThreadRecord } from "./registry.js";
+import type { ActiveRunRecord, ThreadRecord } from "./registry.js";
 
 export type ThreadRunState =
   | "idle"
@@ -86,9 +86,59 @@ export const threadRunMachine = createMachine({
   },
 });
 
+export type QueueIntentMode = "steer" | "followUp";
+
+export interface QueueIntent {
+  text: string;
+  mode: QueueIntentMode;
+}
+
 export type RuntimePromptDisposition =
   | { kind: "start" }
-  | { kind: "queue"; mode: "steer" | "followUp"; reason: "runtime-streaming" | "registry-running" };
+  | { kind: "queue"; mode: QueueIntentMode; reason: "runtime-streaming" | "registry-running" };
+
+export const ACTIVE_RUN_PROMPT_LIMIT = 24_000;
+
+export function parseQueueIntent(prompt: string): QueueIntent {
+  const trimmed = prompt.trim();
+  const followUpMatch = trimmed.match(/^(?:follow[- ]?up|after|later)\s*[:：]?\s+([\s\S]*)$/i);
+  if (followUpMatch?.[1]?.trim()) {
+    return { mode: "followUp", text: followUpMatch[1].trim() };
+  }
+  return { mode: "steer", text: prompt };
+}
+
+export function summarizeActiveRunPrompt(prompt: string): string {
+  return prompt.replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
+export interface BuildActiveRunRecordOptions {
+  now?: Date;
+}
+
+export function buildActiveRunRecord(
+  sourceDiscordMessageId: string,
+  placeholderDiscordMessageId: string,
+  prompt: string,
+  sessionFile: string | undefined,
+  runId?: string,
+  options: BuildActiveRunRecordOptions = {},
+): ActiveRunRecord {
+  const now = (options.now ?? new Date()).toISOString();
+  const storedPrompt = prompt.length > ACTIVE_RUN_PROMPT_LIMIT
+    ? `${prompt.slice(0, ACTIVE_RUN_PROMPT_LIMIT)}\n\n[truncated by pi-discord-threads active-run recovery metadata]`
+    : prompt;
+  return {
+    runId,
+    sourceDiscordMessageId,
+    placeholderDiscordMessageId,
+    prompt: storedPrompt,
+    promptPreview: summarizeActiveRunPrompt(prompt),
+    startedAt: now,
+    updatedAt: now,
+    sessionFile,
+  };
+}
 
 export function hasVisibleActiveRun(input: {
   registryStatus?: ThreadRecord["status"];

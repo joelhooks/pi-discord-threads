@@ -42,25 +42,28 @@ Current Brain decisions still hold:
 - `.brain/projects/project-structure-cleanup.svx` — repo organization, operator README, agent orientation, and dead-code cleanup PRD.
 - `src/release-snapshots.ts` / `scripts/release-snapshot-regression.test.mjs` — current release snapshot/list implementation and safety regressions.
 
-## Current status — 2026-06-19
+## Current status — 2026-06-21
 
 - **Shipped:** Candidates 1 and 2 landed in `2e94f34`.
 - **Shipped:** Release snapshot/list storage foundation landed in `042d96a` as an operator/deploy slice, not a new architecture rewrite.
-- **Next architecture slice:** typed Lua command builders. This is now the sharpest run-control locality move because the Lua scripts are named, but `store.ts` still builds positional `EVAL` arrays by hand.
-- **Next deploy slice:** LaunchAgent handoff through `releases/current`, then `release deploy` / `release rollback` with preflight/postflight and automatic rollback. Keep it framed as **zero lost work + fast rollback**, not true zero downtime.
+- **Shipped:** Candidate A, typed Lua command builder for `recordRetryLaterScript`, landed in `71336f9`.
+- **Shipped:** Candidate B, shared run-control read model, landed in `988b399`.
+- **Shipped:** Candidate C, deploy authority + post-activation compensation, landed in `2429e22`.
+- **Current slice:** Candidate D moves prompt-intake pure helpers into `thread-run-state.ts` while keeping Discord/Redis/Pi side effects in adapters.
+- **Next architecture slice:** Candidate E, Discord run-turn presenter, should extract only presentation setup first.
 - **Still deferred:** registry storage migration, whole Discord-to-Effect rewrite, giant `Engine` class, generalized release platform.
 
 ## Current architecture review — 2026-06-21
 
-The repo has moved past the release deploy wall. Public deploy/rollback are wired, the first live deploy receipt exists, and `discord-bot.ts` is still the largest hotspot at 2,905 lines.
+The repo has moved past the release deploy wall. Public deploy/rollback are wired, the first live deploy receipt exists, and `discord-bot.ts` is still the largest hotspot at 2,868 lines.
 
 Fresh receipts:
 
 - `f4b935f` captures the live deploy receipt in Brain; the live code release is `b682113`.
 - `src/release-deploy.ts`, `src/release-transition.ts`, and `src/launch-agent.ts` now own public deploy/rollback, fakeable transition flow, and LaunchAgent restart guardrails.
-- `src/run-control/inspection.ts` exists, but doctor/reconcile/deploy safety still use overlapping run-control scans and projections.
-- `src/run-control/store.ts` still hand-builds the `recordRetryLaterScript` positional `EVAL` command.
-- `src/discord-bot.ts` still owns slash routing, prefix/DM routing, queue decisions, run-control worker adapter wiring, reload/compact/status actions, and reply helpers.
+- `src/run-control/read-model.ts` now owns the shared race-aware Redis inspection projection.
+- `src/run-control/lua-scripts.ts` now owns the `recordRetryLaterScript` command builder shape.
+- `src/discord-bot.ts` still owns slash routing, prefix/DM routing, run-control worker adapter wiring, reload/compact/status actions, and reply helpers.
 - Fresh architecture fanout artifacts: `tmp/subagents/architecture-run-control-candidates.md`, `tmp/subagents/architecture-release-candidates.md`, and `tmp/subagents/architecture-discord-runtime-candidates.md`.
 
 ### Candidate A: typed Lua command builder for `recordRetryLaterScript`
@@ -132,6 +135,8 @@ Fresh receipts:
 **Risk:** Timestamp, truncation, and interrupted metadata drift. Start with pure helpers and preserve callsites.
 
 **First reversible step:** Move only `parseQueueIntent`, `summarizeActiveRunPrompt`, and `buildActiveRunRecord` with injectable `now`, then add pure tests for follow-up aliases, truncation, and active-run shape.
+
+**Status:** Implemented in the 2026-06-21 prompt-intake slice. `src/thread-run-state.ts` now owns `parseQueueIntent`, `summarizeActiveRunPrompt`, and `buildActiveRunRecord` with injectable `now`; `src/discord-bot.ts` imports those helpers while keeping Redis writes, Discord replies, placeholder sends, and Pi runtime calls in adapters.
 
 ### Candidate E: Discord run-turn presenter
 

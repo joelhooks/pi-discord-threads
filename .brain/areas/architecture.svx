@@ -30,6 +30,8 @@ Current boundary:
 
 Rule: new lifecycle states/transitions belong in `thread-run-state.ts` first. Do not keep adding scattered `status`/`activeRun` conditionals to `discord-bot.ts`.
 
+2026-06-21: Prompt-intake pure helpers moved into `src/thread-run-state.ts`: `parseQueueIntent`, `summarizeActiveRunPrompt`, and `buildActiveRunRecord` with injectable `now`. Discord adapters still own side effects; `thread-run-state.ts` owns lifecycle/intake decisions and active-run metadata shape.
+
 ## XState lifecycle modeling
 
 2026-06-18: Use XState v5 as the canonical modeling tool for finite daemon and runtime lifecycle truth. Effect remains the resource/fiber/scope layer; XState owns named states, events, guards, parallel regions, and invoked actors where lifecycle ambiguity causes bugs.

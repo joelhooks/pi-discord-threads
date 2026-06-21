@@ -31,7 +31,7 @@ import type { AppConfig, RunControlRole } from "./config.js";
 import { formatUnknownError } from "./error-format.js";
 import type { PiRuntimePort } from "./pi-runtime.js";
 import { createProgressEventBus } from "./progress-events.js";
-import type { ActiveRunRecord, LinkIngestRecord, RegistryPort, ThreadRecord } from "./registry.js";
+import type { LinkIngestRecord, RegistryPort, ThreadRecord } from "./registry.js";
 import {
   listWorkspaces,
   parseLeadingCwdFlag,
@@ -76,6 +76,7 @@ import { startupRecoveryEnabled } from "./startup-recovery.js";
 import { extractFirstUrl, postPreparedLinkIngest, prepareLinkIngest, type LinkIngestSendResult, type PreparedLinkIngest } from "./link-ingest.js";
 import { buildLinkIngestCommandText, linkIngestAcceptedTitle, linkIngestUsage, parsePrefixLinkIngestCommand, type LinkIngestCommandMode } from "./link-ingest-command.js";
 import { startLinkIngestStatusBridge, type StopLinkIngestStatusBridge } from "./link-ingest-status-bridge.js";
+import { buildActiveRunRecord, parseQueueIntent, summarizeActiveRunPrompt } from "./thread-run-state.js";
 
 export interface RunBotOptions {
   config: AppConfig;
@@ -1992,40 +1993,6 @@ async function markQueuedRunInputAccepted(
   await markQueuedMessageAccepted(message, input.mode);
 }
 
-function parseQueueIntent(prompt: string): { text: string; mode: "steer" | "followUp" } {
-  const trimmed = prompt.trim();
-  const followUpMatch = trimmed.match(/^(?:follow[- ]?up|after|later)\s*[:：]?\s+([\s\S]*)$/i);
-  if (followUpMatch?.[1]?.trim()) {
-    return { mode: "followUp", text: followUpMatch[1].trim() };
-  }
-  return { mode: "steer", text: prompt };
-}
-
-const ACTIVE_RUN_PROMPT_LIMIT = 24_000;
-
-function buildActiveRunRecord(
-  sourceDiscordMessageId: string,
-  placeholderDiscordMessageId: string,
-  prompt: string,
-  sessionFile: string | undefined,
-  runId?: string,
-): ActiveRunRecord {
-  const now = new Date().toISOString();
-  const storedPrompt = prompt.length > ACTIVE_RUN_PROMPT_LIMIT
-    ? `${prompt.slice(0, ACTIVE_RUN_PROMPT_LIMIT)}\n\n[truncated by pi-discord-threads active-run recovery metadata]`
-    : prompt;
-  return {
-    runId,
-    sourceDiscordMessageId,
-    placeholderDiscordMessageId,
-    prompt: storedPrompt,
-    promptPreview: summarizeActiveRunPrompt(prompt),
-    startedAt: now,
-    updatedAt: now,
-    sessionFile,
-  };
-}
-
 function buildRecoveryPrompt(record: ThreadRecord, prompt: string): string {
   if (record.status !== "interrupted") return prompt;
 
@@ -2060,10 +2027,6 @@ function buildRecoveryPrompt(record: ThreadRecord, prompt: string): string {
 
 function isRecoveryIntent(prompt: string): boolean {
   return /^(?:continue(?: work)?|keep going|resume|recover|retry|rerun|pick up)(?:[.!?]*)$/i.test(prompt.trim());
-}
-
-function summarizeActiveRunPrompt(prompt: string): string {
-  return prompt.replace(/\s+/g, " ").trim().slice(0, 500);
 }
 
 async function runPromptWithPlaceholder(
