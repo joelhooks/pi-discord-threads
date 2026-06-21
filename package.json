@@ -27,6 +27,7 @@
     "test:run-control-redis-client": "npm run build && node --test scripts/run-control-redis-client-regression.test.mjs",
     "test:run-control-reconcile": "npm run build && node --test scripts/run-control-reconcile-regression.test.mjs",
     "test:run-control-doctor": "npm run build && node --test scripts/run-control-doctor-regression.test.mjs",
+    "test:run-control-read-model": "npm run build && node --test scripts/run-control-read-model-regression.test.mjs",
     "test:run-control-lua-scripts": "npm run build && node --test scripts/run-control-lua-scripts-regression.test.mjs",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",

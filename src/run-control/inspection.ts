@@ -1,22 +1,25 @@
 import type { AppConfig } from "../config.js";
 import { createRunQueueRuntimeClient } from "../engine/runtime.js";
 import {
-  buildRunControlDoctorReport,
   loadRunControlDoctorRegistry,
-  type RunControlDoctorActivePointer,
-  type RunControlDoctorDeadLetterRun,
   type RunControlDoctorReport,
 } from "./doctor.js";
-import type { ReconcileIssue } from "./reconcile.js";
+import {
+  loadRunControlReadModel,
+  type RunControlReadModel,
+  type RunControlReadModelActiveRun,
+  type RunControlReadModelDeadLetterRun,
+} from "./read-model.js";
+import { reconcileRunControl, type ReconcileIssue } from "./reconcile.js";
 import type { RunControlJobQueueSummary, RunControlWorkerRecord } from "./types.js";
 import { isTerminalRunStatus } from "./types.js";
 
 export interface RunControlInspectionSnapshot {
   checkedAt: string;
-  activeRuns: RunControlDoctorActivePointer[];
+  activeRuns: RunControlReadModelActiveRun[];
   pendingJobs: RunControlJobQueueSummary;
   workers: RunControlWorkerRecord[];
-  deadLetteredRuns: RunControlDoctorDeadLetterRun[];
+  deadLetteredRuns: RunControlReadModelDeadLetterRun[];
   reconcileIssues: ReconcileIssue[];
 }
 
@@ -58,6 +61,20 @@ export function snapshotFromRunControlDoctorReport(report: RunControlDoctorRepor
   };
 }
 
+export function snapshotFromRunControlReadModel(
+  readModel: RunControlReadModel,
+  reconcileIssues: ReconcileIssue[],
+): RunControlInspectionSnapshot {
+  return {
+    checkedAt: readModel.checkedAt,
+    activeRuns: readModel.activeRuns,
+    pendingJobs: readModel.pendingJobs,
+    workers: readModel.workers,
+    deadLetteredRuns: readModel.deadLetteredRuns,
+    reconcileIssues,
+  };
+}
+
 export async function loadRunControlInspectionSnapshot(config: AppConfig): Promise<RunControlInspectionSnapshot> {
   if (!config.runControl.enabled) {
     return {
@@ -74,7 +91,9 @@ export async function loadRunControlInspectionSnapshot(config: AppConfig): Promi
   const store = createRunQueueRuntimeClient(config);
   try {
     await store.warmup();
-    return snapshotFromRunControlDoctorReport(await buildRunControlDoctorReport({ store, registry, config }));
+    const readModel = await loadRunControlReadModel(store);
+    const reconcile = await reconcileRunControl({ store, registry, config, apply: false, readModel });
+    return snapshotFromRunControlReadModel(readModel, reconcile.issues);
   } finally {
     await store.close();
   }

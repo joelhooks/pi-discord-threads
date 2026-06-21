@@ -117,9 +117,17 @@ test("run-control doctor report includes active pointers, pending jobs, workers,
     placeholderRetiredAt: "2026-01-01T00:00:05.000Z",
   });
   const runs = [activeRun, outboxRun, deadRun];
+  let listRunsCount = 0;
+  let listActivePointersCount = 0;
   const store = {
-    listRuns: async () => runs,
-    listActivePointers: async () => [{ logicalThreadId: "thread-active", runId: "active" }],
+    listRuns: async () => {
+      listRunsCount++;
+      return runs;
+    },
+    listActivePointers: async () => {
+      listActivePointersCount++;
+      return [{ logicalThreadId: "thread-active", runId: "active" }];
+    },
     getRun: async (runId) => runs.find((run) => run.runId === runId),
     getRunLeaseTtl: async () => 1234,
     getJobQueueSummary: async () => ({
@@ -161,6 +169,8 @@ test("run-control doctor report includes active pointers, pending jobs, workers,
   assert.match(text, /outbox status=succeeded chunks=2 ids=2/);
   assert.match(text, /deadLetteredRuns: 1/);
   assert.match(text, /dead status=interrupted retryLater=12/);
+  assert.equal(listRunsCount, 1);
+  assert.equal(listActivePointersCount, 1);
   assert.match(text, /reconcileIssues: 0/);
   assert.match(text, /daemonStderr: .*daemon\.err\.log lines=0 error=/);
 });

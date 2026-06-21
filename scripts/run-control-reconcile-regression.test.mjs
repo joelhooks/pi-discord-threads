@@ -38,6 +38,12 @@ function createHarness({ activeRunId, runStatus = "running" } = {}) {
     async getRunLeaseTtl() {
       return -2;
     },
+    async getJobQueueSummary() {
+      return { pendingCount: 0, consumers: [] };
+    },
+    async listWorkers() {
+      return [];
+    },
     async clearActiveIfMatches() {
       return true;
     },
@@ -129,6 +135,15 @@ test("reconcile re-reads an active-pointer run before clearing a possibly fresh 
     },
     async getRun(runId) {
       return runId === freshRun.runId ? freshRun : undefined;
+    },
+    async getRunLeaseTtl() {
+      return 1000;
+    },
+    async getJobQueueSummary() {
+      return { pendingCount: 0, consumers: [] };
+    },
+    async listWorkers() {
+      return [];
     },
     async clearActiveIfMatches() {
       clearCount++;

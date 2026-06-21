@@ -5,37 +5,19 @@ import type { AppConfig } from "../config.js";
 import type { RegistryPort, ThreadRecord } from "../registry.js";
 import { formatUnknownError } from "../error-format.js";
 import { reconcileRunControl, type ReconcileReport } from "./reconcile.js";
-import type { ActivePointer, RunControlJobQueueSummary, RunControlStorePort, RunControlWorkerRecord, RunRecord } from "./types.js";
+import {
+  loadRunControlReadModel,
+  type RunControlReadModelActiveRun,
+  type RunControlReadModelDeadLetterRun,
+  type RunControlReadModelOutboxRun,
+} from "./read-model.js";
+import type { RunControlJobQueueSummary, RunControlStorePort, RunControlWorkerRecord } from "./types.js";
 
 const DAEMON_STDERR_TAIL_BYTES = 64 * 1024;
 
-export interface RunControlDoctorActivePointer {
-  logicalThreadId: string;
-  runId: string;
-  status?: string;
-  workerId?: string;
-  leaseTtlMs?: number;
-  retryLaterCount?: number;
-  deadLetteredAt?: string;
-}
-
-export interface RunControlDoctorOutboxRun {
-  runId: string;
-  status: string;
-  chunkCount?: number;
-  messageIds: string[];
-  reservedAt?: string;
-  postedAt?: string;
-  startedAt?: string;
-}
-
-export interface RunControlDoctorDeadLetterRun {
-  runId: string;
-  status: string;
-  retryLaterCount?: number;
-  deadLetteredAt?: string;
-  deadLetterReason?: string;
-}
+export type RunControlDoctorActivePointer = RunControlReadModelActiveRun;
+export type RunControlDoctorOutboxRun = RunControlReadModelOutboxRun;
+export type RunControlDoctorDeadLetterRun = RunControlReadModelDeadLetterRun;
 
 export interface RunControlDoctorReport {
   checkedAt: string;
@@ -83,30 +65,19 @@ export async function buildRunControlDoctorReport(options: {
   stderrTailLines?: number;
 }): Promise<RunControlDoctorReport> {
   const { store, registry, config } = options;
-  const checkedAt = new Date().toISOString();
-  const runs = await store.listRuns();
-  const runsById = new Map(runs.map((run) => [run.runId, run]));
-  const activePointers = await store.listActivePointers();
-  const activePointerReports = await Promise.all(activePointers.map(async (pointer) => {
-    const run = runsById.get(pointer.runId) ?? await store.getRun(pointer.runId).catch(() => undefined);
-    const leaseTtlMs = run ? await store.getRunLeaseTtl(run.runId).catch(() => undefined) : undefined;
-    return activePointerReport(pointer, run, leaseTtlMs);
-  }));
-
-  const [pendingJobs, workers, reconcile, daemonStderr] = await Promise.all([
-    store.getJobQueueSummary(),
-    store.listWorkers(),
-    reconcileRunControl({ store, registry, config, apply: false }),
+  const readModel = await loadRunControlReadModel(store);
+  const [reconcile, daemonStderr] = await Promise.all([
+    reconcileRunControl({ store, registry, config, apply: false, readModel }),
     readDaemonStderr(options.stderrPath ?? join(config.dataDir, "daemon.err.log"), options.stderrTailLines ?? 20),
   ]);
 
   return {
-    checkedAt,
-    activePointers: activePointerReports,
-    pendingJobs,
-    workers,
-    outboxRuns: runs.filter(hasOutboxState).map(outboxRunReport),
-    deadLetteredRuns: runs.filter((run) => Boolean(run.deadLetteredAt || run.deadLetterReason)).map(deadLetterRunReport),
+    checkedAt: readModel.checkedAt,
+    activePointers: readModel.activeRuns,
+    pendingJobs: readModel.pendingJobs,
+    workers: readModel.workers,
+    outboxRuns: readModel.outboxRuns,
+    deadLetteredRuns: readModel.deadLetteredRuns,
     reconcile: { issues: reconcile.issues, applied: reconcile.applied },
     daemonStderr,
   };
@@ -160,48 +131,6 @@ function readOnlyRegistry(threads: Record<string, ThreadRecord>): RegistryPort {
     listThreads: () => Object.values(threads),
     save: async () => undefined,
   } as unknown as RegistryPort;
-}
-
-function activePointerReport(pointer: ActivePointer, run: RunRecord | undefined, leaseTtlMs: number | undefined): RunControlDoctorActivePointer {
-  return {
-    logicalThreadId: pointer.logicalThreadId,
-    runId: pointer.runId,
-    status: run?.status,
-    workerId: run?.workerId,
-    leaseTtlMs,
-    retryLaterCount: run?.retryLaterCount,
-    deadLetteredAt: run?.deadLetteredAt,
-  };
-}
-
-function hasOutboxState(run: RunRecord): boolean {
-  return Boolean(run.finalDiscordOutboxStartedAt
-    || run.finalDiscordReservedAt
-    || run.finalDiscordPostedAt
-    || run.finalDiscordChunkCount
-    || (run.finalDiscordMessageIds?.length ?? 0) > 0);
-}
-
-function outboxRunReport(run: RunRecord): RunControlDoctorOutboxRun {
-  return {
-    runId: run.runId,
-    status: run.status,
-    chunkCount: run.finalDiscordChunkCount,
-    messageIds: run.finalDiscordMessageIds ?? [],
-    startedAt: run.finalDiscordOutboxStartedAt,
-    reservedAt: run.finalDiscordReservedAt,
-    postedAt: run.finalDiscordPostedAt,
-  };
-}
-
-function deadLetterRunReport(run: RunRecord): RunControlDoctorDeadLetterRun {
-  return {
-    runId: run.runId,
-    status: run.status,
-    retryLaterCount: run.retryLaterCount,
-    deadLetteredAt: run.deadLetteredAt,
-    deadLetterReason: run.deadLetterReason,
-  };
 }
 
 async function readDaemonStderr(path: string, tailLines: number): Promise<RunControlDoctorReport["daemonStderr"]> {

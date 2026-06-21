@@ -16,7 +16,7 @@ Use the smallest check that proves the touched seam.
 | Thread run state | `npm run test:thread-run-state` |
 | Discord HUD/final rendering | `npm run test:progress-hud`, `npm run test:final-answer-outbox` |
 | Pi runtime/service boundaries | `npm run test:pi-runtime`, `npm run test:pi-session-service`, `npm run test:engine-layer` |
-| Redis run control | `npm run test:run-control-lua-scripts`, `npm run test:run-control-store`, `npm run test:run-control-worker`, `npm run test:run-control-doctor` |
+| Redis run control | `npm run test:run-control-read-model`, `npm run test:run-control-lua-scripts`, `npm run test:run-control-store`, `npm run test:run-control-worker`, `npm run test:run-control-doctor`, `npm run test:run-control-reconcile` |
 | Whole CLI build artifact | `npm run build` |
 
 ## Operator smoke checks
@@ -42,6 +42,7 @@ node dist/index.js release rollback <release-id> --config ~/.config/pi-discord-t
 
 ## Receipts
 
+- 2026-06-21 shared run-control read model: `npm run test:run-control-read-model`, `npm run test:run-control-doctor`, `npm run test:run-control-reconcile`, and `npm run test:release-transition` cover the shared read projection across doctor, reconcile dry-run/apply boundaries, and deploy safety inspection.
 - 2026-06-20 public release deploy/rollback wiring: `npm run test:release-transition` covers fake LaunchAgent/no-`launchctl` deploy and rollback command ordering plus deploy safety classification.
 - 2026-06-20 release transition core: added `npm run test:release-transition` for fake LaunchAgent/no-`launchctl` transition ordering and deploy safety classification.
 - 2026-06-20 gardening pass: replaced bootstrap placeholder with the current validation map from `package.json`, `AGENTS.md`, and `README.md`.

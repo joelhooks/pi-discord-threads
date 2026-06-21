@@ -97,6 +97,8 @@ Fresh receipts:
 
 **First reversible step:** Use the shared read model in doctor only, then derive deploy inspection from doctor/read-model output after tests settle.
 
+**Status:** Implemented in the 2026-06-21 read-model slice. `src/run-control/read-model.ts` now owns the race-aware Redis read projection. Doctor, reconcile dry-run, and deploy inspection consume the same read model; `reconcile --apply` refuses caller-supplied stale read models and loads its own fresh one before guarded writes.
+
 ### Candidate C: release deploy authority and post-mutation compensation
 
 **Files/modules:** `src/release-deploy.ts`, `src/release-transition.ts`, `src/release-snapshots.ts`, `src/launch-agent.ts`, `scripts/release-transition-regression.test.mjs`.

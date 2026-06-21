@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import type { AppConfig } from "../config.js";
 import { formatUnknownError } from "../error-format.js";
 import type { RegistryPort } from "../registry.js";
+import { loadRunControlReadModel, type RunControlReadModel } from "./read-model.js";
 import { isTerminalRunStatus, type RunControlStorePort, type RunRecord } from "./types.js";
 
 export type ReconcileSeverity = "info" | "warn" | "error";
@@ -28,19 +29,22 @@ export async function reconcileRunControl(options: {
   registry: RegistryPort;
   config: AppConfig;
   apply: boolean;
+  readModel?: RunControlReadModel;
 }): Promise<ReconcileReport> {
-  const { store, registry, config, apply } = options;
-  const checkedAt = new Date().toISOString();
+  const { store, registry, apply } = options;
+  if (apply && options.readModel) throw new Error("reconcile --apply requires a fresh read model owned by reconcileRunControl");
+  const readModel = options.readModel ?? await loadRunControlReadModel(store);
+  const checkedAt = readModel.checkedAt;
   const issues: ReconcileIssue[] = [];
   const applied: string[] = [];
 
-  const runs = await store.listRuns();
+  const runs = [...readModel.runs];
   const runsById = new Map(runs.map((run) => [run.runId, run]));
-  const activePointers = await store.listActivePointers();
+  const activePointers = readModel.activePointers;
   const activePointersByThread = new Map(activePointers.map((pointer) => [pointer.logicalThreadId, pointer]));
 
   for (const run of runs) {
-    if ((run.status === "running" || run.status === "finalizing") && await isRunLeaseExpired(store, run)) {
+    if ((run.status === "running" || run.status === "finalizing") && isRunLeaseExpired(readModel, run)) {
       issues.push({
         code: "expired-worker-lease",
         severity: "warn",
@@ -94,18 +98,7 @@ export async function reconcileRunControl(options: {
   }
 
   for (const pointer of activePointers) {
-    let run = runsById.get(pointer.runId);
-    if (!run) {
-      // listRuns() and listActivePointers() are separate Redis scans. A run can be
-      // enqueued between them, so re-read the pointed run before treating the
-      // active pointer as orphaned. Otherwise reconcile can clear a fresh active
-      // pointer and then interrupt the just-created run on the next pass.
-      run = await store.getRun(pointer.runId);
-      if (run) {
-        runsById.set(run.runId, run);
-        runs.push(run);
-      }
-    }
+    const run = runsById.get(pointer.runId);
     if (!run) {
       issues.push({
         code: "active-pointer-missing-run",
@@ -309,8 +302,8 @@ function activeRunFromRun(run: RunRecord) {
   };
 }
 
-async function isRunLeaseExpired(store: RunControlStorePort, run: RunRecord): Promise<boolean> {
-  const ttl = await store.getRunLeaseTtl(run.runId);
-  if (ttl > 0) return false;
-  return true;
+function isRunLeaseExpired(readModel: RunControlReadModel, run: RunRecord): boolean {
+  const ttl = readModel.leaseTtlByRunId.get(run.runId);
+  if (ttl === undefined) return true;
+  return ttl <= 0;
 }
