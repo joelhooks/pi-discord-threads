@@ -412,8 +412,8 @@ Brain is canonical. If this gets mirrored to issues later, create vertical slice
 
 1. `release snapshot/list` storage foundation — shipped in `042d96a`.
 2. `release activate <release-id>` plus LaunchAgent entrypoint switch to `releases/current`.
-3. `release deploy` with preflight/postflight and automatic rollback — wired, pending live receipt.
-4. `release rollback <release-id>` with config backup/restore and postflight proof — wired, pending live receipt.
+3. `release deploy` with preflight/postflight and automatic rollback — wired and live-proven safe on 2026-06-21, including prompt-intake deploy `20260621T145316Z-cf89bf8`.
+4. `release rollback <release-id>` with config backup/restore and postflight proof — wired, pending explicit rollback rehearsal.
 5. Running-session deploy smoke harness.
 
 Each issue should link back to this PRD.

@@ -208,3 +208,17 @@ After committing the restart-drain fix, explicit public deploy succeeded:
 - Ledger tail records the earlier failed deploy (`outcome=failed`, `errorCode=transition-error`) and the successful deploy (`outcome=safe`, `safetyStatus=safe`).
 
 This is the first live receipt that public deploy can mutate `releases/current`, rewrite the plist, restart LaunchAgent, and return safe postflight evidence on the single-user machine.
+
+## Live cutover receipt — prompt-intake deploy — 2026-06-21
+
+After `cf89bf8 refactor: move prompt intake helpers`, explicit public deploy succeeded:
+
+- Command path: `node dist/index.js release deploy --config ~/.config/pi-discord-threads/config.json`.
+- Release: `20260621T145316Z-cf89bf8`.
+- Previous release: `20260621T032505Z-b682113`.
+- Outcome: `safe`.
+- Postflight safety: `idle-postflight`, with `preflightActiveRuns=0`, `postflightActiveRuns=0`, and `postflightPendingJobs=0`.
+- LaunchAgent reported running as `gui/501/com.joelhooks.pi-discord-threads` from `releases/current/dist/index.js`.
+- Follow-up `doctor` reported run-control Redis reachable, no active pointers, no pending jobs, no dead-lettered runs, and no reconcile issues.
+
+This receipt proves the prompt-intake refactor deployed through the public release path with the zero-lost-work safety checks clean.
