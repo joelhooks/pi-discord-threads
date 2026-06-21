@@ -27,6 +27,8 @@ class FakeRedis {
   streams = [];
   commands = [];
   failJobXadd = false;
+  failEventSummary = false;
+  failJobXrange = false;
 
   async sendCommand(args) {
     this.commands.push(args);
@@ -42,6 +44,28 @@ class FakeRedis {
       this.streams.push({ key: args[1], id, args });
       return id;
     }
+    if (command === "XLEN") return this.streams.filter((entry) => entry.key === args[1]).length;
+    if (command === "XREVRANGE") {
+      if (this.failEventSummary) throw new Error("Redis XREVRANGE exploded");
+      const countIndex = args.indexOf("COUNT");
+      const count = countIndex === -1 ? 100 : Number(args[countIndex + 1]);
+      return this.streams
+        .filter((entry) => entry.key === args[1])
+        .slice()
+        .reverse()
+        .slice(0, count)
+        .map((entry) => [entry.id, eventFields(entry.args)]);
+    }
+    if (command === "XRANGE") {
+      if (this.failJobXrange) throw new Error("Redis XRANGE exploded");
+      return this.streams
+        .filter((entry) => entry.key === args[1] && entry.id === args[2])
+        .map((entry) => [entry.id, eventFields(entry.args)]);
+    }
+    if (command === "XPENDING" && args.length > 3) {
+      return [["1-0", "worker-1", 4321, 3]];
+    }
+    if (command === "XPENDING") return [1, "1-0", "1-0", [["worker-1", 1]]];
     if (command === "HSET") {
       const hash = this.hashes.get(args[1]) ?? new Map();
       for (let i = 2; i < args.length; i += 2) hash.set(args[i], args[i + 1]);
@@ -49,6 +73,7 @@ class FakeRedis {
       return 1;
     }
     if (command === "PEXPIRE") return 1;
+    if (command === "PTTL") return 1234;
     if (command === "XAUTOCLAIM") return ["0-0", []];
     throw new Error(`unexpected command: ${args.join(" ")}`);
   }
@@ -211,6 +236,11 @@ function createStore(fake = new FakeRedis()) {
   return { store: new RunControlStore(fake, config), fake };
 }
 
+function eventFields(args) {
+  const start = args.includes("*") ? args.indexOf("*") + 1 : 3;
+  return args.slice(start);
+}
+
 function streamField(args, field) {
   const index = args.indexOf(field);
   return index === -1 ? undefined : args[index + 1];
@@ -243,6 +273,83 @@ test("tryEnqueueRun cleans active state when the atomic job append fails", async
   assert.equal(fake.strings.has("pi-discord-threads:thread:thread-1:active"), false);
   assert.equal(fake.hashes.has("pi-discord-threads:runs:run-poison"), false);
   assert.equal(fake.streams.length, 0);
+});
+
+test("run events are bounded and summarize high-volume and warning telemetry", async () => {
+  const { store, fake } = createStore();
+
+  await store.appendRunEvent("run-1", "thinking_delta", { sessionFile: "/private/session.jsonl" });
+  await store.appendRunEvent("run-1", "thinking_delta", {});
+  await store.appendRunEvent("run-1", "tool_start", {});
+  await store.appendRunEvent("run-2", "retry_later", { isError: true });
+
+  const eventCommands = fake.streams.filter((entry) => entry.key === "pi-discord-threads:run:events").map((entry) => entry.args);
+  assert.equal(eventCommands.every((args) => args.includes("MAXLEN") && args.includes("50000")), true);
+  assert.deepEqual(eventCommands[0].slice(0, 6), ["XADD", "pi-discord-threads:run:events", "MAXLEN", "~", "50000", "*"]);
+
+  const summary = await store.getRunEventSummary({ sampleLimit: 10 });
+  const xrevrangeCommand = fake.commands.find((args) => args[0] === "XREVRANGE");
+  assert.deepEqual(xrevrangeCommand, ["XREVRANGE", "pi-discord-threads:run:events", "+", "-", "COUNT", "10"]);
+
+  assert.equal(summary.streamLength, 4);
+  assert.equal(summary.sampleCount, 4);
+  assert.deepEqual(summary.typeCounts.map((count) => [count.type, count.count]), [
+    ["thinking_delta", 2],
+    ["retry_later", 1],
+    ["tool_start", 1],
+  ]);
+  assert.deepEqual(summary.highVolumeTypeCounts.map((count) => [count.type, count.count]), [["thinking_delta", 2]]);
+  assert.deepEqual(summary.warningTypeCounts.map((count) => [count.type, count.count]), [["retry_later", 1]]);
+  assert.equal(JSON.stringify(summary).includes("/private/session.jsonl"), false);
+});
+
+test("run event summary reports Redis telemetry query failures", async () => {
+  const fake = new FakeRedis();
+  fake.failEventSummary = true;
+  const { store } = createStore(fake);
+
+  const summary = await store.getRunEventSummary({ sampleLimit: 10 });
+
+  assert.equal(summary.streamLength, 0);
+  assert.equal(summary.sampleCount, 0);
+  assert.match(summary.error, /Redis XREVRANGE exploded/);
+});
+
+test("pending job details correlate Redis stream ownership with run lease metadata", async () => {
+  const { store, fake } = createStore();
+  const run = createRun("run-pending", "running");
+  fake.streams.push({ key: "pi-discord-threads:run:jobs", id: "1-0", args: ["XADD", "pi-discord-threads:run:jobs", "*", "runId", run.runId] });
+  fake.hashes.set("pi-discord-threads:runs:run-pending", new Map(Object.entries({
+    ...run,
+    imagesJson: "[]",
+    workerId: "worker-lease",
+  })));
+
+  const details = await store.getPendingJobDetails();
+  const pendingCommand = fake.commands.find((args) => args[0] === "XPENDING" && args.length > 3);
+  const xrangeCommand = fake.commands.find((args) => args[0] === "XRANGE");
+
+  assert.deepEqual(pendingCommand, ["XPENDING", "pi-discord-threads:run:jobs", "workers", "-", "+", "10"]);
+  assert.deepEqual(xrangeCommand, ["XRANGE", "pi-discord-threads:run:jobs", "1-0", "1-0"]);
+  assert.deepEqual(details, [{
+    streamId: "1-0",
+    consumer: "worker-1",
+    idleMs: 4321,
+    deliveries: 3,
+    runId: "run-pending",
+    runStatus: "running",
+    leaseWorkerId: "worker-lease",
+    leaseTtlMs: 1234,
+  }]);
+});
+
+test("pending job details surface per-job Redis lookup failures", async () => {
+  const fake = new FakeRedis();
+  fake.failJobXrange = true;
+  fake.streams.push({ key: "pi-discord-threads:run:jobs", id: "1-0", args: ["XADD", "pi-discord-threads:run:jobs", "*", "runId", "run-pending"] });
+  const { store } = createStore(fake);
+
+  await assert.rejects(() => store.getPendingJobDetails(), /Redis XRANGE exploded/);
 });
 
 test("tryEnqueueRun rejects a live active pointer without creating a second job", async () => {

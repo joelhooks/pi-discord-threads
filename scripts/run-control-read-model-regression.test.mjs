@@ -46,6 +46,14 @@ test("run-control read model re-reads active pointer runs that appear between Re
       calls.push("getJobQueueSummary");
       return { pendingCount: 0, consumers: [] };
     },
+    async getPendingJobDetails() {
+      calls.push("getPendingJobDetails");
+      return [];
+    },
+    async getRunEventSummary() {
+      calls.push("getRunEventSummary");
+      return { streamKey: "events", streamLength: 0, sampleLimit: 1000, sampleCount: 0, typeCounts: [], highVolumeTypeCounts: [], warningTypeCounts: [] };
+    },
     async listWorkers() {
       calls.push("listWorkers");
       return [];
@@ -101,6 +109,12 @@ test("run-control read model exposes queue, workers, outbox, and dead-letter pro
     async getJobQueueSummary() {
       return { pendingCount: 1, firstPendingId: "1-0", lastPendingId: "1-0", consumers: [{ name: "worker-1", pending: 1 }] };
     },
+    async getPendingJobDetails() {
+      return [{ streamId: "1-0", consumer: "worker-1", idleMs: 3000, deliveries: 2, runId: "active", runStatus: "running", leaseWorkerId: "worker-1", leaseTtlMs: 456 }];
+    },
+    async getRunEventSummary() {
+      return { streamKey: "pi-discord-threads:run:events", streamLength: 42, sampleLimit: 1000, sampleCount: 3, newestEventId: "3-0", oldestSampledEventId: "1-0", typeCounts: [{ type: "thinking_delta", count: 2 }, { type: "tool_start", count: 1 }], highVolumeTypeCounts: [{ type: "thinking_delta", count: 2 }], warningTypeCounts: [] };
+    },
     async listWorkers() {
       return [{ workerId: "worker-1", status: "running", runId: "active", updatedAt: "2026-01-01T00:00:06.000Z", ttlMs: 1000 }];
     },
@@ -109,6 +123,9 @@ test("run-control read model exposes queue, workers, outbox, and dead-letter pro
   const model = await loadRunControlReadModel(store);
 
   assert.equal(model.pendingJobs.pendingCount, 1);
+  assert.deepEqual(model.pendingJobDetails.map((job) => job.streamId), ["1-0"]);
+  assert.equal(model.eventSummary.streamLength, 42);
+  assert.deepEqual(model.eventSummary.highVolumeTypeCounts, [{ type: "thinking_delta", count: 2 }]);
   assert.deepEqual(model.workers.map((worker) => worker.workerId), ["worker-1"]);
   assert.deepEqual(model.outboxRuns, [{
     runId: "outbox",

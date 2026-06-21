@@ -9,7 +9,9 @@ import type {
   ActivePointer,
   FinalizeClaim,
   QueuedRunInput,
+  RunControlEventSummary,
   RunControlJobQueueSummary,
+  RunControlPendingJobDetail,
   RunControlWorkerRecord,
   RunJob,
   RunRecord,
@@ -290,6 +292,8 @@ export type RunQueueStoreLike = {
   readonly appendRunEvent: (runId: string, type: string, fields?: Record<string, unknown>) => Promise<string>;
   readonly recordWorkerIdle: (workerId: string) => Promise<void>;
   readonly getJobQueueSummary: () => Promise<RunControlJobQueueSummary>;
+  readonly getPendingJobDetails: (limit?: number) => Promise<RunControlPendingJobDetail[]>;
+  readonly getRunEventSummary: (options?: { sampleLimit?: number }) => Promise<RunControlEventSummary>;
   readonly listWorkers: () => Promise<RunControlWorkerRecord[]>;
   readonly listRuns: () => Promise<RunRecord[]>;
   readonly listActivePointers: () => Promise<ActivePointer[]>;
@@ -380,6 +384,12 @@ export function makeRunQueueService(store: RunQueueStoreLike, timeoutMs: number)
     ),
     getJobQueueSummary: Effect.fn("RunQueueService.getJobQueueSummary")(() =>
       call("getJobQueueSummary", () => store.getJobQueueSummary()),
+    ),
+    getPendingJobDetails: Effect.fn("RunQueueService.getPendingJobDetails")((limit) =>
+      call("getPendingJobDetails", () => store.getPendingJobDetails(limit)),
+    ),
+    getRunEventSummary: Effect.fn("RunQueueService.getRunEventSummary")((options) =>
+      call("getRunEventSummary", () => store.getRunEventSummary(options)),
     ),
     listWorkers: Effect.fn("RunQueueService.listWorkers")(() =>
       call("listWorkers", () => store.listWorkers()),

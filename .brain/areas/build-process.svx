@@ -42,6 +42,7 @@ node dist/index.js release rollback <release-id> --config ~/.config/pi-discord-t
 
 ## Receipts
 
+- 2026-06-21 run-control soak telemetry hardening: `npm run test:run-control-store`, `npm run test:run-control-read-model`, and `npm run test:run-control-doctor` cover bounded run event writes, event summary counts, pending job detail correlation, and doctor log watermarks.
 - 2026-06-21 shared run-control read model: `npm run test:run-control-read-model`, `npm run test:run-control-doctor`, `npm run test:run-control-reconcile`, and `npm run test:release-transition` cover the shared read projection across doctor, reconcile dry-run/apply boundaries, and deploy safety inspection.
 - 2026-06-20 public release deploy/rollback wiring: `npm run test:release-transition` covers fake LaunchAgent/no-`launchctl` deploy and rollback command ordering plus deploy safety classification.
 - 2026-06-20 release transition core: added `npm run test:release-transition` for fake LaunchAgent/no-`launchctl` transition ordering and deploy safety classification.

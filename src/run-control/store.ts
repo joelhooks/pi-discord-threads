@@ -1,4 +1,5 @@
 import type { AppConfig } from "../config.js";
+import { formatUnknownError } from "../error-format.js";
 import type { RedisCommandClient } from "./redis-client.js";
 import { RetryRunLaterError } from "./errors.js";
 import {
@@ -16,7 +17,10 @@ import {
   type ActivePointer,
   type FinalizeClaim,
   type QueuedRunInput,
+  type RunControlEventSummary,
+  type RunControlEventTypeCount,
   type RunControlJobQueueSummary,
+  type RunControlPendingJobDetail,
   type RunControlWorkerRecord,
   type RunJob,
   type RunRecord,
@@ -25,6 +29,12 @@ import {
 } from "./types.js";
 
 const WORKER_GROUP = "workers";
+const RUN_EVENT_STREAM_MAXLEN = 50_000;
+const DEFAULT_RUN_EVENT_SUMMARY_SAMPLE_LIMIT = 1_000;
+const MAX_RUN_EVENT_SUMMARY_SAMPLE_LIMIT = 5_000;
+const DEFAULT_PENDING_JOB_DETAIL_LIMIT = 10;
+const MAX_PENDING_JOB_DETAIL_LIMIT = 50;
+const HIGH_VOLUME_EVENT_TYPES = new Set(["thinking_delta", "text_delta"]);
 
 export class RunControlStore {
   readonly keys: RunControlKeys;
@@ -408,7 +418,7 @@ export class RunControlStore {
   }
 
   async appendRunEvent(runId: string, type: string, fields: Record<string, unknown> = {}): Promise<string> {
-    const args = ["XADD", this.keys.events, "*", "runId", runId, "type", type, "createdAt", new Date().toISOString()];
+    const args = ["XADD", this.keys.events, "MAXLEN", "~", String(RUN_EVENT_STREAM_MAXLEN), "*", "runId", runId, "type", type, "createdAt", new Date().toISOString()];
     for (const [key, value] of Object.entries(fields)) {
       if (value === undefined) continue;
       args.push(key, stringifyField(value));
@@ -436,6 +446,80 @@ export class RunControlStore {
       throw error;
     });
     return parsePendingSummary(reply);
+  }
+
+  async getPendingJobDetails(limit = DEFAULT_PENDING_JOB_DETAIL_LIMIT): Promise<RunControlPendingJobDetail[]> {
+    const boundedLimit = clampInteger(limit, 1, MAX_PENDING_JOB_DETAIL_LIMIT);
+    const pendingReply = await this.command(["XPENDING", this.keys.jobs, WORKER_GROUP, "-", "+", String(boundedLimit)]).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes("NOGROUP") || message.includes("no such key")) return [];
+      throw error;
+    });
+    const pendingEntries = parsePendingDetailReply(pendingReply);
+    const details: RunControlPendingJobDetail[] = [];
+    for (const entry of pendingEntries) {
+      const runId = await this.readJobRunId(entry.streamId);
+      const run = runId ? await this.getRun(runId) : undefined;
+      const leaseTtlMs = runId ? await this.getRunLeaseTtl(runId) : undefined;
+      details.push({
+        streamId: entry.streamId,
+        consumer: entry.consumer,
+        idleMs: entry.idleMs,
+        deliveries: entry.deliveries,
+        runId,
+        runStatus: run?.status,
+        leaseWorkerId: run?.workerId,
+        leaseTtlMs,
+      });
+    }
+    return details;
+  }
+
+  async getRunEventSummary(options: { sampleLimit?: number } = {}): Promise<RunControlEventSummary> {
+    const sampleLimit = clampInteger(options.sampleLimit ?? DEFAULT_RUN_EVENT_SUMMARY_SAMPLE_LIMIT, 1, MAX_RUN_EVENT_SUMMARY_SAMPLE_LIMIT);
+    let lengthReply: unknown = 0;
+    let events: Array<{ id: string; fields: Record<string, string> }> = [];
+    let error: string | undefined;
+    try {
+      const [rawLength, eventsReply] = await Promise.all([
+        this.command(["XLEN", this.keys.events]),
+        this.command(["XREVRANGE", this.keys.events, "+", "-", "COUNT", String(sampleLimit)]),
+      ]);
+      lengthReply = rawLength;
+      events = parseStreamEntries(eventsReply);
+    } catch (cause) {
+      error = formatUnknownError(cause);
+    }
+    const typeCounts = new Map<string, RunControlEventTypeCount>();
+    const highVolumeCounts = new Map<string, RunControlEventTypeCount>();
+    const warningCounts = new Map<string, RunControlEventTypeCount>();
+    for (const event of events) {
+      const type = event.fields.type || "unknown";
+      incrementEventCount(typeCounts, type, event.fields.createdAt);
+      if (HIGH_VOLUME_EVENT_TYPES.has(type)) incrementEventCount(highVolumeCounts, type, event.fields.createdAt);
+      if (isWarningEvent(type, event.fields)) incrementEventCount(warningCounts, type, event.fields.createdAt);
+    }
+    const newest = events[0];
+    const oldest = events[events.length - 1];
+    return {
+      streamKey: this.keys.events,
+      streamLength: Number(lengthReply) || 0,
+      sampleLimit,
+      sampleCount: events.length,
+      newestEventId: newest?.id,
+      oldestSampledEventId: oldest?.id,
+      newestCreatedAt: newest?.fields.createdAt,
+      oldestSampledCreatedAt: oldest?.fields.createdAt,
+      typeCounts: sortedEventCounts(typeCounts),
+      highVolumeTypeCounts: sortedEventCounts(highVolumeCounts),
+      warningTypeCounts: sortedEventCounts(warningCounts),
+      error,
+    };
+  }
+
+  private async readJobRunId(streamId: string): Promise<string | undefined> {
+    const entries = parseStreamEntries(await this.command(["XRANGE", this.keys.jobs, streamId, streamId]));
+    return entries[0]?.fields.runId || undefined;
   }
 
   async listWorkers(): Promise<RunControlWorkerRecord[]> {
@@ -736,6 +820,19 @@ function parseScanReply(reply: unknown): { cursor: string; keys: unknown[] } {
   };
 }
 
+function parsePendingDetailReply(reply: unknown): Array<{ streamId: string; consumer: string; idleMs: number; deliveries: number }> {
+  if (!Array.isArray(reply)) return [];
+  return reply.flatMap((entry) => {
+    if (!Array.isArray(entry) || entry.length < 4) return [];
+    return [{
+      streamId: valueToString(entry[0]),
+      consumer: valueToString(entry[1]),
+      idleMs: Number(entry[2]) || 0,
+      deliveries: Number(entry[3]) || 0,
+    }];
+  }).filter((entry) => Boolean(entry.streamId));
+}
+
 function parsePendingSummary(reply: unknown): RunControlJobQueueSummary {
   if (!Array.isArray(reply)) return { pendingCount: 0, consumers: [] };
   const [count, first, last, consumers] = reply;
@@ -772,6 +869,30 @@ function parseJson<T>(value: string | undefined, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function clampInteger(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+function incrementEventCount(counts: Map<string, RunControlEventTypeCount>, type: string, createdAt: string | undefined): void {
+  const current = counts.get(type);
+  if (!current) {
+    counts.set(type, { type, count: 1, newestCreatedAt: createdAt });
+    return;
+  }
+  current.count += 1;
+  if (!current.newestCreatedAt && createdAt) current.newestCreatedAt = createdAt;
+}
+
+function sortedEventCounts(counts: Map<string, RunControlEventTypeCount>): RunControlEventTypeCount[] {
+  return [...counts.values()].sort((a, b) => b.count - a.count || a.type.localeCompare(b.type));
+}
+
+function isWarningEvent(type: string, fields: Record<string, string>): boolean {
+  if (fields.isError === "true") return true;
+  return /(?:error|fail|dead|retry_later|lease_lost|stale|busy|timeout)/iu.test(type);
 }
 
 function stringifyField(value: unknown): string {

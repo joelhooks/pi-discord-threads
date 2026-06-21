@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { open, readFile } from "node:fs/promises";
+import { open, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { AppConfig } from "../config.js";
 import type { RegistryPort, ThreadRecord } from "../registry.js";
@@ -11,7 +11,7 @@ import {
   type RunControlReadModelDeadLetterRun,
   type RunControlReadModelOutboxRun,
 } from "./read-model.js";
-import type { RunControlJobQueueSummary, RunControlStorePort, RunControlWorkerRecord } from "./types.js";
+import type { RunControlEventSummary, RunControlJobQueueSummary, RunControlPendingJobDetail, RunControlStorePort, RunControlWorkerRecord } from "./types.js";
 
 const DAEMON_STDERR_TAIL_BYTES = 64 * 1024;
 
@@ -23,12 +23,20 @@ export interface RunControlDoctorReport {
   checkedAt: string;
   activePointers: RunControlDoctorActivePointer[];
   pendingJobs: RunControlJobQueueSummary;
+  pendingJobDetails: RunControlPendingJobDetail[];
+  runEvents: RunControlEventSummary;
   workers: RunControlWorkerRecord[];
   outboxRuns: RunControlDoctorOutboxRun[];
   deadLetteredRuns: RunControlDoctorDeadLetterRun[];
   reconcile: Pick<ReconcileReport, "issues" | "applied">;
+  daemonStdout: {
+    path: string;
+    sizeBytes: number;
+    error?: string;
+  };
   daemonStderr: {
     path: string;
+    sizeBytes: number;
     lineCount: number;
     tail: string[];
     truncated: boolean;
@@ -66,8 +74,10 @@ export async function buildRunControlDoctorReport(options: {
 }): Promise<RunControlDoctorReport> {
   const { store, registry, config } = options;
   const readModel = await loadRunControlReadModel(store);
-  const [reconcile, daemonStderr] = await Promise.all([
+  const stdoutPath = join(config.dataDir, "daemon.log");
+  const [reconcile, daemonStdout, daemonStderr] = await Promise.all([
     reconcileRunControl({ store, registry, config, apply: false, readModel }),
+    readDaemonStdout(stdoutPath),
     readDaemonStderr(options.stderrPath ?? join(config.dataDir, "daemon.err.log"), options.stderrTailLines ?? 20),
   ]);
 
@@ -75,10 +85,13 @@ export async function buildRunControlDoctorReport(options: {
     checkedAt: readModel.checkedAt,
     activePointers: readModel.activeRuns,
     pendingJobs: readModel.pendingJobs,
+    pendingJobDetails: readModel.pendingJobDetails,
+    runEvents: readModel.eventSummary,
     workers: readModel.workers,
     outboxRuns: readModel.outboxRuns,
     deadLetteredRuns: readModel.deadLetteredRuns,
     reconcile: { issues: reconcile.issues, applied: reconcile.applied },
+    daemonStdout,
     daemonStderr,
   };
 }
@@ -96,6 +109,22 @@ export function formatRunControlDoctorReport(report: RunControlDoctorReport): st
   if (report.pendingJobs.consumers.length === 0) lines.push("- consumers: none");
   for (const consumer of report.pendingJobs.consumers) lines.push(`- consumer ${consumer.name} pending=${consumer.pending}`);
 
+  lines.push(`pendingJobDetails: ${report.pendingJobDetails.length}`);
+  if (report.pendingJobDetails.length === 0) lines.push("- none");
+  for (const job of report.pendingJobDetails) {
+    lines.push(`- ${job.streamId} consumer=${job.consumer} idleMs=${job.idleMs} deliveries=${job.deliveries} run=${job.runId ?? "unknown"} status=${job.runStatus ?? "unknown"} leaseWorker=${job.leaseWorkerId ?? "none"} leaseTtlMs=${formatOptionalNumber(job.leaseTtlMs)}`);
+  }
+
+  lines.push(`runEvents: key=${report.runEvents.streamKey} length=${report.runEvents.streamLength} sampled=${report.runEvents.sampleCount}/${report.runEvents.sampleLimit}${report.runEvents.newestEventId ? ` newest=${report.runEvents.newestEventId}` : ""}${report.runEvents.oldestSampledEventId ? ` oldestSampled=${report.runEvents.oldestSampledEventId}` : ""}${report.runEvents.error ? ` error=${sanitizeTelemetryText(report.runEvents.error)}` : ""}`);
+  if (report.runEvents.typeCounts.length === 0) lines.push("- types: none");
+  for (const count of report.runEvents.typeCounts.slice(0, 12)) lines.push(`- type ${count.type} count=${count.count}${count.newestCreatedAt ? ` newestAt=${count.newestCreatedAt}` : ""}`);
+  if (report.runEvents.highVolumeTypeCounts.length > 0) {
+    lines.push(`- highVolume ${report.runEvents.highVolumeTypeCounts.map((count) => `${count.type}=${count.count}`).join(" ")}`);
+  }
+  if (report.runEvents.warningTypeCounts.length > 0) {
+    lines.push(`- warningTypes ${report.runEvents.warningTypeCounts.map((count) => `${count.type}=${count.count}`).join(" ")}`);
+  }
+
   lines.push(`workers: ${report.workers.length}`);
   if (report.workers.length === 0) lines.push("- none");
   for (const worker of report.workers) {
@@ -111,16 +140,17 @@ export function formatRunControlDoctorReport(report: RunControlDoctorReport): st
   lines.push(`deadLetteredRuns: ${report.deadLetteredRuns.length}`);
   if (report.deadLetteredRuns.length === 0) lines.push("- none");
   for (const run of report.deadLetteredRuns) {
-    lines.push(`- ${run.runId} status=${run.status} retryLater=${formatOptionalNumber(run.retryLaterCount)} deadLetteredAt=${run.deadLetteredAt ?? "unknown"} reason=${run.deadLetterReason ?? "unknown"}`);
+    lines.push(`- ${run.runId} status=${run.status} retryLater=${formatOptionalNumber(run.retryLaterCount)} deadLetteredAt=${run.deadLetteredAt ?? "unknown"} reason=${sanitizeTelemetryText(run.deadLetterReason ?? "unknown")}`);
   }
 
   lines.push(`reconcileIssues: ${report.reconcile.issues.length}`);
   if (report.reconcile.issues.length === 0) lines.push("- none");
-  for (const issue of report.reconcile.issues) lines.push(`- [${issue.severity}] ${issue.code}: ${issue.message}${issue.action ? ` (${issue.action})` : ""}`);
+  for (const issue of report.reconcile.issues) lines.push(`- [${issue.severity}] ${issue.code}: ${sanitizeTelemetryText(issue.message)}${issue.action ? ` (${issue.action})` : ""}`);
 
-  lines.push(`daemonStderr: ${report.daemonStderr.path} lines=${report.daemonStderr.lineCount}${report.daemonStderr.truncated ? ` tailBytes=${DAEMON_STDERR_TAIL_BYTES}` : ""}${report.daemonStderr.error ? ` error=${report.daemonStderr.error}` : ""}`);
+  lines.push(`daemonStdout: ${report.daemonStdout.path} bytes=${report.daemonStdout.sizeBytes}${report.daemonStdout.error ? ` error=${report.daemonStdout.error}` : ""}`);
+  lines.push(`daemonStderr: ${report.daemonStderr.path} bytes=${report.daemonStderr.sizeBytes} lines=${report.daemonStderr.lineCount}${report.daemonStderr.truncated ? ` tailBytes=${DAEMON_STDERR_TAIL_BYTES}` : ""}${report.daemonStderr.error ? ` error=${report.daemonStderr.error}` : ""}`);
   if (report.daemonStderr.tail.length === 0) lines.push("- tail: empty");
-  for (const line of report.daemonStderr.tail) lines.push(`- ${line}`);
+  for (const line of report.daemonStderr.tail) lines.push(`- ${sanitizeTelemetryText(line)}`);
 
   return lines.join("\n");
 }
@@ -131,6 +161,15 @@ function readOnlyRegistry(threads: Record<string, ThreadRecord>): RegistryPort {
     listThreads: () => Object.values(threads),
     save: async () => undefined,
   } as unknown as RegistryPort;
+}
+
+async function readDaemonStdout(path: string): Promise<RunControlDoctorReport["daemonStdout"]> {
+  try {
+    const stats = await stat(path);
+    return { path, sizeBytes: stats.size };
+  } catch (error) {
+    return { path, sizeBytes: 0, error: formatUnknownError(error) };
+  }
 }
 
 async function readDaemonStderr(path: string, tailLines: number): Promise<RunControlDoctorReport["daemonStderr"]> {
@@ -145,12 +184,19 @@ async function readDaemonStderr(path: string, tailLines: number): Promise<RunCon
     const lines = buffer.toString("utf8").split(/\r?\n/u).filter((line) => line.length > 0);
     const truncated = start > 0;
     if (truncated && lines.length > 0) lines[0] = `…${lines[0]}`;
-    return { path, lineCount: lines.length, tail: lines.slice(-tailLines), truncated };
+    return { path, sizeBytes: stats.size, lineCount: lines.length, tail: lines.slice(-tailLines), truncated };
   } catch (error) {
-    return { path, lineCount: 0, tail: [], truncated: false, error: formatUnknownError(error) };
+    return { path, sizeBytes: 0, lineCount: 0, tail: [], truncated: false, error: formatUnknownError(error) };
   } finally {
     await file?.close().catch(() => undefined);
   }
+}
+
+function sanitizeTelemetryText(text: string): string {
+  return text
+    .replace(/\/Users\/[^\s'"`]+\/\.pi\/agent\/sessions\/[^\s'"`]+/giu, "[session-file]")
+    .replace(/\/private\/[^\s'"`]+/giu, "[path]")
+    .replace(/(?:\/[A-Za-z0-9._ -]+)+\.jsonl/gu, "[session-file]");
 }
 
 function formatWorkerRunField(worker: RunControlWorkerRecord): string {

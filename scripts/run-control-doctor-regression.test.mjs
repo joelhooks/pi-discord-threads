@@ -77,6 +77,8 @@ test("run-control doctor bounds daemon stderr tail reads", async () => {
     getRun: async () => undefined,
     getRunLeaseTtl: async () => -2,
     getJobQueueSummary: async () => ({ pendingCount: 0, consumers: [] }),
+    getPendingJobDetails: async () => [],
+    getRunEventSummary: async () => ({ streamKey: "events", streamLength: 0, sampleLimit: 1000, sampleCount: 0, typeCounts: [], highVolumeTypeCounts: [], warningTypeCounts: [] }),
     listWorkers: async () => [],
     clearActiveIfMatches: async () => false,
     markTerminal: async () => undefined,
@@ -91,6 +93,40 @@ test("run-control doctor bounds daemon stderr tail reads", async () => {
   assert.deepEqual(report.daemonStderr.tail, ["line-9997", "line-9998", "line-9999"]);
   assert.match(text, /tailBytes=65536/);
   assert.doesNotMatch(text, /line-0/);
+});
+
+test("run-control doctor redacts session paths in reconcile output and stderr tail", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "pi-discord-doctor-redact-"));
+  const stderrPath = join(dataDir, "daemon.err.log");
+  await writeFile(stderrPath, "failed reading /private/tmp/secret-session.jsonl\n", "utf8");
+  const config = defaultConfig();
+  config.runControl.enabled = true;
+  config.dataDir = dataDir;
+  const run = createRun("sensitive", "succeeded", {
+    sessionFile: "/private/tmp/secret-session.jsonl",
+    placeholderRetiredAt: new Date(0).toISOString(),
+  });
+  const store = {
+    listRuns: async () => [run],
+    listActivePointers: async () => [],
+    getRun: async () => undefined,
+    getRunLeaseTtl: async () => -2,
+    getJobQueueSummary: async () => ({ pendingCount: 0, consumers: [] }),
+    getPendingJobDetails: async () => [],
+    getRunEventSummary: async () => ({ streamKey: "events", streamLength: 0, sampleLimit: 1000, sampleCount: 0, typeCounts: [], highVolumeTypeCounts: [], warningTypeCounts: [] }),
+    listWorkers: async () => [],
+    clearActiveIfMatches: async () => false,
+    markTerminal: async () => undefined,
+    patchRun: async () => undefined,
+  };
+  const registry = { getThread: () => ({ threadId: "thread-sensitive", status: "idle", cwd: process.cwd(), createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString() }), listThreads: () => [] };
+
+  const report = await buildRunControlDoctorReport({ store, registry, config, stderrPath, stderrTailLines: 5 });
+  const text = formatRunControlDoctorReport(report);
+
+  assert.match(text, /missing Pi session file: \[path\]/);
+  assert.match(text, /failed reading \[path\]/);
+  assert.doesNotMatch(text, /secret-session\.jsonl/);
 });
 
 test("run-control doctor report includes active pointers, pending jobs, workers, outbox, dead letters, reconcile, and stderr", async () => {
@@ -136,6 +172,18 @@ test("run-control doctor report includes active pointers, pending jobs, workers,
       lastPendingId: "1-0",
       consumers: [{ name: "worker-1", pending: 1 }],
     }),
+    getPendingJobDetails: async () => [{ streamId: "1-0", consumer: "worker-1", idleMs: 4321, deliveries: 3, runId: "active", runStatus: "running", leaseWorkerId: "worker-1", leaseTtlMs: 1234 }],
+    getRunEventSummary: async () => ({
+      streamKey: "pi-discord-threads:run:events",
+      streamLength: 12345,
+      sampleLimit: 1000,
+      sampleCount: 4,
+      newestEventId: "4-0",
+      oldestSampledEventId: "1-0",
+      typeCounts: [{ type: "thinking_delta", count: 2 }, { type: "retry_later", count: 1 }, { type: "tool_start", count: 1 }],
+      highVolumeTypeCounts: [{ type: "thinking_delta", count: 2 }],
+      warningTypeCounts: [{ type: "retry_later", count: 1 }],
+    }),
     listWorkers: async () => [
       { workerId: "worker-1", status: "running", runId: "active", updatedAt: "2026-01-01T00:00:06.000Z", ttlMs: 1000 },
       { workerId: "worker-2", status: "idle", runId: "stale-run", updatedAt: "2026-01-01T00:00:07.000Z", ttlMs: 1000 },
@@ -162,6 +210,12 @@ test("run-control doctor report includes active pointers, pending jobs, workers,
   assert.match(text, /thread-active -> active status=running worker=worker-1 leaseTtlMs=1234/);
   assert.match(text, /pendingJobs: 1 first=1-0 last=1-0/);
   assert.match(text, /consumer worker-1 pending=1/);
+  assert.match(text, /pendingJobDetails: 1/);
+  assert.match(text, /1-0 consumer=worker-1 idleMs=4321 deliveries=3 run=active status=running leaseWorker=worker-1 leaseTtlMs=1234/);
+  assert.match(text, /runEvents: key=pi-discord-threads:run:events length=12345 sampled=4\/1000 newest=4-0 oldestSampled=1-0/);
+  assert.match(text, /type thinking_delta count=2/);
+  assert.match(text, /highVolume thinking_delta=2/);
+  assert.match(text, /warningTypes retry_later=1/);
   assert.match(text, /workers: 2/);
   assert.match(text, /worker-1 status=running run=active/);
   assert.match(text, /worker-2 status=idle run=none staleRun=stale-run/);
@@ -172,5 +226,6 @@ test("run-control doctor report includes active pointers, pending jobs, workers,
   assert.equal(listRunsCount, 1);
   assert.equal(listActivePointersCount, 1);
   assert.match(text, /reconcileIssues: 0/);
-  assert.match(text, /daemonStderr: .*daemon\.err\.log lines=0 error=/);
+  assert.match(text, /daemonStdout: .*daemon\.log bytes=/);
+  assert.match(text, /daemonStderr: .*daemon\.err\.log bytes=0 lines=0 error=/);
 });

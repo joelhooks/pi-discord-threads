@@ -121,6 +121,38 @@ export interface RunControlWorkerRecord {
   ttlMs: number;
 }
 
+export interface RunControlEventTypeCount {
+  type: string;
+  count: number;
+  newestCreatedAt?: string;
+}
+
+export interface RunControlEventSummary {
+  streamKey: string;
+  streamLength: number;
+  sampleLimit: number;
+  sampleCount: number;
+  newestEventId?: string;
+  oldestSampledEventId?: string;
+  newestCreatedAt?: string;
+  oldestSampledCreatedAt?: string;
+  typeCounts: RunControlEventTypeCount[];
+  highVolumeTypeCounts: RunControlEventTypeCount[];
+  warningTypeCounts: RunControlEventTypeCount[];
+  error?: string;
+}
+
+export interface RunControlPendingJobDetail {
+  streamId: string;
+  consumer: string;
+  idleMs: number;
+  deliveries: number;
+  runId?: string;
+  runStatus?: RunStatus;
+  leaseWorkerId?: string;
+  leaseTtlMs?: number;
+}
+
 export interface RunControlStorePort {
   close(): Promise<void>;
   ensureConsumerGroup(): Promise<void>;
@@ -157,6 +189,8 @@ export interface RunControlStorePort {
   appendRunEvent(runId: string, type: string, fields?: Record<string, unknown>): Promise<string>;
   recordWorkerIdle(workerId: string): Promise<void>;
   getJobQueueSummary(): Promise<RunControlJobQueueSummary>;
+  getPendingJobDetails(limit?: number): Promise<RunControlPendingJobDetail[]>;
+  getRunEventSummary(options?: { sampleLimit?: number }): Promise<RunControlEventSummary>;
   listWorkers(): Promise<RunControlWorkerRecord[]>;
   listRuns(): Promise<RunRecord[]>;
   listActivePointers(): Promise<ActivePointer[]>;

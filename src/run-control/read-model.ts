@@ -1,6 +1,8 @@
 import type {
   ActivePointer,
+  RunControlEventSummary,
   RunControlJobQueueSummary,
+  RunControlPendingJobDetail,
   RunControlStorePort,
   RunControlWorkerRecord,
   RunRecord,
@@ -40,6 +42,8 @@ export interface RunControlReadModel {
   activePointers: ActivePointer[];
   activeRuns: RunControlReadModelActiveRun[];
   pendingJobs: RunControlJobQueueSummary;
+  pendingJobDetails: RunControlPendingJobDetail[];
+  eventSummary: RunControlEventSummary;
   workers: RunControlWorkerRecord[];
   outboxRuns: RunControlReadModelOutboxRun[];
   deadLetteredRuns: RunControlReadModelDeadLetterRun[];
@@ -53,7 +57,10 @@ export type RunControlReadModelStorePort = Pick<RunControlStorePort,
   | "getRunLeaseTtl"
   | "getJobQueueSummary"
   | "listWorkers"
->;
+> & Partial<Pick<RunControlStorePort,
+  | "getPendingJobDetails"
+  | "getRunEventSummary"
+>>;
 
 export interface LoadRunControlReadModelOptions {
   checkedAt?: string;
@@ -87,9 +94,11 @@ export async function loadRunControlReadModel(
     if (runsById.has(pointer.runId)) leaseRunIds.add(pointer.runId);
   }
 
-  const [leaseTtlEntries, pendingJobs, workers] = await Promise.all([
+  const [leaseTtlEntries, pendingJobs, pendingJobDetails, eventSummary, workers] = await Promise.all([
     Promise.all([...leaseRunIds].map(async (runId) => [runId, await store.getRunLeaseTtl(runId)] as const)),
     store.getJobQueueSummary(),
+    store.getPendingJobDetails?.() ?? Promise.resolve([]),
+    store.getRunEventSummary?.() ?? Promise.resolve(emptyRunEventSummary()),
     store.listWorkers(),
   ]);
   const leaseTtlByRunId = new Map(leaseTtlEntries);
@@ -100,10 +109,24 @@ export async function loadRunControlReadModel(
     activePointers,
     activeRuns: activePointers.map((pointer) => activeRunReport(pointer, runsById.get(pointer.runId), leaseTtlByRunId.get(pointer.runId))),
     pendingJobs,
+    pendingJobDetails,
+    eventSummary,
     workers,
     outboxRuns: runs.filter(hasOutboxState).map(outboxRunReport),
     deadLetteredRuns: runs.filter((run) => Boolean(run.deadLetteredAt || run.deadLetterReason)).map(deadLetterRunReport),
     leaseTtlByRunId,
+  };
+}
+
+function emptyRunEventSummary(): RunControlEventSummary {
+  return {
+    streamKey: "unknown",
+    streamLength: 0,
+    sampleLimit: 0,
+    sampleCount: 0,
+    typeCounts: [],
+    highVolumeTypeCounts: [],
+    warningTypeCounts: [],
   };
 }
 
