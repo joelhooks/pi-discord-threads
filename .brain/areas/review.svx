@@ -19,12 +19,12 @@ Current truth:
 
 - Old learning pages can drift from current code. `Request Spine` and `State Ownership` are marked `needs-refresh` until their startup/recovery details match the current app lifecycle and gated startup recovery behavior.
 - Private live receipts exist in project Brain. Do not copy Discord IDs, local config paths, private thread/run IDs, or local transcript snippets into public docs, Wzrrd pages, README, issue trackers, or customer-facing copy.
-- Release snapshot/list, activate/canary handoff, transition core, and public deploy/rollback wiring are shipped in source. First live cutover receipt is still the risk edge. Keep saying **zero lost work + fast rollback**, not true zero downtime.
+- Release snapshot/list, activate/canary handoff, transition core, public deploy/rollback wiring, and first live deploy receipt are shipped. Keep saying **zero lost work + fast rollback**, not true zero downtime.
 - Broad directory cleanup is still dangerous without tests. Keep pruning narrow and evidence-backed.
 
 ## Next decisions
 
-1. Run and capture the first real `release deploy` cutover receipt from the explicit operator command path.
+1. Do one explicit rollback rehearsal when a safe target is chosen; deploy itself has a live safe receipt.
 2. Implement the typed Lua command builder slice for `recordRetryLaterScript`.
 3. Refresh the two learning tutorials only after the current startup/recovery source paths are re-read.
 4. Decide whether implemented project PRDs should eventually move to an archive folder, or stay in `projects/` with `implemented-*` status for stable inbound links.

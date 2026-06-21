@@ -194,3 +194,17 @@ First explicit `release deploy` reached live mutation and exposed a restart race
 - Status after failure showed `entryMode=release-current`, plist pointing at `releases/current`, `launchctl: not loaded`, and no matching daemon processes.
 
 Fix: `startLaunchAgent` now waits briefly for matching daemon processes to exit after `launchctl bootout` before applying the duplicate non-launchd daemon guard.
+
+## Live cutover receipt — successful deploy — 2026-06-21
+
+After committing the restart-drain fix, explicit public deploy succeeded:
+
+- Command path: `node dist/index.js release deploy --config ~/.config/pi-discord-threads/config.json`.
+- Release: `20260621T032505Z-b682113`.
+- Previous release: `20260621T032306Z-ce8d5e8`.
+- Outcome: `safe`.
+- Postflight safety: `idle-postflight`, with `preflightActiveRuns=0`, `postflightActiveRuns=0`, and `postflightPendingJobs=0`.
+- LaunchAgent status after deploy: loaded, running from `releases/current/dist/index.js`, with `current -> 20260621T032505Z-b682113`.
+- Ledger tail records the earlier failed deploy (`outcome=failed`, `errorCode=transition-error`) and the successful deploy (`outcome=safe`, `safetyStatus=safe`).
+
+This is the first live receipt that public deploy can mutate `releases/current`, rewrite the plist, restart LaunchAgent, and return safe postflight evidence on the single-user machine.
