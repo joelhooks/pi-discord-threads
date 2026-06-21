@@ -221,6 +221,21 @@ function requireTransitionResult(context: ReleaseTransitionContext): ReleaseDepl
   };
 }
 
+function transitionFailureSafetyReport(context: ReleaseTransitionContext): DeploySafetyReport {
+  return {
+    status: "unknown",
+    checkedAt: context.now().toISOString(),
+    reasons: [{
+      code: "transition-failed-after-activation",
+      severity: "unknown",
+      message: `Release transition failed after activation before a safe postflight could be proven: ${context.lastError ?? "unknown error"}`,
+    }],
+    preflightActiveRunCount: context.preflight?.activeRuns.length ?? 0,
+    postflightActiveRunCount: context.postflight?.activeRuns.length ?? 0,
+    postflightPendingCount: context.postflight?.pendingJobs.pendingCount ?? 0,
+  };
+}
+
 export const releaseDeployTransitionMachine = setup({
   types: {} as {
     input: ReleaseTransitionInput;
@@ -270,6 +285,22 @@ export const releaseDeployTransitionMachine = setup({
       }
       return rollback;
     }),
+    rollbackAfterMutationFailure: fromPromise<ReleaseTransitionRollbackOutput, ReleaseTransitionContext>(async ({ input }) => {
+      const activation = requireActivation(input);
+      const target = activation.previousReleaseId;
+      if (!target) throw new Error("transition failed after activation, but activation did not report a previous release id for rollback");
+      if (!input.adapters.release.rollback) throw new Error("transition failed after activation, but no release rollback adapter was provided");
+      const rollback = await input.adapters.release.rollback({
+        ...operationInput(input),
+        target,
+        reason: transitionFailureSafetyReport(input),
+        activation,
+      });
+      if (rollback.safety.status === "unsafe" || rollback.safety.status === "unknown") {
+        throw new Error(`automatic rollback after transition failure postflight safety is ${rollback.safety.status}`);
+      }
+      return rollback;
+    }),
   },
   actions: {
     rememberPreflight: assign({
@@ -313,8 +344,19 @@ export const releaseDeployTransitionMachine = setup({
       rollback: ({ event }) => outputFrom<ReleaseTransitionRollbackOutput>(event),
       steps: ({ context }) => addStep(context, "rollback"),
     }),
+    rememberRollbackAfterFailure: assign({
+      rollback: ({ event }) => outputFrom<ReleaseTransitionRollbackOutput>(event),
+      steps: ({ context }) => addStep(context, "rollback"),
+      lastError: ({ context, event }) => {
+        const rollback = outputFrom<ReleaseTransitionRollbackOutput>(event);
+        return `${context.lastError ?? "release transition failed"}; automatic rollback to ${rollback.releaseId} completed`;
+      },
+    }),
     rememberFailure: assign({
       lastError: ({ event }) => errorFrom(event),
+    }),
+    rememberCompensationFailure: assign({
+      lastError: ({ context, event }) => `${context.lastError ?? "release transition failed"}; automatic rollback failed: ${errorFrom(event)}`,
     }),
     rememberPostflightFailure: assign({
       lastError: ({ context }) => `release transition postflight safety is ${context.safety?.status ?? "unknown"} and automatic rollback is unavailable`,
@@ -330,6 +372,9 @@ export const releaseDeployTransitionMachine = setup({
     failedWithoutRollback: ({ context }) => {
       const status = context.safety?.status;
       return status === "unsafe" || status === "unknown";
+    },
+    canCompensateAfterMutationFailure: ({ context }) => {
+      return Boolean(context.activation?.previousReleaseId) && Boolean(context.adapters.release.rollback);
     },
   },
 }).createMachine({
@@ -380,7 +425,10 @@ export const releaseDeployTransitionMachine = setup({
         src: "writePlist",
         input: ({ context }) => context,
         onDone: { target: "restarting", actions: "rememberPlist" },
-        onError: { target: "failed", actions: "rememberFailure" },
+        onError: [
+          { guard: "canCompensateAfterMutationFailure", target: "compensatingFailure", actions: "rememberFailure" },
+          { target: "failed", actions: "rememberFailure" },
+        ],
       },
     },
     restarting: {
@@ -388,7 +436,10 @@ export const releaseDeployTransitionMachine = setup({
         src: "restartLaunchAgent",
         input: ({ context }) => context,
         onDone: { target: "postflight", actions: "rememberRestart" },
-        onError: { target: "failed", actions: "rememberFailure" },
+        onError: [
+          { guard: "canCompensateAfterMutationFailure", target: "compensatingFailure", actions: "rememberFailure" },
+          { target: "failed", actions: "rememberFailure" },
+        ],
       },
     },
     postflight: {
@@ -396,7 +447,10 @@ export const releaseDeployTransitionMachine = setup({
         src: "inspectPostflight",
         input: ({ context }) => context,
         onDone: { target: "classifying", actions: "rememberPostflight" },
-        onError: { target: "failed", actions: "rememberFailure" },
+        onError: [
+          { guard: "canCompensateAfterMutationFailure", target: "compensatingFailure", actions: "rememberFailure" },
+          { target: "failed", actions: "rememberFailure" },
+        ],
       },
     },
     classifying: {
@@ -413,6 +467,14 @@ export const releaseDeployTransitionMachine = setup({
         input: ({ context }) => context,
         onDone: { target: "rolledBack", actions: "rememberRollback" },
         onError: { target: "failed", actions: "rememberFailure" },
+      },
+    },
+    compensatingFailure: {
+      invoke: {
+        src: "rollbackAfterMutationFailure",
+        input: ({ context }) => context,
+        onDone: { target: "failed", actions: "rememberRollbackAfterFailure" },
+        onError: { target: "failed", actions: "rememberCompensationFailure" },
       },
     },
     succeeded: {

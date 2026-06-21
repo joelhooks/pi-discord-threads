@@ -62,7 +62,15 @@ export interface RunReleaseDeployCommandOptions {
   now?: Date;
 }
 
+export interface ReleaseDeployAuthorityGuardInput {
+  config: AppConfig;
+  configPath: string;
+  roles: RunControlRole[];
+  force: boolean;
+}
+
 export interface RunReleaseDeployCommandDeps {
+  assertDeployAuthority?(input: ReleaseDeployAuthorityGuardInput): Promise<void | ReleaseTransitionLaunchAgentGuard>;
   build?(input: BuildReleaseInput): Promise<BuildReleaseResult>;
   createSnapshot?(input: ReleaseSnapshotOptions): Promise<ReleaseSnapshotResult>;
   transitionAdapters?: ReleaseTransitionAdapters;
@@ -150,10 +158,19 @@ export async function runReleaseDeployCommand(
   deps: RunReleaseDeployCommandDeps = {},
 ): Promise<ReleaseDeployCommandResult> {
   const projectRoot = resolve(options.projectRoot ?? resolveProjectRoot());
+  const configPath = expandPath(options.configPath);
+  const roles = options.roles ?? options.config.runControl.roles;
+  const force = options.force ?? false;
+  await (deps.assertDeployAuthority ?? assertRealDeployAuthority)({
+    config: options.config,
+    configPath,
+    roles,
+    force,
+  });
   const build = await (deps.build ?? buildReleaseProject)({ projectRoot });
   const snapshot = await (deps.createSnapshot ?? createReleaseSnapshot)({
     config: options.config,
-    configPath: expandPath(options.configPath),
+    configPath,
     allowDirty: false,
     projectRoot,
     ...(options.now ? { now: options.now } : {}),
@@ -162,10 +179,10 @@ export async function runReleaseDeployCommand(
   try {
     transition = await runReleaseDeployTransition({
       config: options.config,
-      configPath: expandPath(options.configPath),
+      configPath,
       target: snapshot.releaseId,
-      roles: options.roles ?? options.config.runControl.roles,
-      force: options.force ?? false,
+      roles,
+      force,
       adapters: deps.transitionAdapters ?? createRealReleaseTransitionAdapters(options),
     });
   } catch (error) {
@@ -319,6 +336,12 @@ export function formatReleaseRollbackCommandResult(result: ReleaseRollbackComman
     `service: ${result.restart.serviceTarget}`,
     formatDeploySafetyReport(result.safety),
   ].join("\n");
+}
+
+async function assertRealDeployAuthority(input: ReleaseDeployAuthorityGuardInput): Promise<ReleaseTransitionLaunchAgentGuard> {
+  const paths = getLaunchAgentPaths(input.config);
+  await assertOutsideLaunchAgentDaemon(paths);
+  return { checkedAt: new Date().toISOString(), summary: `outside ${paths.label}` };
 }
 
 async function buildReleaseProject(input: BuildReleaseInput): Promise<BuildReleaseResult> {

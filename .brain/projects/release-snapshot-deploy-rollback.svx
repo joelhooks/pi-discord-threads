@@ -95,6 +95,13 @@ Slice 3 is wired in source:
 - `release deploy` is targetless in V1; older release selection belongs to `release rollback`.
 - Live deploy still requires an explicit operator command; tests use fakes and do not call real `launchctl`.
 
+Slice 3.1 hardening is implemented:
+
+- `runReleaseDeployCommand()` now runs a fakeable restart-authority guard before build/snapshot so an inside-daemon deploy attempt does not create release ledger noise.
+- `releaseDeployTransitionMachine` compensates failures after activation by invoking the rollback adapter when a previous release exists.
+- Restart failure after activation now produces a synthetic `transition-failed-after-activation` safety reason for the automatic rollback adapter, then preserves the original failure in the thrown error.
+- Regression tests prove pre-build guard refusal skips build/snapshot and restart failure after activation triggers rollback with fake adapters.
+
 Keep the framing precise: this is **zero lost work + fast rollback**, not true zero downtime. The singleton Discord Gateway can still reconnect during restart.
 
 ## Operator workflows
@@ -324,6 +331,20 @@ Verification receipt:
 - Fresh-context review findings resolved: activate digest check, broken current LaunchAgent fallback, same-second config backup collision, and plist rewrite/mismatch clarity.
 
 Live safety note: no live LaunchAgent restart/kickstart and no live config restore were performed during implementation.
+
+## Implementation receipt — slice 3.1 deploy hardening — 2026-06-21
+
+Implemented:
+
+- Pre-build/snapshot deploy authority guard in `src/release-deploy.ts`.
+- Post-activation transition failure compensation in `src/release-transition.ts`.
+- Focused fake-adapter tests for no-snapshot guard failure and rollback-after-restart-failure.
+
+Verification receipt:
+
+- `npm run typecheck` — passed.
+- `npm run test:release-transition` — 14/14 passed.
+- `npm run test:release-snapshot` — 17/17 passed.
 
 ## Acceptance criteria — slice 3 deploy
 

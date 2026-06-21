@@ -79,6 +79,8 @@ Fresh receipts:
 
 **First reversible step:** Add only the builder and exact-shape tests for `recordRetryLaterScript`; do not touch the other scripts yet.
 
+**Status:** Implemented in the 2026-06-21 architecture slice. The first slice stayed intentionally narrow: one builder, one store callsite, and focused drift tests.
+
 ### Candidate B: shared run-control inspection read model
 
 **Files/modules:** `src/run-control/doctor.ts`, `src/run-control/reconcile.ts`, `src/run-control/inspection.ts`, `src/run-control/store.ts`, doctor/reconcile/deploy safety tests.
@@ -110,6 +112,8 @@ Fresh receipts:
 **Risk:** Duplicate guard logic and rollback loops. Keep run-control preflight near activation so evidence stays fresh, and preserve both original failure and rollback failure if compensation fails.
 
 **First reversible step:** Add a fake regression where the pre-build guard fails and asserts no build/snapshot call occurred. Next, add a transition test where restart throws after activation and the rollback adapter is called with a synthetic `transition-failed-after-activation` reason.
+
+**Status:** Implemented in the 2026-06-21 architecture slice. Deploy now guards before build/snapshot and compensates post-activation transition failures through the rollback adapter when a previous release exists.
 
 ### Candidate D: prompt-intake decisions into `thread-run-state.ts`
 

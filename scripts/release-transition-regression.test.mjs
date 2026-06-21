@@ -280,6 +280,72 @@ test("release deploy transition rolls back when postflight is unsafe and a previ
   ]);
 });
 
+test("release deploy transition rolls back when restart fails after activation", async () => {
+  const calls = [];
+  await assert.rejects(
+    () => runReleaseDeployTransition({
+      config: config(),
+      configPath: "/tmp/pi-discord-config.json",
+      target: "release-1",
+      now: () => new Date("2026-06-20T00:00:04.000Z"),
+      adapters: {
+        release: {
+          async canary(input) {
+            calls.push(`canary:${input.target}`);
+            return { releaseId: input.target };
+          },
+          async activate(input) {
+            calls.push(`activate:${input.target}`);
+            return { releaseId: input.target, previousReleaseId: "release-0" };
+          },
+          async rollback(input) {
+            calls.push(`rollback:${input.target}:${input.reason.status}:${input.reason.reasons[0]?.code}`);
+            return {
+              releaseId: input.target,
+              safety: classifyDeploySafety({ config: config(), before: snapshot(), after: snapshot(), elapsedMs: 0 }),
+              summary: "rolled back",
+            };
+          },
+        },
+        launchAgent: {
+          async assertOutsideDaemon() {
+            calls.push("assertOutsideDaemon");
+            return { checkedAt: "2026-06-20T00:00:01.000Z" };
+          },
+          async writePlist() {
+            calls.push("writePlist");
+            return { plistPath: "/tmp/agent.plist", entryPath: "/tmp/current/dist/index.js" };
+          },
+          async restart() {
+            calls.push("restart");
+            throw new Error("restart failed");
+          },
+        },
+        runtime: {
+          async inspect(input) {
+            calls.push(`inspect:${input.phase}`);
+            return snapshot();
+          },
+          classify(input) {
+            return classifyDeploySafety(input);
+          },
+        },
+      },
+    }),
+    /restart failed; automatic rollback to release-0 completed/,
+  );
+
+  assert.deepEqual(calls, [
+    "inspect:preflight",
+    "assertOutsideDaemon",
+    "canary:release-1",
+    "activate:release-1",
+    "writePlist",
+    "restart",
+    "rollback:release-0:unknown:transition-failed-after-activation",
+  ]);
+});
+
 test("release deploy transition derives elapsed time from preflight and postflight inspections", async () => {
   const calls = [];
   const before = snapshot({
@@ -351,6 +417,33 @@ test("release deploy transition derives elapsed time from preflight and postflig
   ]);
 });
 
+test("public deploy command guards before build or snapshot", async () => {
+  const calls = [];
+  await assert.rejects(
+    () => runReleaseDeployCommand({
+      config: config(),
+      configPath: "/tmp/pi-discord-config.json",
+      projectRoot: "/tmp/project",
+    }, {
+      async assertDeployAuthority() {
+        calls.push("prebuildGuard");
+        throw new Error("inside active daemon");
+      },
+      async build(input) {
+        calls.push(`build:${input.projectRoot}`);
+        return { command: "npm run build", cwd: input.projectRoot };
+      },
+      async createSnapshot() {
+        calls.push("snapshot");
+        throw new Error("should not snapshot");
+      },
+    }),
+    /inside active daemon/,
+  );
+
+  assert.deepEqual(calls, ["prebuildGuard"]);
+});
+
 test("public deploy command builds, snapshots, and runs the transition through fake adapters", async () => {
   const calls = [];
   const result = await runReleaseDeployCommand({
@@ -358,6 +451,9 @@ test("public deploy command builds, snapshots, and runs the transition through f
     configPath: "/tmp/pi-discord-config.json",
     projectRoot: "/tmp/project",
   }, {
+    async assertDeployAuthority(input) {
+      calls.push(`prebuildGuard:${input.roles.join(",")}`);
+    },
     async build(input) {
       calls.push(`build:${input.projectRoot}`);
       return { command: "npm run build", cwd: input.projectRoot };
@@ -416,6 +512,7 @@ test("public deploy command builds, snapshots, and runs the transition through f
   assert.equal(result.releaseId, "release-1");
   assert.equal(result.transition.outcome, "safe");
   assert.deepEqual(calls, [
+    "prebuildGuard:bot,worker,reconcile",
     "build:/tmp/project",
     "snapshot:false:/tmp/project",
     "inspect:preflight",
@@ -438,6 +535,9 @@ test("public deploy command records a redacted failed deploy event when transiti
       configPath: "/tmp/pi-discord-config.json",
       projectRoot: "/tmp/project",
     }, {
+      async assertDeployAuthority() {
+        calls.push("prebuildGuard");
+      },
       async build(input) {
         calls.push(`build:${input.projectRoot}`);
         return { command: "npm run build", cwd: input.projectRoot };
@@ -495,6 +595,7 @@ test("public deploy command records a redacted failed deploy event when transiti
   );
 
   assert.deepEqual(calls, [
+    "prebuildGuard",
     "build:/tmp/project",
     "snapshot",
     "inspect:preflight",
