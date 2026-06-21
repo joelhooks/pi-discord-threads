@@ -50,7 +50,100 @@ Current Brain decisions still hold:
 - **Next deploy slice:** LaunchAgent handoff through `releases/current`, then `release deploy` / `release rollback` with preflight/postflight and automatic rollback. Keep it framed as **zero lost work + fast rollback**, not true zero downtime.
 - **Still deferred:** registry storage migration, whole Discord-to-Effect rewrite, giant `Engine` class, generalized release platform.
 
-## Architecture candidates and current status
+## Current architecture review — 2026-06-21
+
+The repo has moved past the release deploy wall. Public deploy/rollback are wired, the first live deploy receipt exists, and `discord-bot.ts` is still the largest hotspot at 2,905 lines.
+
+Fresh receipts:
+
+- `f4b935f` captures the live deploy receipt in Brain; the live code release is `b682113`.
+- `src/release-deploy.ts`, `src/release-transition.ts`, and `src/launch-agent.ts` now own public deploy/rollback, fakeable transition flow, and LaunchAgent restart guardrails.
+- `src/run-control/inspection.ts` exists, but doctor/reconcile/deploy safety still use overlapping run-control scans and projections.
+- `src/run-control/store.ts` still hand-builds the `recordRetryLaterScript` positional `EVAL` command.
+- `src/discord-bot.ts` still owns slash routing, prefix/DM routing, queue decisions, run-control worker adapter wiring, reload/compact/status actions, and reply helpers.
+- Fresh architecture fanout artifacts: `tmp/subagents/architecture-run-control-candidates.md`, `tmp/subagents/architecture-release-candidates.md`, and `tmp/subagents/architecture-discord-runtime-candidates.md`.
+
+### Candidate A: typed Lua command builder for `recordRetryLaterScript`
+
+**Files/modules:** `src/run-control/lua-scripts.ts`, `src/run-control/store.ts`, `scripts/run-control-lua-scripts-regression.test.mjs`, `scripts/run-control-store-regression.test.mjs`.
+
+**Observed friction:** `recordRetryLaterScript` owns the safety-critical retry-later/dead-letter transition, but `RunControlStore.recordRetryLater()` still assembles `EVAL`, key order, argument order, and max-attempt bounding inline in `store.ts`.
+
+**Proposed change:** Add `buildRecordRetryLaterEval(input)` beside `recordRetryLaterScript` and have `store.ts` call it. Return both the complete Redis command and the bounded max-attempt value used for event metadata.
+
+**Why this improves locality/leverage/tests:** The positional Lua interface lives next to the Lua implementation. The store stops knowing key/argv order and tests can fail loudly on drift without live Redis.
+
+**Conflict check:** No conflict. This is already the Brain-canonical next architecture slice in `.brain/projects/run-control-lua-command-builders.svx`.
+
+**Risk:** Overbuilding a Lua framework. Keep the first slice to one script and raw `string[]` command output.
+
+**First reversible step:** Add only the builder and exact-shape tests for `recordRetryLaterScript`; do not touch the other scripts yet.
+
+### Candidate B: shared run-control inspection read model
+
+**Files/modules:** `src/run-control/doctor.ts`, `src/run-control/reconcile.ts`, `src/run-control/inspection.ts`, `src/run-control/store.ts`, doctor/reconcile/deploy safety tests.
+
+**Observed friction:** `buildRunControlDoctorReport()` lists runs and active pointers, then calls `reconcileRunControl()` which lists runs and active pointers again. Deploy safety adds `snapshotFromRunControlDoctorReport()` as a third projection. This repeats scan-race-sensitive read logic that already caused live reconcile bugs.
+
+**Proposed change:** Add a read-only `loadRunControlReadModel(store)` module that performs the race-aware run/active-pointer/worker/job/dead-letter reads once. Doctor formatting, reconcile dry-run issue derivation, and deploy safety snapshots consume that read model. Reconcile `--apply` still performs fresh guarded writes.
+
+**Why this improves locality/leverage/tests:** The tricky read semantics become one module with one set of tests. Operator views and deploy postflight classify the same facts instead of three nearby versions of truth.
+
+**Conflict check:** No conflict. It completes the older Candidate 5 direction without changing write authority.
+
+**Risk:** Accidentally reusing stale read models for mutation. Keep apply paths separate and ownership-checked.
+
+**First reversible step:** Use the shared read model in doctor only, then derive deploy inspection from doctor/read-model output after tests settle.
+
+### Candidate C: release deploy authority and post-mutation compensation
+
+**Files/modules:** `src/release-deploy.ts`, `src/release-transition.ts`, `src/release-snapshots.ts`, `src/launch-agent.ts`, `scripts/release-transition-regression.test.mjs`.
+
+**Observed friction:** `runReleaseDeployCommand()` currently builds and writes a release snapshot before the restart-authority guard runs inside the transition. The first live deploy failure also proved a harder case: after `activate`/plist mutation, restart can fail before safe postflight. Today that records a generic `transition-error`; automatic rollback only happens after classified postflight `unsafe`/`unknown`.
+
+**Proposed change:** Add a cheap fakeable deploy restart-authority guard before build/snapshot so a command from the active daemon tree creates no release ledger noise. Then teach the transition to compensate failures after activation/plist/restart by invoking the rollback adapter when `previousReleaseId` exists, or at least recording failed phase + mutation-started recovery guidance.
+
+**Why this improves locality/leverage/tests:** Deploy authority and deploy compensation live with the deploy state machine, not in operator folklore. Tests can prove guard failure creates no snapshot, and restart failure after activation either rolls back or records a precise recovery receipt without real `launchctl`.
+
+**Conflict check:** No conflict with zero-lost-work framing. This is live-ops hardening after the first receipt, not a generic deploy platform.
+
+**Risk:** Duplicate guard logic and rollback loops. Keep run-control preflight near activation so evidence stays fresh, and preserve both original failure and rollback failure if compensation fails.
+
+**First reversible step:** Add a fake regression where the pre-build guard fails and asserts no build/snapshot call occurred. Next, add a transition test where restart throws after activation and the rollback adapter is called with a synthetic `transition-failed-after-activation` reason.
+
+### Candidate D: prompt-intake decisions into `thread-run-state.ts`
+
+**Files/modules:** `src/discord-bot.ts`, `src/thread-run-state.ts`, `scripts/thread-run-state-regression.test.mjs`, `scripts/registry-lifecycle-regression.test.mjs`.
+
+**Observed friction:** The Brain says lifecycle decisions belong in `thread-run-state.ts`, but production prompt intake still branches across slash, prefix, DM, workspace, Redis queueing, local queueing, active-run record construction, and recovery prompt wrapping inside `discord-bot.ts`.
+
+**Proposed change:** Deepen `thread-run-state.ts` with pure prompt-intake decisions: `parseQueueIntent`, `summarizeActiveRunPrompt`, `buildActiveRunRecord`, and eventually `decidePromptIntake(...)`. Keep Redis writes, Discord replies, placeholder sends, and Pi runtime calls in adapters.
+
+**Why this improves locality/leverage/tests:** Prompt lifecycle policy gets one decision table across slash/prefix/DM/workspace paths. The 2,905-line Discord file stops owning every small state rule.
+
+**Conflict check:** No conflict. This follows the existing architecture Area rule and avoids a giant Engine/Effect rewrite.
+
+**Risk:** Timestamp, truncation, and interrupted metadata drift. Start with pure helpers and preserve callsites.
+
+**First reversible step:** Move only `parseQueueIntent`, `summarizeActiveRunPrompt`, and `buildActiveRunRecord` with injectable `now`, then add pure tests for follow-up aliases, truncation, and active-run shape.
+
+### Candidate E: Discord run-turn presenter
+
+**Files/modules:** `src/discord-bot.ts`, `src/discord/run-surface.ts`, `src/discord/message-renderer.ts`, `src/discord/progress-hud-machine.ts`, `src/discord/final-answer-outbox.ts`, progress/final-answer tests.
+
+**Observed friction:** `runPromptWithPlaceholder()` and the run-control worker adapter duplicate the operator-visible turn lifecycle: typing, title rename, HUD renderer/controller, progress bus, runtime call, final delivery, HUD archive, title evidence, and failure card. Low-level modules exist, but the higher-level turn presenter still lives twice in the mega-file.
+
+**Proposed change:** Add `src/discord/run-turn-presenter.ts` that owns Discord presentation lifecycle around a run. It should accept injected final delivery so Redis final-answer idempotency remains in `final-answer-outbox.ts`.
+
+**Why this improves locality/leverage/tests:** Local and run-control paths stop drifting around HUD archive, title hooks, and typing cleanup. The module can be tested with fake messages/registry without Discord login.
+
+**Conflict check:** No conflict. It continues the shipped `run-surface` extraction rather than moving run-control policy into Discord.
+
+**Risk:** Accidentally hiding retry/idempotency semantics in a generic presenter. Keep delivery injected and run-control policy outside.
+
+**First reversible step:** Extract only repeated `startTypingIndicator` + `DiscordMessageRenderer` + `createProgressHudController` setup into a tiny `createRunTurnPresentation(...)`, use it in the local path first, and run progress/final-answer tests.
+
+## Architecture candidates and historical status
 
 ### 1. Deepen `PiSessionService` resource ownership — shipped in `2e94f34`
 
