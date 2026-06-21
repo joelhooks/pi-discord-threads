@@ -218,14 +218,16 @@ export function getLaunchAgentPaths(config: AppConfig): LaunchAgentPaths {
 async function startLaunchAgent(paths: LaunchAgentPaths, force: boolean, restart: boolean): Promise<void> {
   await assertOutsideLaunchAgentDaemon(paths);
   const loaded = await isLaunchAgentLoaded(paths);
+  let existingAfterBootout: string[] | undefined;
 
   if (restart && loaded) {
     await bootoutLaunchAgent(paths);
+    existingAfterBootout = await waitForDaemonProcessesToExit(paths);
   }
 
   const loadedAfterRestart = restart ? false : loaded;
   if (!loadedAfterRestart) {
-    const existing = await findExistingDaemonProcesses(paths);
+    const existing = existingAfterBootout ?? await findExistingDaemonProcesses(paths);
     if (existing.length > 0 && !force) {
       throw new Error([
         "Refusing to start LaunchAgent because a non-launchd daemon already appears to be running.",
@@ -354,6 +356,20 @@ function launchAgentPath(): string {
     join(home, "go", "bin"),
   ];
   return [...new Set(paths)].join(":");
+}
+
+async function waitForDaemonProcessesToExit(paths: LaunchAgentPaths, timeoutMs = 5_000): Promise<string[]> {
+  const deadline = Date.now() + timeoutMs;
+  let existing = await findExistingDaemonProcesses(paths);
+  while (existing.length > 0 && Date.now() < deadline) {
+    await sleep(100);
+    existing = await findExistingDaemonProcesses(paths);
+  }
+  return existing;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function findExistingDaemonProcesses(paths: LaunchAgentPaths): Promise<string[]> {

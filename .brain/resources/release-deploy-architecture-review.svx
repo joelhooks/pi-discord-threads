@@ -183,3 +183,14 @@ Implemented the public command wiring after explicit single-user deploy intent:
 - [`scripts/release-transition-regression.test.mjs`](../../scripts/release-transition-regression.test.mjs) now covers public deploy build/snapshot/transition ordering, redacted deploy-failure ledger recording, restored-config rollback roles, and public rollback guard-first ordering with fake adapters. No regression test calls real `launchctl`.
 
 Open live decision: run the first real cutover from a terminal/operator context and capture the receipt. The code path is now intentionally able to mutate `releases/current`, restore config for rollback, write the plist, and restart LaunchAgent when invoked through `release deploy` / `release rollback`.
+
+## Live cutover receipt — first attempt — 2026-06-21
+
+First explicit `release deploy` reached live mutation and exposed a restart race:
+
+- Preflight was idle: run-control enabled, `activePointers=0`, `pendingJobs=0`, `deadLetteredRuns=0`, `reconcileIssues=0`.
+- The command built, snapshotted, canaried, activated `releases/current`, wrote the plist, then failed during restart because the duplicate-daemon check saw the old launchd process immediately after `bootout`.
+- Ledger recorded `snapshot`, `activate`, and a redacted `deploy` event with `outcome=failed`, `safetyStatus=unknown`, `errorCode=transition-error`.
+- Status after failure showed `entryMode=release-current`, plist pointing at `releases/current`, `launchctl: not loaded`, and no matching daemon processes.
+
+Fix: `startLaunchAgent` now waits briefly for matching daemon processes to exit after `launchctl bootout` before applying the duplicate non-launchd daemon guard.
