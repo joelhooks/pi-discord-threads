@@ -1,8 +1,11 @@
 import type { AppConfig } from "../config.js";
-import type {
-  RunControlDoctorActivePointer,
-  RunControlDoctorDeadLetterRun,
-  RunControlDoctorReport,
+import { createRunQueueRuntimeClient } from "../engine/runtime.js";
+import {
+  buildRunControlDoctorReport,
+  loadRunControlDoctorRegistry,
+  type RunControlDoctorActivePointer,
+  type RunControlDoctorDeadLetterRun,
+  type RunControlDoctorReport,
 } from "./doctor.js";
 import type { ReconcileIssue } from "./reconcile.js";
 import type { RunControlJobQueueSummary, RunControlWorkerRecord } from "./types.js";
@@ -53,6 +56,28 @@ export function snapshotFromRunControlDoctorReport(report: RunControlDoctorRepor
     deadLetteredRuns: report.deadLetteredRuns,
     reconcileIssues: report.reconcile.issues,
   };
+}
+
+export async function loadRunControlInspectionSnapshot(config: AppConfig): Promise<RunControlInspectionSnapshot> {
+  if (!config.runControl.enabled) {
+    return {
+      checkedAt: new Date().toISOString(),
+      activeRuns: [],
+      pendingJobs: { pendingCount: 0, consumers: [] },
+      workers: [],
+      deadLetteredRuns: [],
+      reconcileIssues: [],
+    };
+  }
+
+  const registry = await loadRunControlDoctorRegistry(config);
+  const store = createRunQueueRuntimeClient(config);
+  try {
+    await store.warmup();
+    return snapshotFromRunControlDoctorReport(await buildRunControlDoctorReport({ store, registry, config }));
+  } finally {
+    await store.close();
+  }
 }
 
 export function classifyDeploySafety(options: ClassifyDeploySafetyOptions): DeploySafetyReport {

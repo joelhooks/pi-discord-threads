@@ -11,7 +11,7 @@ Use the smallest check that proves the touched seam.
 | Brain/docs only | `npm run brain:check` |
 | Any TypeScript edit | `npm run typecheck` |
 | Release snapshot/activate/canary/rollback-helper behavior | `npm run test:release-snapshot` |
-| Release deploy transition/safety classifier seams | `npm run test:release-transition` |
+| Release deploy/rollback wiring, transition, and safety classifier seams | `npm run test:release-transition` |
 | Restart/recovery prompt behavior | `npm run test:recovery-prompt` |
 | Thread run state | `npm run test:thread-run-state` |
 | Discord HUD/final rendering | `npm run test:progress-hud`, `npm run test:final-answer-outbox` |
@@ -29,17 +29,20 @@ node dist/index.js doctor --config ~/.config/pi-discord-threads/config.json
 node dist/index.js launch-agent-status --config ~/.config/pi-discord-threads/config.json
 ```
 
-For release snapshots and current handoff:
+For release snapshots, current handoff, and explicit deploy/rollback:
 
 ```bash
 node dist/index.js release snapshot --config ~/.config/pi-discord-threads/config.json
 node dist/index.js release list --config ~/.config/pi-discord-threads/config.json
 node dist/index.js release activate <release-id> --config ~/.config/pi-discord-threads/config.json
 node dist/index.js release canary current --config ~/.config/pi-discord-threads/config.json
+node dist/index.js release deploy --config ~/.config/pi-discord-threads/config.json
+node dist/index.js release rollback <release-id> --config ~/.config/pi-discord-threads/config.json
 ```
 
 ## Receipts
 
+- 2026-06-20 public release deploy/rollback wiring: `npm run test:release-transition` covers fake LaunchAgent/no-`launchctl` deploy and rollback command ordering plus deploy safety classification.
 - 2026-06-20 release transition core: added `npm run test:release-transition` for fake LaunchAgent/no-`launchctl` transition ordering and deploy safety classification.
 - 2026-06-20 gardening pass: replaced bootstrap placeholder with the current validation map from `package.json`, `AGENTS.md`, and `README.md`.
 - Keep future receipts short: command, why it was run, pass/fail, and the seam it protects.

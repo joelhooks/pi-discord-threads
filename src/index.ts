@@ -10,6 +10,7 @@ import { buildRunControlDoctorReport, formatRunControlDoctorReport, loadRunContr
 import { checkRunControlRedisHealth, getRunControlWorkerId } from "./run-control/redis-client.js";
 import { formatReconcileReport, reconcileRunControl } from "./run-control/reconcile.js";
 import { installLaunchAgent, printLaunchAgentStatus, uninstallLaunchAgent } from "./launch-agent.js";
+import { runReleaseDeployCommand, runReleaseRollbackCommand, formatReleaseDeployCommandResult, formatReleaseRollbackCommandResult } from "./release-deploy.js";
 import { activateRelease, createReleaseSnapshot, formatReleaseActivationResult, formatReleaseCanaryResult, formatReleaseSnapshotList, formatReleaseSnapshotResult, listReleaseSnapshots, runReleaseCanary } from "./release-snapshots.js";
 
 installProcessGuards();
@@ -58,10 +59,6 @@ async function main(): Promise<void> {
     await writeDefaultConfig(configPath);
     console.log(`Wrote ${configPath}`);
     return;
-  }
-
-  if (cli.command === "release" && (cli.releaseCommand === "deploy" || cli.releaseCommand === "rollback")) {
-    throw new Error(`release ${cli.releaseCommand} restart flow is not implemented yet. Use release snapshot, release list, release activate, or release canary.`);
   }
 
   const config = await loadConfig(cli.configPath);
@@ -216,7 +213,27 @@ async function releaseCommand(cli: CliOptions, config: AppConfig): Promise<void>
     return;
   }
 
-  throw new Error(`release ${cli.releaseCommand ?? "(missing)"} restart flow is not implemented yet. Use release snapshot, release list, release activate, or release canary.`);
+  if (cli.releaseCommand === "deploy") {
+    console.log(formatReleaseDeployCommandResult(await runReleaseDeployCommand({
+      config,
+      configPath: expandPath(cli.configPath),
+      force: cli.force,
+    })));
+    return;
+  }
+
+  if (cli.releaseCommand === "rollback") {
+    if (!cli.releaseTarget) throw new Error("release rollback requires a release id, commit, or current");
+    console.log(formatReleaseRollbackCommandResult(await runReleaseRollbackCommand({
+      config,
+      configPath: expandPath(cli.configPath),
+      target: cli.releaseTarget,
+      force: cli.force,
+    })));
+    return;
+  }
+
+  throw new Error(`release ${cli.releaseCommand ?? "(missing)"} is not implemented. Use release snapshot, release list, release activate, release canary, release deploy, or release rollback.`);
 }
 
 function printHelp(): void {
@@ -242,6 +259,10 @@ Commands:
                               Flip config.dataDir/releases/current without restart or launchctl
   release canary <release-id|sha|current> [--config path]
                               Run doctor from a release artifact without starting Discord
+  release deploy [--config path] [--force]
+                              Build, snapshot, activate, restart LaunchAgent, postflight, and rollback on unsafe
+  release rollback <release-id|sha> [--config path] [--force]
+                              Restore release config, activate, restart LaunchAgent, and postflight
   init-config [--config path]  Write a default JSON config
   doctor [--config path]       Print non-secret runtime diagnostics
 

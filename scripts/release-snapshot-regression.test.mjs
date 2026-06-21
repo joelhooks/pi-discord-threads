@@ -636,27 +636,21 @@ test("release CLI parsing is strict for release subcommands", () => {
   assert.equal(rollback.releaseTarget, "20260619T153000Z-abc1234");
 
   assert.throws(() => parseCliArgs(["status"]), /Unknown command: status/);
+  const deploy = parseCliArgs(["release", "deploy", "--force"]);
+  assert.equal(deploy.releaseCommand, "deploy");
+  assert.equal(deploy.force, true);
+
+  const forcedRollback = parseCliArgs(["release", "rollback", "20260619T153000Z-abc1234", "--force"]);
+  assert.equal(forcedRollback.releaseCommand, "rollback");
+  assert.equal(forcedRollback.releaseTarget, "20260619T153000Z-abc1234");
+  assert.equal(forcedRollback.force, true);
+
   assert.throws(() => parseCliArgs(["release", "list", "--allow-dirty"]), /only valid for release snapshot/);
+  assert.throws(() => parseCliArgs(["release", "deploy", "extra"]), /Unexpected release argument/);
+  assert.throws(() => parseCliArgs(["release", "snapshot", "--force"]), /only valid for release deploy or rollback/);
   assert.throws(() => parseCliArgs(["release", "snapshot", "--wat"]), /Unknown release option/);
   assert.throws(() => parseCliArgs(["release", "snapshot", "extra"]), /Unexpected release argument/);
   assert.throws(() => parseCliArgs(["release", "activate"]), /requires a release id/);
   assert.throws(() => parseCliArgs(["release", "canary"]), /requires a release id/);
   assert.throws(() => parseCliArgs(["release"]), /requires a subcommand/);
-});
-
-test("release deploy and rollback reject without LaunchAgent mutation behavior", async () => {
-  const distIndex = join(process.cwd(), "dist", "index.js");
-  const deploy = await execFileAsync(process.execPath, [distIndex, "release", "deploy"]).then(
-    (result) => ({ code: 0, stdout: result.stdout, stderr: result.stderr }),
-    (error) => ({ code: error.code, stdout: error.stdout, stderr: error.stderr }),
-  );
-  assert.notEqual(deploy.code, 0);
-  assert.match(deploy.stderr, /release deploy restart flow is not implemented yet/);
-
-  const rollback = await execFileAsync(process.execPath, [distIndex, "release", "rollback", "abc1234"]).then(
-    (result) => ({ code: 0, stdout: result.stdout, stderr: result.stderr }),
-    (error) => ({ code: error.code, stdout: error.stdout, stderr: error.stderr }),
-  );
-  assert.notEqual(rollback.code, 0);
-  assert.match(rollback.stderr, /release rollback restart flow is not implemented yet/);
 });

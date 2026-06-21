@@ -166,17 +166,20 @@ Implemented the internal seam without exposing public deploy/rollback:
 - [`src/launch-agent.ts`](../../src/launch-agent.ts) now exposes `writeLaunchAgentPlist` and `assertOutsideLaunchAgentDaemon` so future deploy wiring can guard before state mutation.
 - [`scripts/release-transition-regression.test.mjs`](../../scripts/release-transition-regression.test.mjs) proves guard-first ordering, no mutation after guard failure, safety classification, elapsed-time escalation, and fake rollback handoff with post-rollback safety proof.
 
-Public `release deploy` and `release rollback` still reject. No live `launchctl`, config restore, current flip, or daemon restart happened in this slice.
-
 Validation receipt:
 
 - `npm run typecheck` — passed.
 - `npm run test:release-transition` — 9/9 passed.
 - `npm run test:release-snapshot` — 18/18 passed.
 
-## Open decisions before implementation
+## Implementation receipt — public deploy/rollback wiring — 2026-06-20
 
-- Should `release deploy` run `npm run build` itself before snapshot? Recommendation: yes.
-- Should V1 deploy accept a target? Recommendation: no; targetless deploy snapshots the current build, while rollback handles older releases.
-- What postflight states trigger automatic rollback versus explicit unsafe report? Recommendation: retry/wait through at least `leaseTtlMs`, rollback on unresolved `unsafe`/`unknown`, and report terminal/dead-lettered runs without pretending they are success.
-- Should public rollback land before deploy? Recommendation: no. Build the shared rollback helper inside deploy tests first, then expose public rollback once postflight + ledger behavior are proven.
+Implemented the public command wiring after explicit single-user deploy intent:
+
+- [`src/release-deploy.ts`](../../src/release-deploy.ts) adds public deploy/rollback command orchestration and real adapters.
+- `release deploy` is targetless in V1: it runs `npm run build`, creates a snapshot, canaries it, activates it, writes the LaunchAgent plist, restarts/kickstarts the LaunchAgent, classifies postflight safety, records a deploy ledger event, and automatically rolls back on `unsafe`/`unknown` when a previous release exists.
+- `release rollback <release-id|sha>` canaries the target, restores the release config after writing a backup, activates `current`, writes the LaunchAgent plist, restarts/kickstarts the LaunchAgent, classifies postflight safety, and records a rollback ledger event.
+- `--force` is limited to deploy/rollback and only bypasses duplicate non-launchd daemon detection; it does not bypass the active daemon-tree guard.
+- [`scripts/release-transition-regression.test.mjs`](../../scripts/release-transition-regression.test.mjs) now covers public deploy build/snapshot/transition ordering, redacted deploy-failure ledger recording, restored-config rollback roles, and public rollback guard-first ordering with fake adapters. No regression test calls real `launchctl`.
+
+Open live decision: run the first real cutover from a terminal/operator context and capture the receipt. The code path is now intentionally able to mutate `releases/current`, restore config for rollback, write the plist, and restart LaunchAgent when invoked through `release deploy` / `release rollback`.

@@ -223,9 +223,9 @@ node dist/index.js doctor --config ~/.config/pi-discord-threads/config.json
 
 If `runControl.enabled` is false, the bridge does not connect to Redis.
 
-## Release snapshots
+## Release deploys and rollback
 
-Release snapshots are local rollback bundles. Activation can now flip the local `releases/current` symlink, but it still does not restart or deploy by itself.
+Release snapshots are local rollback bundles. `release deploy` now builds, snapshots, flips `releases/current`, restarts the user LaunchAgent, checks postflight run-control safety, and automatically rolls back when postflight is unsafe/unknown and a previous release exists.
 
 Create one:
 
@@ -252,19 +252,29 @@ Run a no-Discord-start, no-`launchctl` canary from an activated/current release:
 node dist/index.js release canary current --config ~/.config/pi-discord-threads/config.json
 ```
 
+Deploy current repo state:
+
+```bash
+node dist/index.js release deploy --config ~/.config/pi-discord-threads/config.json
+```
+
+Rollback to a release snapshot:
+
+```bash
+node dist/index.js release rollback <release-id-or-sha> --config ~/.config/pi-discord-threads/config.json
+```
+
 Current behavior:
 
-- copies built `dist/`
-- copies `package.json` and `package-lock.json`
-- copies the exact private config file for local rollback
-- writes safe manifest/ledger metadata
-- records `distSha256`
-- refuses dirty worktrees unless `--allow-dirty` is explicit
+- `release snapshot` copies built `dist/`, `package.json`, `package-lock.json`, and the exact private config file for local rollback
+- snapshot manifests/ledger entries stay redacted and include `distSha256`
+- snapshot refuses dirty worktrees unless `--allow-dirty` is explicit
 - `release activate` flips `releases/current` atomically and creates a `releases/node_modules` symlink back to the repo install
 - LaunchAgent install/status understands the `releases/current` entrypoint
-- `release canary` verifies `distSha256` and runs `doctor` from the release artifact without starting Discord or calling `launchctl`; it may create/verify the `releases/node_modules` dependency symlink
-- config restore helper exists for future deploy/rollback, but the public `release rollback` restart flow is still planned
-- `release deploy` and full `release rollback` are planned, not implemented
+- `release canary` verifies `distSha256` and runs `doctor` from the release artifact without starting Discord or calling `launchctl`
+- `release deploy` runs `npm run build`, snapshots the repo, canaries the snapshot, activates it, writes the LaunchAgent plist, restarts/kickstarts LaunchAgent, classifies postflight run-control safety, and records a deploy ledger event
+- `release rollback` canaries the target, restores its config snapshot with a backup, activates it, writes the LaunchAgent plist, restarts/kickstarts LaunchAgent, classifies postflight safety, and records a rollback ledger event
+- `--force` on deploy/rollback only bypasses the duplicate non-launchd daemon check; it does not bypass the active daemon-tree guard
 
 Target framing: **zero lost work + fast rollback**, not true zero downtime. The Discord Gateway is still a singleton, so restarts can reconnect.
 
@@ -277,7 +287,7 @@ Target framing: **zero lost work + fast rollback**, not true zero downtime. The 
 | Pi runtime | `src/pi-runtime.ts`, `src/engine/**` | Pi runtime manager, Effect layers/services |
 | Redis run control | `src/run-control/**` | leases, Lua scripts, worker state machines, doctor/reconcile, deploy safety inspection |
 | Registry/work graph | `src/registry.ts`, `src/work-graph.ts`, `src/thread-run-state.ts` | Discord ↔ Pi session mapping |
-| Release/daemon ops | `src/release-snapshots.ts`, `src/release-transition.ts`, `src/launch-agent.ts` | release bundles, fakeable deploy transition state machine, LaunchAgent plist/status/restart guard |
+| Release/daemon ops | `src/release-snapshots.ts`, `src/release-transition.ts`, `src/release-deploy.ts`, `src/launch-agent.ts` | release bundles, fakeable deploy transition state machine, public deploy/rollback wiring, LaunchAgent plist/status/restart guard |
 | Link ingest | `src/link-ingest*.ts`, `src/daily-post.ts` | explicit source capture and status bridge |
 | Docs/Brain | `README.md`, `AGENTS.md`, `.brain/**/*.svx` | human setup, agent orientation, durable decisions |
 
@@ -295,7 +305,7 @@ Any TypeScript edit:
 npm run typecheck
 ```
 
-Release snapshots and transition seams:
+Release snapshots, deploy/rollback wiring, and transition seams:
 
 ```bash
 npm run test:release-snapshot

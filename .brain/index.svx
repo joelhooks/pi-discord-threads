@@ -16,12 +16,12 @@ Use this as the repo memory front door. Place notes by usefulness, not topic: Pr
 - [Agent guide](../AGENTS.md) — source map, safety rules, validation map, and current work tracks for agents.
 - [Sources](./resources/pi-discord-threads-sources.svx) — current module/source map.
 - [Architecture review](./resources/pi-discord-threads-architecture-review.svx) — current architecture status and next slice recommendation.
-- [Release Deploy Architecture Review](./resources/release-deploy-architecture-review.svx) — deploy/rollback transition core receipt and next wiring seams.
+- [Release Deploy Architecture Review](./resources/release-deploy-architecture-review.svx) — deploy/rollback transition core and public wiring receipt.
 
 ## Active projects
 
 - [Run-Control Typed Lua Command Builders PRD](./projects/run-control-lua-command-builders.svx) — next architecture slice; start with `recordRetryLaterScript`.
-- [Release Snapshot Deploy/Rollback PRD](./projects/release-snapshot-deploy-rollback.svx) — snapshot/list, activate/canary handoff, and internal transition core implemented; next edge is public deploy/rollback restart flow.
+- [Release Snapshot Deploy/Rollback PRD](./projects/release-snapshot-deploy-rollback.svx) — snapshot/list, activate/canary handoff, transition core, and public deploy/rollback wiring implemented; next edge is live cutover receipt.
 - [Project Structure Cleanup PRD](./projects/project-structure-cleanup.svx) — slice 1 shipped; keep future cleanup evidence-backed and narrow.
 - [Redis Run Control Plane](./projects/redis-run-control-plane.svx) — implemented V1 plus live reliability/deploy target receipts.
 
@@ -47,7 +47,7 @@ Keep these out of the active project queue unless a new outcome is named.
 
 - [Pi Discord Threads Glossary](./resources/pi-discord-threads-glossary.svx) — canonical project terms.
 - [Pi Discord Threads Sources](./resources/pi-discord-threads-sources.svx) — current source/file map.
-- [Release Deploy Architecture Review](./resources/release-deploy-architecture-review.svx) — deploy/rollback transition core receipt and candidate module split.
+- [Release Deploy Architecture Review](./resources/release-deploy-architecture-review.svx) — deploy/rollback transition core and public command wiring receipt.
 - [Pi Discord Runtime Architecture Options](./resources/pi-discord-runtime-architecture-options-2026-06-17.svx) — superseded historical options brief.
 - [OpenAI OAuth Cycle Handling](./resources/openai-oauth-cycle-handling.svx) — reusable auth failure note.
 - [Component Library](./resources/component-library.svx) — Brain component rules.

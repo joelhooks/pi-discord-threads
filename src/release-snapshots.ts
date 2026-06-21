@@ -97,7 +97,38 @@ export interface ReleaseConfigRestoreLedgerEntry {
   releasePath: string;
 }
 
-export type ReleaseLedgerEntry = ReleaseSnapshotLedgerEntry | ReleaseActivationLedgerEntry | ReleaseConfigRestoreLedgerEntry;
+export interface ReleaseDeployLedgerEntry {
+  event: "deploy";
+  version: typeof manifestVersion;
+  releaseId: string;
+  previousReleaseId?: string;
+  createdAt: string;
+  outcome: "safe" | "waiting" | "rolled-back" | "failed";
+  safetyStatus: string;
+  safetyReasonCodes: string[];
+  currentPath?: string;
+  entryPath?: string;
+  serviceTarget?: string;
+  errorCode?: string;
+  configPath: string;
+}
+
+export interface ReleaseRollbackLedgerEntry {
+  event: "rollback" | "automatic-rollback";
+  version: typeof manifestVersion;
+  releaseId: string;
+  previousReleaseId?: string;
+  createdAt: string;
+  configPath: string;
+  backupPath?: string;
+  currentPath?: string;
+  entryPath?: string;
+  serviceTarget?: string;
+  safetyStatus: string;
+  safetyReasonCodes: string[];
+}
+
+export type ReleaseLedgerEntry = ReleaseSnapshotLedgerEntry | ReleaseActivationLedgerEntry | ReleaseConfigRestoreLedgerEntry | ReleaseDeployLedgerEntry | ReleaseRollbackLedgerEntry;
 
 export interface ReleaseSnapshotResult {
   releaseId: string;
@@ -157,6 +188,36 @@ export interface ReleaseCanaryResult {
   entryPath: string;
   distSha256: string;
   doctorOutput: string;
+}
+
+export interface RecordReleaseDeployOptions {
+  config: AppConfig;
+  releaseId: string;
+  previousReleaseId?: string;
+  outcome: ReleaseDeployLedgerEntry["outcome"];
+  safetyStatus: string;
+  safetyReasonCodes: string[];
+  currentPath?: string;
+  entryPath?: string;
+  serviceTarget?: string;
+  errorCode?: string;
+  configPath: string;
+  now?: Date;
+}
+
+export interface RecordReleaseRollbackOptions {
+  config: AppConfig;
+  releaseId: string;
+  previousReleaseId?: string;
+  automatic: boolean;
+  configPath: string;
+  backupPath?: string;
+  currentPath?: string;
+  entryPath?: string;
+  serviceTarget?: string;
+  safetyStatus: string;
+  safetyReasonCodes: string[];
+  now?: Date;
 }
 
 export interface ListedReleaseSnapshot extends ReleaseSnapshotLedgerEntry {
@@ -435,6 +496,45 @@ export async function runReleaseCanary(options: ReleaseCanaryOptions): Promise<R
   }
 }
 
+export async function recordReleaseDeploy(options: RecordReleaseDeployOptions): Promise<string> {
+  const ledgerPath = releaseLedgerPath(options.config);
+  await appendReleaseLedgerEntry(ledgerPath, {
+    event: "deploy",
+    version: manifestVersion,
+    releaseId: options.releaseId,
+    ...(options.previousReleaseId ? { previousReleaseId: options.previousReleaseId } : {}),
+    createdAt: (options.now ?? new Date()).toISOString(),
+    outcome: options.outcome,
+    safetyStatus: options.safetyStatus,
+    safetyReasonCodes: options.safetyReasonCodes,
+    ...(options.currentPath ? { currentPath: options.currentPath } : {}),
+    ...(options.entryPath ? { entryPath: options.entryPath } : {}),
+    ...(options.serviceTarget ? { serviceTarget: options.serviceTarget } : {}),
+    ...(options.errorCode ? { errorCode: options.errorCode } : {}),
+    configPath: resolve(options.configPath),
+  });
+  return ledgerPath;
+}
+
+export async function recordReleaseRollback(options: RecordReleaseRollbackOptions): Promise<string> {
+  const ledgerPath = releaseLedgerPath(options.config);
+  await appendReleaseLedgerEntry(ledgerPath, {
+    event: options.automatic ? "automatic-rollback" : "rollback",
+    version: manifestVersion,
+    releaseId: options.releaseId,
+    ...(options.previousReleaseId ? { previousReleaseId: options.previousReleaseId } : {}),
+    createdAt: (options.now ?? new Date()).toISOString(),
+    configPath: resolve(options.configPath),
+    ...(options.backupPath ? { backupPath: options.backupPath } : {}),
+    ...(options.currentPath ? { currentPath: options.currentPath } : {}),
+    ...(options.entryPath ? { entryPath: options.entryPath } : {}),
+    ...(options.serviceTarget ? { serviceTarget: options.serviceTarget } : {}),
+    safetyStatus: options.safetyStatus,
+    safetyReasonCodes: options.safetyReasonCodes,
+  });
+  return ledgerPath;
+}
+
 export function formatReleaseSnapshotResult(result: ReleaseSnapshotResult): string {
   return [
     `release snapshot: ${result.releaseId}`,
@@ -596,6 +696,23 @@ async function readLedgerEntries(ledgerPath: string): Promise<ReleaseLedgerEntry
         throw new Error(`Invalid release config restore ledger entry at ${ledgerPath}:${index + 1}`);
       }
       entries.push(parsed as ReleaseConfigRestoreLedgerEntry);
+      continue;
+    }
+    if (parsed.event === "deploy") {
+      if (!parsed.releaseId || !parsed.outcome || !parsed.safetyStatus || !parsed.configPath) {
+        throw new Error(`Invalid release deploy ledger entry at ${ledgerPath}:${index + 1}`);
+      }
+      if (parsed.outcome !== "failed" && (!parsed.currentPath || !parsed.entryPath || !parsed.serviceTarget)) {
+        throw new Error(`Invalid successful release deploy ledger entry at ${ledgerPath}:${index + 1}`);
+      }
+      entries.push(parsed as ReleaseDeployLedgerEntry);
+      continue;
+    }
+    if (parsed.event === "rollback" || parsed.event === "automatic-rollback") {
+      if (!parsed.releaseId || !parsed.configPath || !parsed.safetyStatus) {
+        throw new Error(`Invalid release rollback ledger entry at ${ledgerPath}:${index + 1}`);
+      }
+      entries.push(parsed as ReleaseRollbackLedgerEntry);
       continue;
     }
     throw new Error(`Unknown release ledger event at ${ledgerPath}:${index + 1}`);

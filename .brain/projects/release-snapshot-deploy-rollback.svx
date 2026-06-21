@@ -80,19 +80,20 @@ Slice 2 is implemented:
 - LaunchAgent install/status prefers `config.dataDir/releases/current/dist/index.js` when a current release exists, with repo `dist/index.js` fallback for first setup.
 - `release canary <release-id|sha|current>` verifies `distSha256` and runs `doctor` from the release artifact without starting Discord.
 - A rollback config helper backs up the current expanded `--config` file, restores a release config snapshot with `0600`, and refuses manifest/requested config path mismatch.
-- `release deploy` and full `release rollback` still reject as restart flows not implemented.
 
-Slice 2.5 is implemented as an internal seam:
+Slice 2.5 implemented the internal seam:
 
 - `src/release-transition.ts` defines a fakeable XState deploy transition core: preflight, guard, canary, activate, plist write, restart, postflight, classify, and rollback-on-unsafe adapter handoff.
 - `src/run-control/inspection.ts` classifies structured doctor-like snapshots as `safe`, `waiting`, `unsafe`, or `unknown` without parsing human text.
-- `src/launch-agent.ts` exposes guard-first LaunchAgent seams for future deploy wiring.
+- `src/launch-agent.ts` exposes guard-first LaunchAgent seams for deploy wiring.
 - `npm run test:release-transition` proves guard-first ordering with fake adapters, elapsed-time escalation after the reclaim window, rollback safety proof, and no real `launchctl`.
 
-Next work should continue in two slices:
+Slice 3 is wired in source:
 
-1. Wire public `release deploy` to the transition core with preflight, canary, LaunchAgent restart from outside the active daemon tree, postflight proof, and automatic rollback using the shared config helper.
-2. Full `release rollback <release-id>` with symlink flip, config restore, restart, postflight proof, and ledger event.
+- `src/release-deploy.ts` wires public `release deploy` through build, snapshot, transition adapters, deploy ledger event, and automatic rollback handoff.
+- Public `release rollback <release-id|sha>` canaries the target, backs up/restores config, activates `current`, writes the plist, restarts LaunchAgent, classifies postflight, and records a rollback ledger event.
+- `release deploy` is targetless in V1; older release selection belongs to `release rollback`.
+- Live deploy still requires an explicit operator command; tests use fakes and do not call real `launchctl`.
 
 Keep the framing precise: this is **zero lost work + fast rollback**, not true zero downtime. The singleton Discord Gateway can still reconnect during restart.
 
@@ -331,7 +332,7 @@ Live safety note: no live LaunchAgent restart/kickstart and no live config resto
 - `releases/current` flips atomically where practical.
 - LaunchAgent restart happens only from outside the active daemon process tree.
 - Postflight runs after restart and reports active-run safety evidence: reclaimed, pending, finalized, terminal, or explicitly unsafe.
-- Deploy implementation uses the fakeable transition core and a shared rollback helper before automatic rollback is wired.
+- Deploy implementation uses the fakeable transition core and shared rollback helper.
 - If postflight cannot prove safety, deploy automatically rolls back to the previous release using that helper.
 - Automatic rollback backs up the current expanded `--config` file, restores the previous release's config snapshot with restrictive permissions, flips `releases/current` back, restarts, runs postflight, and records the backup path/result.
 - Ledger records deploy success/failure and automatic rollback events without secrets.
@@ -370,10 +371,8 @@ node --test scripts/<launch-agent-current-regression>.test.mjs
 # Deploy transition core
 npm run test:release-transition
 
-# Deploy/rollback once implemented
-# Run regression tests with fake LaunchAgent/doctor adapters instead of real launchctl.
-node --test scripts/<release-deploy-regression>.test.mjs
-node --test scripts/<release-rollback-regression>.test.mjs
+# Deploy/rollback wiring uses fake LaunchAgent/doctor adapters instead of real launchctl.
+npm run test:release-transition
 ```
 
 Manual smoke for the already-shipped snapshot/list slice:
@@ -392,8 +391,8 @@ Brain is canonical. If this gets mirrored to issues later, create vertical slice
 
 1. `release snapshot/list` storage foundation — shipped in `042d96a`.
 2. `release activate <release-id>` plus LaunchAgent entrypoint switch to `releases/current`.
-3. `release deploy` with preflight/postflight and automatic rollback.
-4. `release rollback <release-id>` with config backup/restore and postflight proof.
+3. `release deploy` with preflight/postflight and automatic rollback — wired, pending live receipt.
+4. `release rollback <release-id>` with config backup/restore and postflight proof — wired, pending live receipt.
 5. Running-session deploy smoke harness.
 
 Each issue should link back to this PRD.

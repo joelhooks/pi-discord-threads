@@ -45,8 +45,8 @@ tags:
 - [`src/run-control/lua-scripts.ts`](../../src/run-control/lua-scripts.ts), [`src/run-control/store.ts`](../../src/run-control/store.ts), [`src/run-control/inspection.ts`](../../src/run-control/inspection.ts), and [`src/run-control/*-machine.ts`](../../src/run-control/)
   Covers: Redis Lua invariants, store command boundaries, worker lane/job/leased-run XState machines, deploy safety classification, lease heartbeat, input pump, finalization guard, retry-later/dead-letter behavior, and terminal run status. Use when: understanding restart/process-boundary resilience.
 
-- [`src/release-snapshots.ts`](../../src/release-snapshots.ts), [`src/release-transition.ts`](../../src/release-transition.ts), and [`src/launch-agent.ts`](../../src/launch-agent.ts)
-  Covers: release snapshot/list storage, `release activate`, `release canary`, `releases/current`, manifest/ledger safety, private config copy/restore helper, fakeable deploy transition state machine, LaunchAgent plist/status/install/restart guard, and future deploy/rollback restart seams.
+- [`src/release-snapshots.ts`](../../src/release-snapshots.ts), [`src/release-transition.ts`](../../src/release-transition.ts), [`src/release-deploy.ts`](../../src/release-deploy.ts), and [`src/launch-agent.ts`](../../src/launch-agent.ts)
+  Covers: release snapshot/list storage, `release activate`, `release canary`, `releases/current`, manifest/ledger safety, private config copy/restore helper, fakeable deploy transition state machine, public deploy/rollback command wiring, LaunchAgent plist/status/install/restart guard, and live cutover seams.
 
 - [`src/link-ingest.ts`](../../src/link-ingest.ts) and [`src/link-ingest-status-bridge.ts`](../../src/link-ingest-status-bridge.ts)
   Covers: explicit Discord URL capture requests and local status projection. Use when: changing `/pi ingest`, `/pi capture`, or status bridge behavior.

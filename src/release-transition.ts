@@ -34,6 +34,8 @@ export interface ReleaseTransitionCanaryOutput {
 export interface ReleaseTransitionActivationOutput {
   releaseId: string;
   previousReleaseId?: string;
+  currentPath?: string;
+  entryPath?: string;
   summary?: string;
 }
 

@@ -548,6 +548,7 @@ function parseReleaseCliArgs(args: string[]): CliOptions {
   let releaseCommand: ReleaseCommand | undefined;
   let releaseTarget: string | undefined;
   let releaseAllowDirty = false;
+  let force = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -564,6 +565,10 @@ function parseReleaseCliArgs(args: string[]): CliOptions {
     }
     if (arg === "--allow-dirty") {
       releaseAllowDirty = true;
+      continue;
+    }
+    if (arg === "--force") {
+      force = true;
       continue;
     }
     if (arg === "--help" || arg === "-h") {
@@ -589,6 +594,9 @@ function parseReleaseCliArgs(args: string[]): CliOptions {
   if (releaseAllowDirty && releaseCommand !== "snapshot") {
     throw new Error("--allow-dirty is only valid for release snapshot");
   }
+  if (force && releaseCommand !== "deploy" && releaseCommand !== "rollback") {
+    throw new Error("--force is only valid for release deploy or rollback");
+  }
   if ((releaseCommand === "activate" || releaseCommand === "canary" || releaseCommand === "rollback") && !releaseTarget) {
     throw new Error(`release ${releaseCommand} requires a release id, commit, or current`);
   }
@@ -598,6 +606,7 @@ function parseReleaseCliArgs(args: string[]): CliOptions {
     releaseCommand,
     ...(releaseTarget ? { releaseTarget } : {}),
     releaseAllowDirty,
+    force,
   });
 }
 

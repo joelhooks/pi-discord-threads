@@ -5,6 +5,7 @@ import {
   classifyDeploySafety,
   formatDeploySafetyReport,
 } from "../dist/run-control/inspection.js";
+import { runReleaseDeployCommand, runReleaseRollbackCommand } from "../dist/release-deploy.js";
 import { runReleaseDeployTransition } from "../dist/release-transition.js";
 
 function config() {
@@ -347,5 +348,236 @@ test("release deploy transition derives elapsed time from preflight and postflig
     "restart",
     "classify:61000",
     "rollback:release-0:unknown:active-run-lease-still-expired",
+  ]);
+});
+
+test("public deploy command builds, snapshots, and runs the transition through fake adapters", async () => {
+  const calls = [];
+  const result = await runReleaseDeployCommand({
+    config: config(),
+    configPath: "/tmp/pi-discord-config.json",
+    projectRoot: "/tmp/project",
+  }, {
+    async build(input) {
+      calls.push(`build:${input.projectRoot}`);
+      return { command: "npm run build", cwd: input.projectRoot };
+    },
+    async createSnapshot(input) {
+      calls.push(`snapshot:${input.allowDirty}:${input.projectRoot}`);
+      return {
+        releaseId: "release-1",
+        releasePath: "/tmp/releases/release-1",
+        manifestPath: "/tmp/releases/release-1/manifest.json",
+        ledgerPath: "/tmp/releases/ledger.jsonl",
+        manifest: { releaseId: "release-1", distSha256: "a".repeat(64), shortCommit: "abcdef1" },
+      };
+    },
+    transitionAdapters: {
+      release: {
+        async canary(input) {
+          calls.push(`canary:${input.target}`);
+          return { releaseId: input.target };
+        },
+        async activate(input) {
+          calls.push(`activate:${input.target}`);
+          return { releaseId: input.target, previousReleaseId: "release-0" };
+        },
+      },
+      launchAgent: {
+        async assertOutsideDaemon() {
+          calls.push("guard");
+          return { checkedAt: "2026-06-20T00:00:01.000Z" };
+        },
+        async writePlist() {
+          calls.push("writePlist");
+          return { plistPath: "/tmp/agent.plist", entryPath: "/tmp/current/dist/index.js" };
+        },
+        async restart() {
+          calls.push("restart");
+          return { serviceTarget: "gui/501/com.joelhooks.pi-discord-threads" };
+        },
+      },
+      runtime: {
+        async inspect(input) {
+          calls.push(`inspect:${input.phase}`);
+          return snapshot({ checkedAt: input.phase === "preflight" ? "2026-06-20T00:00:00.000Z" : "2026-06-20T00:00:03.000Z" });
+        },
+        classify(input) {
+          calls.push(`classify:${input.elapsedMs}`);
+          return classifyDeploySafety(input);
+        },
+      },
+    },
+    async recordDeploy(input) {
+      calls.push(`recordDeploy:${input.releaseId}:${input.outcome}:${input.safety.status}`);
+    },
+  });
+
+  assert.equal(result.releaseId, "release-1");
+  assert.equal(result.transition.outcome, "safe");
+  assert.deepEqual(calls, [
+    "build:/tmp/project",
+    "snapshot:false:/tmp/project",
+    "inspect:preflight",
+    "guard",
+    "canary:release-1",
+    "activate:release-1",
+    "writePlist",
+    "restart",
+    "inspect:postflight",
+    "classify:3000",
+    "recordDeploy:release-1:safe:safe",
+  ]);
+});
+
+test("public deploy command records a redacted failed deploy event when transition throws", async () => {
+  const calls = [];
+  await assert.rejects(
+    () => runReleaseDeployCommand({
+      config: config(),
+      configPath: "/tmp/pi-discord-config.json",
+      projectRoot: "/tmp/project",
+    }, {
+      async build(input) {
+        calls.push(`build:${input.projectRoot}`);
+        return { command: "npm run build", cwd: input.projectRoot };
+      },
+      async createSnapshot() {
+        calls.push("snapshot");
+        return {
+          releaseId: "release-1",
+          releasePath: "/tmp/releases/release-1",
+          manifestPath: "/tmp/releases/release-1/manifest.json",
+          ledgerPath: "/tmp/releases/ledger.jsonl",
+          manifest: { releaseId: "release-1", distSha256: "a".repeat(64), shortCommit: "abcdef1" },
+        };
+      },
+      transitionAdapters: {
+        release: {
+          async canary(input) {
+            calls.push(`canary:${input.target}`);
+            return { releaseId: input.target };
+          },
+          async activate(input) {
+            calls.push(`activate:${input.target}`);
+            return { releaseId: input.target, previousReleaseId: "release-0" };
+          },
+        },
+        launchAgent: {
+          async assertOutsideDaemon() {
+            calls.push("guard");
+            return { checkedAt: "2026-06-20T00:00:01.000Z" };
+          },
+          async writePlist() {
+            calls.push("writePlist");
+            return { plistPath: "/tmp/agent.plist", entryPath: "/tmp/current/dist/index.js" };
+          },
+          async restart() {
+            calls.push("restart");
+            throw new Error("restart failed");
+          },
+        },
+        runtime: {
+          async inspect(input) {
+            calls.push(`inspect:${input.phase}`);
+            return snapshot();
+          },
+          classify(input) {
+            return classifyDeploySafety(input);
+          },
+        },
+      },
+      async recordDeploy(input) {
+        calls.push(`recordDeploy:${input.releaseId}:${input.outcome}:${input.errorCode}`);
+      },
+    }),
+    /restart failed/,
+  );
+
+  assert.deepEqual(calls, [
+    "build:/tmp/project",
+    "snapshot",
+    "inspect:preflight",
+    "guard",
+    "canary:release-1",
+    "activate:release-1",
+    "writePlist",
+    "restart",
+    "recordDeploy:release-1:failed:transition-error",
+  ]);
+});
+
+test("public rollback command guards before config restore, current flip, plist write, and restart", async () => {
+  const calls = [];
+  const currentConfig = config();
+  currentConfig.runControl.roles = ["bot"];
+  const restoredConfig = config();
+  restoredConfig.runControl.roles = ["worker"];
+  const result = await runReleaseRollbackCommand({
+    config: currentConfig,
+    configPath: "/tmp/pi-discord-config.json",
+    target: "release-0",
+  }, {
+    release: {
+      async canary(input) {
+        calls.push(`canary:${input.target}`);
+        return { releaseId: input.target };
+      },
+      async restoreConfig(input) {
+        calls.push(`restoreConfig:${input.target}`);
+        return { backupPath: "/tmp/config.backup", releaseId: input.target };
+      },
+      async activate(input) {
+        calls.push(`activate:${input.target}`);
+        return { releaseId: input.target, previousReleaseId: "release-1" };
+      },
+    },
+    launchAgent: {
+      async assertOutsideDaemon() {
+        calls.push("guard");
+        return { checkedAt: "2026-06-20T00:00:01.000Z" };
+      },
+      async writePlist(input) {
+        calls.push(`writePlist:${input.roles.join(",")}:${input.guard.checkedAt}`);
+        return { plistPath: "/tmp/agent.plist", entryPath: "/tmp/current/dist/index.js" };
+      },
+      async restart(input) {
+        calls.push(`restart:${input.guard.checkedAt}`);
+        return { serviceTarget: "gui/501/com.joelhooks.pi-discord-threads" };
+      },
+    },
+    runtime: {
+      async inspect(input) {
+        calls.push(`inspect:${input.phase}`);
+        return snapshot({ checkedAt: input.phase === "preflight" ? "2026-06-20T00:00:00.000Z" : "2026-06-20T00:00:02.000Z" });
+      },
+      classify(input) {
+        calls.push(`classify:${input.elapsedMs}`);
+        return classifyDeploySafety(input);
+      },
+    },
+    async loadConfig() {
+      calls.push("loadConfig");
+      return restoredConfig;
+    },
+    async recordRollback(input) {
+      calls.push(`recordRollback:${input.releaseId}:${input.result.safety.status}`);
+    },
+  });
+
+  assert.equal(result.releaseId, "release-0");
+  assert.equal(result.safety.status, "safe");
+  assert.deepEqual(calls, [
+    "inspect:preflight",
+    "guard",
+    "canary:release-0",
+    "restoreConfig:release-0",
+    "loadConfig",
+    "activate:release-0",
+    "writePlist:worker:2026-06-20T00:00:01.000Z",
+    "restart:2026-06-20T00:00:01.000Z",
+    "inspect:postflight",
+    "classify:2000",
+    "recordRollback:release-0:safe",
   ]);
 });

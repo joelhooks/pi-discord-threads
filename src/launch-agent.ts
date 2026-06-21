@@ -58,6 +58,16 @@ export interface WriteLaunchAgentPlistResult {
   entryPath: string;
 }
 
+export interface RestartLaunchAgentOptions {
+  config: AppConfig;
+  force: boolean;
+}
+
+export interface RestartLaunchAgentResult {
+  paths: LaunchAgentPaths;
+  serviceTarget: string;
+}
+
 export async function writeLaunchAgentPlist(options: WriteLaunchAgentPlistOptions): Promise<WriteLaunchAgentPlistResult> {
   const paths = options.paths ?? getLaunchAgentPaths(options.config);
   await mkdir(dirname(paths.plistPath), { recursive: true });
@@ -90,6 +100,12 @@ export async function installLaunchAgent(options: LaunchAgentOptions): Promise<v
   }
 
   await startLaunchAgent(paths, options.force, options.restart);
+}
+
+export async function restartLaunchAgent(options: RestartLaunchAgentOptions): Promise<RestartLaunchAgentResult> {
+  const paths = getLaunchAgentPaths(options.config);
+  await startLaunchAgent(paths, options.force, true);
+  return { paths, serviceTarget: paths.serviceTarget };
 }
 
 export async function uninstallLaunchAgent(config: AppConfig): Promise<void> {
