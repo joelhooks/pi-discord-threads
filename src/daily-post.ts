@@ -1,11 +1,9 @@
-import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
 
 import type { AppConfig } from "./config.js";
 import { expandPath } from "./config.js";
+import { findDailyThreadByKey, recordDailyThread } from "./daily-thread-registry.js";
 import { resolveContextChannelDefault, resolveCwdInput } from "./cwd.js";
-import { Registry } from "./registry.js";
 
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 const PUBLIC_THREAD = 11;
@@ -25,22 +23,6 @@ interface DailyPostRequest {
   readonly cwd?: string;
   readonly workspaceName?: string;
   readonly sessionName?: string;
-}
-
-interface DailyThreadRecord {
-  readonly key: string;
-  readonly channelId: string;
-  readonly threadId: string;
-  readonly threadName: string;
-  readonly runId: string;
-  readonly localDate: string;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-}
-
-interface DailyThreadRegistry {
-  readonly version: 1;
-  readonly threads: Record<string, DailyThreadRecord>;
 }
 
 interface DiscordChannel {
@@ -72,15 +54,6 @@ export interface DailyPostResult {
   readonly error?: string;
 }
 
-const registryPath = (config: AppConfig): string =>
-  join(config.dataDir, "daily-threads.json");
-
-const piRegistryPath = (config: AppConfig): string =>
-  join(config.dataDir, "registry.json");
-
-const threadKey = (request: DailyPostRequest): string =>
-  `${request.channelId}:${request.localDate}`;
-
 const firstConfiguredGuildId = (config: AppConfig): string | undefined =>
   config.discord.guildIds.length === 1 ? config.discord.guildIds[0] : undefined;
 
@@ -100,33 +73,6 @@ const discordMessageUrl = (
   guildId && channelId && messageId
     ? `https://discord.com/channels/${guildId}/${channelId}/${messageId}`
     : undefined;
-
-const readJson = async <A>(path: string): Promise<A | undefined> => {
-  if (!existsSync(path)) return undefined;
-  try {
-    return JSON.parse(await readFile(path, "utf8")) as A;
-  } catch {
-    return undefined;
-  }
-};
-
-const writeJsonAtomic = async (path: string, value: unknown): Promise<void> => {
-  await mkdir(dirname(path), { recursive: true });
-  const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  await rename(tempPath, path);
-};
-
-const loadRegistry = async (config: AppConfig): Promise<DailyThreadRegistry> =>
-  (await readJson<DailyThreadRegistry>(registryPath(config))) ?? {
-    version: 1,
-    threads: {},
-  };
-
-const saveRegistry = async (
-  config: AppConfig,
-  registry: DailyThreadRegistry
-): Promise<void> => writeJsonAtomic(registryPath(config), registry);
 
 const decodeRequest = (value: unknown): DailyPostRequest => {
   const request = value as Partial<DailyPostRequest>;
@@ -281,29 +227,6 @@ const resolveDailySessionContext = async (
   };
 };
 
-const registerDailyThreadSession = async (
-  config: AppConfig,
-  request: DailyPostRequest,
-  threadId: string
-): Promise<{
-  readonly cwd: string;
-  readonly workspaceName?: string;
-  readonly sessionName: string;
-}> => {
-  const context = await resolveDailySessionContext(config, request);
-  const registry = new Registry(piRegistryPath(config));
-  await registry.load();
-  await registry.upsertThread({
-    threadId,
-    parentChannelId: request.channelId,
-    cwd: context.cwd,
-    ...(context.workspaceName ? { workspaceName: context.workspaceName } : {}),
-    sessionName: context.sessionName,
-    status: "idle",
-  });
-  return context;
-};
-
 export async function postDailyMessage(options: {
   readonly config: AppConfig;
   readonly token: string;
@@ -311,9 +234,11 @@ export async function postDailyMessage(options: {
 }): Promise<DailyPostResult> {
   const raw = await readFile(expandPath(options.requestPath), "utf8");
   const request = decodeRequest(JSON.parse(raw) as unknown);
-  const registry = await loadRegistry(options.config);
-  const key = threadKey(request);
-  const existing = registry.threads[key];
+  const existing = await findDailyThreadByKey(
+    options.config,
+    request.channelId,
+    request.localDate
+  );
   let threadId = request.threadId ?? existing?.threadId;
   let threadName = existing?.threadName ?? request.threadName;
   let guildId = firstConfiguredGuildId(options.config);
@@ -345,23 +270,16 @@ export async function postDailyMessage(options: {
   }
   guildId = message.guild_id ?? guildId;
 
-  const now = new Date().toISOString();
-  registry.threads[key] = {
-    key,
+  const sessionContext = await resolveDailySessionContext(options.config, request);
+  await recordDailyThread(options.config, {
     channelId: request.channelId,
+    ...(guildId ? { guildId } : {}),
     threadId,
     threadName,
     runId: request.runId,
     localDate: request.localDate,
-    createdAt: existing?.createdAt ?? now,
-    updatedAt: now,
-  };
-  await saveRegistry(options.config, registry);
-  const sessionContext = await registerDailyThreadSession(
-    options.config,
-    request,
-    threadId
-  );
+    session: sessionContext,
+  });
 
   return {
     ok: true,

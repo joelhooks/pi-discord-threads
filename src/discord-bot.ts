@@ -76,6 +76,7 @@ import { startupRecoveryEnabled } from "./startup-recovery.js";
 import { extractFirstUrl, postPreparedLinkIngest, prepareLinkIngest, type LinkIngestSendResult, type PreparedLinkIngest } from "./link-ingest.js";
 import { buildLinkIngestCommandText, linkIngestAcceptedTitle, linkIngestUsage, parsePrefixLinkIngestCommand, type LinkIngestCommandMode } from "./link-ingest-command.js";
 import { startLinkIngestStatusBridge, type StopLinkIngestStatusBridge } from "./link-ingest-status-bridge.js";
+import { adoptDailyThreadSession } from "./daily-thread-registry.js";
 import { buildActiveRunRecord, parseQueueIntent, summarizeActiveRunPrompt } from "./thread-run-state.js";
 
 export interface RunBotOptions {
@@ -1253,7 +1254,14 @@ async function handleMessage(
   const prefixed = stripCommandPrefix(rawContent, options.config.discord.commandPrefix);
   const mentioned = options.config.discord.respondToMentions && botId ? message.mentions.users.has(botId) : false;
   const inThread = message.channel.isThread();
-  const existingThread = inThread ? options.registry.getThread(message.channel.id) : undefined;
+  const existingThread = inThread
+    ? (options.registry.getThread(message.channel.id) ??
+      await adoptDailyThreadSession(
+        options.config,
+        options.registry,
+        message.channel.id
+      ))
+    : undefined;
 
   if (!prefixed && !mentioned && !existingThread) return;
 

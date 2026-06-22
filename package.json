@@ -22,6 +22,7 @@
     "test:pi-runtime": "npm run build && node --test scripts/pi-runtime-regression.test.mjs",
     "test:registry-lifecycle": "npm run build && node --test scripts/registry-lifecycle-regression.test.mjs",
     "test:link-ingest-status-bridge": "npm run build && node --test scripts/link-ingest-status-bridge-regression.test.mjs",
+    "test:daily-post": "npm run build && node --test scripts/daily-post-regression.test.mjs",
     "test:run-control-store": "npm run build && node --test scripts/run-control-store-regression.test.mjs",
     "test:run-control-worker": "npm run build && node --test scripts/run-control-worker-regression.test.mjs",
     "test:run-control-redis-client": "npm run build && node --test scripts/run-control-redis-client-regression.test.mjs",
