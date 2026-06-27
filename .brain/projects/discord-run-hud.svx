@@ -31,6 +31,7 @@ Replace the current low-fidelity Discord run status embed with an active native 
 - `set_run_hud` accepts semantic HUD fields rather than raw Discord text, e.g. `header`, `now`, `progress`, `signals`, and `risk`.
 - The narrator owns the useful language inside those fields; the bridge owns native Discord component rendering, truncation, Discord safety, throttled Discord edits, and terminal HUD archival.
 - The narrator can produce HUD updates whenever useful, but the bridge edits Discord at a stable cadence: roughly every 5 seconds, plus immediate edits for major transitions, errors, and waiting-for-input states.
+- Next evolution: the archived terminal HUD should become a **Tweet-Sized Memory Card**: one tight current-session summary plus the stable Project Memory Portal / Session Memory Link, while the full curated summary and raw session drilldown live in Brain-backed session memory.
 
 ## Desired Shape
 
@@ -55,6 +56,17 @@ ESC stops the run
 - `src/discord/progress-hud-machine.ts` owns the XState HUD lifecycle: `idle`, `scheduled`, `flushing`, `running`, `stopping`, and `stopped`.
 - `src/discord-bot.ts` wires Discord prompt/finalization paths to the renderer/controller and keeps final answers as separate Discord messages.
 - `src/config.ts` and `config.example.json` expose `render.hud.enabled`, `render.hud.model`, and `render.hud.updateIntervalMs`.
+
+## Planned memory-linked terminal state
+
+The final HUD should not become another verbose assistant response. It should archive into a compact memory card:
+
+```txt
+Done: shaped the Session Memory + Summary Component Kit direction and saved the Brain receipt.
+Memory portal: https://<tailnet>/notes/projects/session-memory-summary-components
+```
+
+The link should be stable for the project/workstream/thread instead of changing every turn. The linked portal should support drilling from project Brain into sessions, turns, and tool-call receipts. That keeps Discord skimmable and lets final assistant responses shrink to outcome, key receipts, blockers, and the stable memory link.
 
 ## Validation
 

@@ -59,6 +59,27 @@ test("DiscordMessageRenderer queues, dedupes, and deactivates without deleting",
   assert.equal(message.edits[1].content, "done");
 });
 
+test("archived HUD renders session memory card when a stable link is available", () => {
+  const record = makeRecord();
+  const archived = buildArchivedHudPayload(record, {
+    sessionMemory: {
+      label: "pi-discord-threads",
+      brainPath: ".brain/projects/project-memory-portal.svx",
+      routePath: "/notes/projects/project-memory-portal",
+      workstreamId: "pi-discord-threads-test",
+      verified: false,
+      verificationStatus: "not_configured",
+      summary: "Captured the portal tracer bullet.",
+    },
+  });
+  const json = JSON.stringify(archived);
+
+  assert.match(json, /Done: Captured the portal tracer bullet\./);
+  assert.match(json, /\*\*Memory\*\*/);
+  assert.match(json, /\.brain\/projects\/project-memory-portal\.svx \(no verified phone-safe URL yet\)/);
+  assert.match(json, /session memory refreshed/);
+});
+
 test("Progress HUD controller exposes latest state for persistent archived HUD", async () => {
   const message = makeMessage();
   const renderer = new DiscordMessageRenderer(message);

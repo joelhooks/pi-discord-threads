@@ -23,6 +23,8 @@ Use this as the repo memory front door. Place notes by usefulness, not topic: Pr
 - [Run-Control Typed Lua Command Builders PRD](./projects/run-control-lua-command-builders.svx) — next architecture slice; start with `recordRetryLaterScript`.
 - [Release Snapshot Deploy/Rollback PRD](./projects/release-snapshot-deploy-rollback.svx) — snapshot/list, activate/canary handoff, transition core, and public deploy/rollback wiring implemented; next edge is live cutover receipt.
 - [Project Structure Cleanup PRD](./projects/project-structure-cleanup.svx) — slice 1 shipped; keep future cleanup evidence-backed and narrow.
+- [Project Memory Portal](./projects/project-memory-portal.svx) — active tracer bullet for stable Discord final/HUD memory links into Brain-backed session history.
+- [Session Memory and Summary Components](./projects/session-memory-summary-components.svx) — planned stable Project Memory Portal, HUD/final-summary Brain links, session-history drilldown, and the shadcn-style MDSvX Summary Component Kit.
 - [Redis Run Control Plane](./projects/redis-run-control-plane.svx) — implemented V1 plus live reliability/deploy target receipts.
 
 ## Implemented or paused project references

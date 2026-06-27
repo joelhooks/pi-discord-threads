@@ -23,3 +23,19 @@ pi-notes ships standard components and auto-imports project-local Svelte compone
 ## Project components
 
 Create project-specific components in `.brain/components/` only when a shape repeats or depends on structured data.
+
+## Summary Component Kit direction
+
+The active direction is captured in [Session Memory and Summary Components](../projects/session-memory-summary-components.svx): build a shadcn-style copy-in library for useful MDSvX summary pages, starting from the `wzrrd` `joel/tufte-mdsvx` Tufte notes template.
+
+Use these names consistently:
+
+- **Project Memory Portal** — a stable tailnet SvelteKit/MDSvX site URL for project Brain plus workstream/session/turn/tool-call drilldown.
+- **Session Memory Note** — a real `.brain/**/*.svx` page for one Discord/Pi workstream inside the broader portal.
+- **Brain Context Strip** — a compact HUD/final-summary link set for recent or relevant Brain notes.
+- **Summary Component Kit** — source-copyable MDSvX components for memory, receipts, decisions, risks, timelines, and next actions.
+- **Agent Component Doctrine** — prompt/docs rules for how agents create and extend the component system.
+
+Canonical home for reusable summary components is the `wzrrd` template/component registry, but the durable local Brain portal likely belongs in `joelhooks/pi-notes` because it already owns the Document Host, `.brain` rendering, and Session Bridge. Dogfood the first visible slice in `pi-discord-threads`, especially the running HUD Brain Context Strip, terminal Tweet-Sized Memory Card, and Session Memory Note/Project Memory Portal links.
+
+Do not make this an opaque package. Prefer copyable source, recipes, data contracts, and small focused components that can graduate between local Brain components and the `wzrrd` registry without hiding the source.

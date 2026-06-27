@@ -41,6 +41,14 @@
       "firstEvaluationTurn": 2,
       "evaluationIntervalTurns": 8,
       "minRenameIntervalMs": 1800000
+    },
+    "sessionMemory": {
+      "enabled": true,
+      "portalBrainPath": ".brain/projects/project-memory-portal.svx",
+      "tailnetBaseUrl": "https://example.tailnet.ts.net",
+      "verifyTailnetUrl": true,
+      "verificationTimeoutMs": 1500,
+      "maxTurnsPerWorkstream": 100
     }
   },
   "attachments": {

@@ -3,6 +3,7 @@ import type { RegistryPort, ThreadRecord } from "../registry.js";
 import { DiscordMessageRenderer } from "./message-renderer.js";
 import { buildArchivedHudPayload } from "./payloads.js";
 import type { ProgressHudSnapshot } from "./progress-hud-machine.js";
+import type { SessionMemoryLink } from "../session-memory.js";
 
 export type PromptChannel = {
   send(options: MessageCreateOptions): Promise<Message>;
@@ -68,7 +69,12 @@ export async function sendFinalResponseMessages(
   }
 }
 
-export async function archiveWorkingHud(placeholder: Message, record: ThreadRecord, snapshot?: ProgressHudSnapshot): Promise<void> {
+export async function archiveWorkingHud(
+  placeholder: Message,
+  record: ThreadRecord,
+  snapshot?: ProgressHudSnapshot,
+  sessionMemory?: SessionMemoryLink,
+): Promise<void> {
   // Archive is best-effort after final text posts. Do not turn a posted final answer
   // into a run-control failure just because Discord refused the terminal HUD edit;
   // once activeRun clears, stale ESC clicks are still rejected by expectedMessageId.
@@ -77,5 +83,5 @@ export async function archiveWorkingHud(placeholder: Message, record: ThreadReco
       console.warn(`failed to archive run HUD ${placeholder.id}: ${error.message}`);
     },
   });
-  await renderer.deactivate(buildArchivedHudPayload(snapshot?.record ?? record, snapshot));
+  await renderer.deactivate(buildArchivedHudPayload(snapshot?.record ?? record, { ...snapshot, sessionMemory }));
 }

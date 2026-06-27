@@ -27,6 +27,7 @@ Start here before non-trivial work:
 4. `.brain/projects/release-snapshot-deploy-rollback.svx`
 5. `.brain/projects/run-control-lua-command-builders.svx`
 6. `.brain/projects/project-structure-cleanup.svx`
+7. `.brain/projects/session-memory-summary-components.svx`
 
 ## Source map
 
@@ -41,6 +42,7 @@ Start here before non-trivial work:
 - `src/release-deploy.ts` — public deploy/rollback command wiring, real adapters, and output formatting.
 - `src/launch-agent.ts` — macOS user LaunchAgent plist/status/start/stop guardrails and guard-first plist seams.
 - `src/registry.ts`, `src/work-graph.ts`, `src/thread-run-state.ts` — Discord ↔ Pi session projection.
+- `src/session-memory.ts` — bridge-side Project Memory Portal/session-memory data and link seam.
 - `src/link-ingest*.ts`, `src/daily-post.ts` — explicit URL capture/status bridge and daily post wiring.
 
 ## Current work tracks
@@ -48,6 +50,7 @@ Start here before non-trivial work:
 - Architecture: typed Lua command builders next, starting with `recordRetryLaterScript`. Keep it behavior-preserving and boring.
 - Deploy: `release deploy` and `release rollback` are wired through fakeable transition/rollback adapters. Next is live-ops hardening after the first real cutover receipt. Call the target **zero lost work + fast rollback**, not zero downtime.
 - Cleanup: improve orientation and prune only evidence-backed dead code. No directory shuffle without tests and a clear PRD slice.
+- Memory Portal: dogfood the stable Project Memory Portal link/data seam here, but keep durable portal ownership in `joelhooks/pi-notes`. Keep `.brain/index.svx`, `VISION.md`, and this active work-track list updated when project priority changes.
 
 ## Hard safety rules
 
@@ -69,6 +72,7 @@ Run the smallest useful check, then report it:
 - Redis Lua/store/worker: `npm run test:run-control-lua-scripts`, `npm run test:run-control-store`, `npm run test:run-control-worker`
 - Pi runtime/layers: `npm run test:pi-runtime`, `npm run test:pi-session-service`, `npm run test:engine-layer`
 - Discord final output/HUD: `npm run test:final-answer-outbox`, `npm run test:progress-hud`
+- Session memory / Project Memory Portal seam: `npm run test:session-memory`, `npm run typecheck`, and `npm run brain:check` for Brain/docs changes.
 
 ## Commit discipline
 

@@ -3,7 +3,7 @@ title: "Pi Discord Threads Glossary"
 type: "resource"
 status: "active"
 created_at: "2026-06-14"
-updated_at: "2026-06-20"
+updated_at: "2026-06-23"
 tags:
   - learning
   - glossary
@@ -38,7 +38,7 @@ The run-control model. Jobs may retry/reclaim, so side effects must be ownership
 
 ### Idempotent finalization
 
-Final assistant output is reserved/persisted before content write, then retried by editing the reserved Discord message. This prevents duplicate final answers across retries.
+Final assistant output is sent directly with a deterministic Discord nonce, then the message ids are persisted for retry edits. This avoids visible “reserving answer” placeholders while still preventing duplicate final answers across retries.
 
 ### XState lifecycle truth
 
@@ -63,3 +63,23 @@ Deferred stable entrypoint symlink for release activation. It should be owned by
 ### Zero lost work + fast rollback
 
 The release/deploy target. Current architecture can make restarts safe and rollback fast; it does not provide true Discord Gateway zero downtime.
+
+### Project Memory Portal
+
+A stable tailnet SvelteKit/MDSvX site URL for a project/workstream memory surface. `.brain/` is the source/data layer; the portal renders project Brain pages plus session history, with drilldown from workstreams to sessions, turns, and tool-call receipts.
+
+### Session Memory Note
+
+A real `.brain/**/*.svx` page that curates one Discord/Pi workstream: what the session thinks we are building, durable decisions, receipts, open loops, and relevant Brain links. Pi JSONL remains conversation truth; the note is project memory inside the broader Project Memory Portal.
+
+### Brain Context Strip
+
+A compact HUD/final-summary section listing recent or relevant Brain notes with human titles and verified phone-safe tailnet links when available. The bridge owns link safety; the HUD narrator must not fabricate URLs.
+
+### Summary Component Kit
+
+A shadcn-style, source-copyable MDSvX component library for useful summary pages: session memory, receipts, decisions, risks, timelines, source maps, and next actions. Initial visual base is the `wzrrd` `joel/tufte-mdsvx` Tufte notes template. Canonical home should be the `wzrrd` template/component registry; this bridge dogfoods the first version.
+
+### Tweet-Sized Memory Card
+
+The terminal archived HUD state for a run: one compact session summary plus the stable Project Memory Portal / Session Memory Link. It lets Discord stay short while Brain holds the full curated session memory and raw session drilldown.

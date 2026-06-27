@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-discord-threads.local/schemas/session-memory.schema.json",
+  "title": "Project Memory Portal session memory data",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/workstream" },
+    { "$ref": "#/$defs/index" }
+  ],
+  "$defs": {
+    "index": {
+      "type": "object",
+      "required": ["schemaVersion", "updatedAt", "portalBrainPath", "portalRoutePath", "workstreams"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "portalBrainPath": { "type": "string" },
+        "portalRoutePath": { "type": "string" },
+        "workstreams": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/workstreamIndexItem" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "workstreamIndexItem": {
+      "type": "object",
+      "required": ["workstreamId", "label", "dataPath", "brainPath", "routePath", "updatedAt", "lastSummary"],
+      "properties": {
+        "workstreamId": { "type": "string" },
+        "label": { "type": "string" },
+        "dataPath": { "type": "string" },
+        "brainPath": { "type": "string" },
+        "routePath": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "lastSummary": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "workstream": {
+      "type": "object",
+      "required": ["schemaVersion", "workstreamId", "label", "source", "portal", "createdAt", "updatedAt", "lastSummary", "turns"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "workstreamId": { "type": "string" },
+        "label": { "type": "string" },
+        "source": {
+          "type": "object",
+          "required": ["kind", "threadKey", "cwdName"],
+          "properties": {
+            "kind": { "enum": ["discord-thread", "discord-dm-workroom", "unknown"] },
+            "threadKey": { "type": "string", "description": "Hash of the source thread identifier; raw Discord IDs stay out of Brain data." },
+            "workspaceName": { "type": "string" },
+            "cwdName": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "portal": {
+          "type": "object",
+          "required": ["brainPath", "routePath"],
+          "properties": {
+            "brainPath": { "type": "string" },
+            "routePath": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "lastSummary": { "type": "string" },
+        "turns": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/turn" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "turn": {
+      "type": "object",
+      "required": ["createdAt", "promptSummary", "assistantSummary"],
+      "properties": {
+        "createdAt": { "type": "string", "format": "date-time" },
+        "runId": { "type": "string" },
+        "userEntryId": { "type": "string" },
+        "assistantEntryId": { "type": "string" },
+        "promptSummary": { "type": "string" },
+        "assistantSummary": { "type": "string" },
+        "sessionFile": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

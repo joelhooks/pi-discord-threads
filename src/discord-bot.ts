@@ -78,6 +78,7 @@ import { buildLinkIngestCommandText, linkIngestAcceptedTitle, linkIngestUsage, p
 import { startLinkIngestStatusBridge, type StopLinkIngestStatusBridge } from "./link-ingest-status-bridge.js";
 import { adoptDailyThreadSession } from "./daily-thread-registry.js";
 import { buildActiveRunRecord, parseQueueIntent, summarizeActiveRunPrompt } from "./thread-run-state.js";
+import { appendSessionMemoryLink, writeSessionMemory, type SessionMemoryLink } from "./session-memory.js";
 
 export interface RunBotOptions {
   config: AppConfig;
@@ -2118,9 +2119,19 @@ async function runPromptWithPlaceholder(
     }
     await options.registry.recordMessageEntry(sourceDiscordId, result.userEntryId);
 
-    const chunks = chunkForDiscord(result.text, options.config.render.maxDiscordChars);
+    const sessionMemory = await writeSessionMemoryForFinal({
+      options,
+      record: { ...record, sessionFile: result.sessionFile ?? record.sessionFile, activeRun },
+      prompt,
+      resultText: result.text,
+      runId: activeRun.runId,
+      userEntryId: result.userEntryId,
+      assistantEntryId: result.assistantEntryId,
+    });
+    const finalText = appendSessionMemoryLink(result.text, sessionMemory);
+    const chunks = chunkForDiscord(finalText, options.config.render.maxDiscordChars);
     await sendFinalResponseMessages(channel, record, options.registry, chunks, result.assistantEntryId);
-    await archiveWorkingHud(placeholder, record, progressHudSnapshot);
+    await archiveWorkingHud(placeholder, record, progressHudSnapshot, sessionMemory);
     const titleRecord = await recordCompletedTitleTurn(options.registry, record, prompt, result.text);
     void maybeEvaluateThreadTitle(getThreadChannel(channel), titleRecord, { config: options.config, registry: options.registry }).catch((error) => {
       const text = error instanceof Error ? error.message : String(error);
@@ -2211,6 +2222,29 @@ function throwIfRunExecutionAborted(signal: AbortSignal, runId: string): void {
   if (signal.aborted) {
     throw new RetryRunLaterError(`run-control execution aborted for ${runId}; leaving job pending for ownership recovery`);
   }
+}
+
+async function writeSessionMemoryForFinal(input: {
+  options: RunBotOptions;
+  record: ThreadRecord;
+  prompt: string;
+  resultText: string;
+  runId?: string;
+  userEntryId?: string;
+  assistantEntryId?: string;
+}): Promise<SessionMemoryLink | undefined> {
+  return writeSessionMemory({
+    config: input.options.config,
+    record: input.record,
+    prompt: input.prompt,
+    resultText: input.resultText,
+    runId: input.runId,
+    userEntryId: input.userEntryId,
+    assistantEntryId: input.assistantEntryId,
+  }).catch((error) => {
+    console.warn(`session memory update skipped: ${formatUnknownError(error)}`);
+    return undefined;
+  });
 }
 
 function createRunControlWorkerAdapter(client: Client, options: RunBotOptions): RunControlWorkerAdapter {
@@ -2329,7 +2363,17 @@ async function finalizeRunControlSuccess(input: {
   const channel = await resolvePromptChannel(client, record).catch((error) => {
     throw new RetryRunLaterError(`final answer outbox could not resolve Discord channel for ${run.runId}: ${formatUnknownError(error)}`);
   });
-  const chunks = chunkForDiscord(result.text, options.config.render.maxDiscordChars);
+  const sessionMemory = await writeSessionMemoryForFinal({
+    options,
+    record: { ...record, sessionFile: result.sessionFile ?? record.sessionFile },
+    prompt: run.prompt,
+    resultText: result.text,
+    runId: run.runId,
+    userEntryId: result.userEntryId,
+    assistantEntryId: result.assistantEntryId,
+  });
+  const finalText = appendSessionMemoryLink(result.text, sessionMemory);
+  const chunks = chunkForDiscord(finalText, options.config.render.maxDiscordChars);
   const store = options.runControlStore;
   if (!store) throw new Error("runControl worker finalization requires a Redis store");
   await deliverFinalAnswerOutbox({
@@ -2347,7 +2391,7 @@ async function finalizeRunControlSuccess(input: {
     console.warn(`run-control final answer posted but HUD archive fetch failed for ${run.runId}: ${formatUnknownError(error)}`);
     return undefined;
   });
-  if (placeholder) await archiveWorkingHud(placeholder, record, hudSnapshot);
+  if (placeholder) await archiveWorkingHud(placeholder, record, hudSnapshot, sessionMemory);
   const idleRecord = await options.registry.patchThread(record.threadId, {
     status: "idle",
     activeRun: undefined,

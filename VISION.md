@@ -20,6 +20,7 @@ The bridge should feel boring under failure:
 - daemon restarts can recover interrupted threads;
 - final answers are posted as fresh Discord messages so notifications work;
 - active placeholders keep the thread readable while an agent runs;
+- completed turns link into a stable Project Memory Portal instead of bloating Discord with duplicate summaries;
 - optional Redis run control can coordinate active runs across process boundaries without replacing Pi JSONL.
 
 ## Priorities
@@ -29,6 +30,7 @@ The bridge should feel boring under failure:
 3. **One active run per logical workroom.** New input during an active run becomes steer or follow-up input instead of racing the same session.
 4. **Visible but restrained progress.** HUDs should help the operator understand the run without growing into noisy transcripts.
 5. **Safe defaults.** Redis run control stays disabled unless configured. Secrets are leased or loaded locally and never printed.
+6. **Project Memory Portal dogfood.** Emit stable session/workstream memory data and verified portal links so `joelhooks/pi-notes` can own the durable SvelteKit/MDSvX project-memory surface.
 
 ## Non-Goals
 
@@ -37,6 +39,7 @@ The bridge should feel boring under failure:
 - Do not allow HUD or title sidecar actors to steer, abort, or mutate the main Pi session.
 - Do not run duplicate Discord bot processes unless explicitly forced for a controlled operation.
 - Do not hide workspace/cwd decisions in prompt memory.
+- Do not fork the full Project Memory Portal inside this bridge; `pi-notes` owns the Document Host, `.brain` rendering, and session-history portal infrastructure.
 
 ## Merge By Default
 
@@ -47,7 +50,8 @@ Merge small, tested changes that:
 - make daemon lifecycle safer under LaunchAgent;
 - clarify workspace/context-channel resolution;
 - harden attachment handling and prompt construction;
-- improve doctor/reconcile output without adding customer-visible side effects.
+- improve doctor/reconcile output without adding customer-visible side effects;
+- add narrow session-memory data/link seams that preserve Pi JSONL as conversation truth and `.brain` as curated project memory.
 
 ## Needs Owner Sign-Off
 
@@ -58,6 +62,7 @@ Stop for explicit approval before:
 - adding broad new attachment classes or larger default attachment limits;
 - changing how sessions are forked, cloned, or mapped across Discord threads;
 - making sidecar actors capable of mutating the main Pi run;
+- changing Project Memory Portal ownership, tailnet exposure, or session-history retention semantics;
 - adding public product promises beyond the local bridge use case.
 
 ## Evidence Of Progress
@@ -69,4 +74,5 @@ The bridge is working when:
 - daily automation threads remain replyable Pi sessions;
 - doctor and reconcile explain what is wrong in one pass;
 - run-control disabled mode remains simple and reliable;
-- run-control enabled mode proves at-least-once execution with idempotent finalization well enough for live use.
+- run-control enabled mode proves at-least-once execution with idempotent finalization well enough for live use;
+- final HUDs and concise final answers point to a stable Project Memory Portal link when a verified phone-safe URL exists.

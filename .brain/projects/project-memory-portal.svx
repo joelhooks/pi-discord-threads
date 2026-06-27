@@ -1,0 +1,60 @@
+---
+title: "Project Memory Portal"
+type: "project"
+status: "active"
+created_at: "2026-06-23"
+tags:
+  - discord
+  - brain
+  - session-memory
+  - portal
+  - pi-notes
+---
+
+# Project Memory Portal
+
+## Goal
+
+Dogfood the stable project/workstream/session memory link from Discord runs into the broader pi-notes Project Memory Portal.
+
+This repo should emit curated session-memory data and verified link metadata. It should not fork the full portal stack. `joelhooks/pi-notes` owns the durable SvelteKit/MDSvX Document Host, `.brain` rendering, session-history adapters, and tailnet-safe URL reporting.
+
+## First bridge slice
+
+- Write session-memory records under `.brain/data/session-memory/**` when a thread's workspace has a Brain.
+- Keep the memory URL stable by pointing at this portal page, then updating data underneath.
+- Add the memory link to final Discord answers and archived HUD cards.
+- Use verified tailnet URLs only when configured and successfully checked.
+- Fall back to the Brain path with an explicit “no verified phone-safe URL yet” note.
+
+## Data source
+
+The local schema lives at:
+
+- `.brain/data/session-memory/schema.json`
+
+Generated records live under:
+
+- `.brain/data/session-memory/index.json`
+- `.brain/data/session-memory/workstreams/*.json`
+
+Pi JSONL remains raw conversation truth. Session-memory JSON is curated portal input, not the canonical transcript.
+
+## First implementation receipt
+
+2026-06-23 tracer bullet:
+
+- `src/session-memory.ts` writes hashed workstream records under `.brain/data/session-memory/workstreams/*.json` and a shared index at `.brain/data/session-memory/index.json`.
+- Finalization hooks update session memory before final Discord output in both direct and run-control paths.
+- Archived HUD cards render a compact Memory block from the same link object.
+- Final assistant output appends a Session Memory line with a verified URL when available, otherwise the Brain path and explicit no-phone-safe-URL status.
+- Safety fixes from Pi Fable review: redact Discord IDs/mentions/message URLs before Brain/HUD output, upsert retried turns by `assistantEntryId`/`runId`, and reject non-HTTPS/localhost/raw-IP portal bases as unverified.
+
+## Active-project hygiene
+
+When this work changes priority or ownership, update:
+
+- `VISION.md`
+- `AGENTS.md`
+- `.brain/index.svx`
+- `.brain/projects/session-memory-summary-components.svx`

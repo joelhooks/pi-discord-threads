@@ -60,6 +60,15 @@ export interface LinkIngestConfig {
   requestTimeoutMs: number;
 }
 
+export interface SessionMemoryConfig {
+  enabled: boolean;
+  portalBrainPath: string;
+  tailnetBaseUrl?: string;
+  verifyTailnetUrl: boolean;
+  verificationTimeoutMs: number;
+  maxTurnsPerWorkstream: number;
+}
+
 export interface AppConfig {
   dataDir: string;
   discord: {
@@ -91,6 +100,7 @@ export interface AppConfig {
       updateIntervalMs: number;
     };
     threadTitles: ThreadTitleConfig;
+    sessionMemory: SessionMemoryConfig;
   };
   attachments: {
     enabled: boolean;
@@ -171,6 +181,13 @@ export function defaultConfig(): AppConfig {
         evaluationIntervalTurns: 8,
         minRenameIntervalMs: 30 * 60_000,
       },
+      sessionMemory: {
+        enabled: true,
+        portalBrainPath: ".brain/projects/project-memory-portal.svx",
+        verifyTailnetUrl: true,
+        verificationTimeoutMs: 1_500,
+        maxTurnsPerWorkstream: 100,
+      },
     },
     attachments: {
       enabled: true,
@@ -239,6 +256,10 @@ function mergeConfig(base: AppConfig, partial: Partial<AppConfig>): AppConfig {
         ...base.render.threadTitles,
         ...(partial.render?.threadTitles ?? {}),
       },
+      sessionMemory: {
+        ...base.render.sessionMemory,
+        ...(partial.render?.sessionMemory ?? {}),
+      },
     },
     attachments: {
       ...base.attachments,
@@ -305,6 +326,7 @@ export function normalizeConfig(config: AppConfig): AppConfig {
         updateIntervalMs: Math.max(2_500, Math.min(30_000, config.render.hud?.updateIntervalMs || 5_000)),
       },
       threadTitles: normalizeThreadTitles(config.render.threadTitles),
+      sessionMemory: normalizeSessionMemory(config.render.sessionMemory),
     },
     attachments: {
       enabled: config.attachments.enabled !== false,
@@ -362,6 +384,20 @@ function normalizeThreadTitles(threadTitles: ThreadTitleConfig | undefined): Thr
     firstEvaluationTurn: Math.floor(clampNumber(merged.firstEvaluationTurn, 1, 20, defaults.firstEvaluationTurn)),
     evaluationIntervalTurns: Math.floor(clampNumber(merged.evaluationIntervalTurns, 1, 50, defaults.evaluationIntervalTurns)),
     minRenameIntervalMs: clampNumber(merged.minRenameIntervalMs, 0, 24 * 60 * 60_000, defaults.minRenameIntervalMs),
+  };
+}
+
+function normalizeSessionMemory(sessionMemory: SessionMemoryConfig | undefined): SessionMemoryConfig {
+  const defaults = defaultConfig().render.sessionMemory;
+  const merged = { ...defaults, ...(sessionMemory ?? {}) };
+  const portalBrainPath = merged.portalBrainPath?.trim() || defaults.portalBrainPath;
+  return {
+    enabled: merged.enabled !== false,
+    portalBrainPath: portalBrainPath.startsWith(".brain/") ? portalBrainPath : `.brain/${portalBrainPath.replace(/^brain\//u, "")}`,
+    tailnetBaseUrl: merged.tailnetBaseUrl?.trim().replace(/\/+$/u, "") || undefined,
+    verifyTailnetUrl: merged.verifyTailnetUrl !== false,
+    verificationTimeoutMs: Math.floor(clampNumber(merged.verificationTimeoutMs, 250, 10_000, defaults.verificationTimeoutMs)),
+    maxTurnsPerWorkstream: Math.floor(clampNumber(merged.maxTurnsPerWorkstream, 1, 1_000, defaults.maxTurnsPerWorkstream)),
   };
 }
 

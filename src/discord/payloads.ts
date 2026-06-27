@@ -3,11 +3,13 @@ import type { PromptProgress } from "../progress-events.js";
 import type { ThreadRecord } from "../registry.js";
 import { isBridgeRecoveryPrompt } from "../recovery-prompt.js";
 import { fallbackHudFrame, type RunHudFrame } from "../run-hud.js";
+import type { SessionMemoryLink } from "../session-memory.js";
 
 export interface ArchivedHudSnapshot {
   frame?: RunHudFrame;
   progress?: PromptProgress;
   elapsedMs?: number;
+  sessionMemory?: SessionMemoryLink;
 }
 
 export type RichPayload = {
@@ -72,9 +74,10 @@ export function buildArchivedHudPayload(record: ThreadRecord, snapshot: Archived
     return buildHudCardPayload(record, {
       tone: "done",
       stateLabel: "done",
-      now: "Final answer posted below.",
-      progress: ["✓ Pi turn finished", "✓ Discord reply sent", "· HUD persisted"],
-      next: "Send the next message in this thread when you want to continue.",
+      now: snapshot.sessionMemory?.summary ? `Done: ${snapshot.sessionMemory.summary}` : "Final answer posted below.",
+      progress: ["✓ Pi turn finished", snapshot.sessionMemory ? "✓ session memory refreshed" : "✓ Discord reply sent", "· HUD persisted"],
+      next: snapshot.sessionMemory ? "Open the memory portal for the full session trail." : "Send the next message in this thread when you want to continue.",
+      sessionMemory: snapshot.sessionMemory,
       footer: "ready for the next turn",
       abortDisabled: true,
       inputText: false,
@@ -91,7 +94,8 @@ export function buildArchivedHudPayload(record: ThreadRecord, snapshot: Archived
     signals: normalized.signals,
     risk: normalized.risk,
     next: normalized.risk ? undefined : normalized.next ?? "Final answer posted below.",
-    footer: "final answer posted below; ready for the next turn",
+    sessionMemory: snapshot.sessionMemory,
+    footer: snapshot.sessionMemory ? "memory link attached; ready for the next turn" : "final answer posted below; ready for the next turn",
     abortDisabled: true,
     inputText: false,
   });
@@ -179,6 +183,7 @@ function buildHudCardPayload(record: ThreadRecord, options: {
   risk?: string;
   next?: string;
   footer: string;
+  sessionMemory?: SessionMemoryLink;
   abortDisabled?: boolean;
   expectedMessageId?: string;
   inputText?: string | false;
@@ -213,6 +218,7 @@ function buildHudCardPayload(record: ThreadRecord, options: {
       textDisplayComponent(nowLines.join("\n")),
       textDisplayComponent(["**Progress**", ...progress.map((item) => truncateForComponent(item, 260))].join("\n")),
       textDisplayComponent(statusBlock),
+      ...(options.sessionMemory ? [textDisplayComponent(formatSessionMemoryBlock(options.sessionMemory))] : []),
       ...(options.inputText === false ? [] : [textDisplayComponent(options.inputText ?? "**Input**\nSend a message to steer this turn.\nPrefix with `follow-up:` to queue after the current turn.")]),
       textDisplayComponent(`-# ${truncateForComponent(options.footer, 280)}`),
     ])],
@@ -236,6 +242,14 @@ function fixedProgressRows(progress: string[]): string[] {
   const rows = progress.slice(0, 3).map((item) => item.trim()).filter(Boolean);
   while (rows.length < 3) rows.push("·");
   return rows;
+}
+
+function formatSessionMemoryBlock(link: SessionMemoryLink): string {
+  const target = link.url && link.verified
+    ? link.url
+    : `${link.brainPath} (no verified phone-safe URL yet)`;
+  const summary = link.summary ? `${truncateForComponent(link.summary, 220)}\n` : "";
+  return `**Memory**\n${summary}${truncateForComponent(target, 650)}`;
 }
 
 function containerComponent(tone: HudTone, components: DiscordTopLevelComponent[]): DiscordTopLevelComponent {

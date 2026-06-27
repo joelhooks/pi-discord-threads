@@ -1,0 +1,191 @@
+---
+title: "Session Memory and Summary Components"
+type: "project"
+status: "planning"
+created_at: "2026-06-23"
+tags:
+  - discord
+  - brain
+  - mdsvx
+  - components
+  - wzrrd
+  - run-hud
+---
+
+# Session Memory and Summary Components
+
+## Goal
+
+Make every Discord-carried Pi session feed a stable, phone-reachable **Project Memory Portal**: a durable SvelteKit/MDSvX site that uses `.brain/` as its source data and lets Joel move from project brain → workstreams → sessions → turns → tool-call receipts.
+
+Use that product pressure to build an extendable MDSvX component kit: **the shadcn-style copy-in library for really good summary pages**, starting from the `wzrrd` `joel/tufte-mdsvx` Tufte notes theme.
+
+## Crystallized decisions
+
+- The stable shared URL is a **Project Memory Portal**, not a per-turn disposable note. It should survive across all sessions for a project/workstream/thread.
+- **Session Memory Note** remains a real `.brain/**/*.svx` page, not only a generated view over Pi JSONL, but it is one page inside the broader portal.
+- Pi session JSONL remains conversation truth. The Session Memory Note is curated project memory: what we think is happening, what we are building, durable decisions, receipts, and next actions.
+- The portal should represent all sessions in a project and drill down to turn-by-turn/tool-call-level history through structured `.brain/data/**` and session adapters.
+- `.brain/` is the source/data layer. The durable product surface is the locally hosted/deployable SvelteKit/MDSvX static site served at a verified tailnet URL.
+- Running-turn HUD cards should include a small **Brain Context Strip**: the last few relevant Brain notes as titled, phone-safe tailnet links.
+- Final Discord summaries should include a verified stable **Project Memory Portal / Session Memory Link** for the current project/workstream/thread.
+- The terminal archived HUD should become a tight **tweet-sized memory card**: one compact summary plus the stable memory link, not a second full answer.
+- Final assistant responses can shrink once the full session memory is maintained behind the Brain link. Discord should show the useful excerpt; Brain should hold the complete session summary.
+- Summary pages should use reusable MDSvX components, not one-off styled markdown blobs.
+- Components should be source-copyable and extensible in the spirit of `shadcn`: plain source, clear contracts, recipes, examples, and agent-editable conventions rather than opaque package magic.
+- The initial visual base is the `wzrrd` `joel/tufte-mdsvx` template and its `tufte-notes` theme.
+- The reusable Summary Component Kit should become canonical in the `wzrrd` template/component registry, while `pi-discord-threads` dogfoods the first HUD/session-memory use case.
+
+## Canonical terms
+
+### Project Memory Portal
+
+The stable tailnet site URL for one project/workstream memory surface. It uses `.brain/` as source data, renders through a local/deployable SvelteKit/MDSvX Document Host, and lets the operator navigate from project Brain pages into workstreams, sessions, turns, and tool-call receipts.
+
+### Session Memory Note
+
+A curated Brain page for one Discord/Pi workstream. It summarizes the session's current understanding, receipts, decisions, open loops, and links back to relevant Brain notes. It should be safe to share in Discord through a verified tailnet Document Host URL, but it should not be the only portal into project history.
+
+### Brain Context Strip
+
+A compact HUD section listing a few relevant Brain notes with human titles and tailnet links. It is context, not a full changelog. The strip should be deterministic bridge-rendered data, not arbitrary prose from the HUD narrator.
+
+### Summary Component Kit
+
+A source-copyable component library for MDSvX summary/review pages: session memory, receipts, decisions, risks, timelines, source maps, diffs, issue slices, and operator next actions. Canonical home should be the `wzrrd` template/component registry; this repo is the first dogfood surface.
+
+### Tweet-Sized Memory Card
+
+The final archived HUD state for a run: a terse summary short enough to scan in Discord, plus the stable Project Memory Portal / Session Memory Link. It replaces bloated final status surfaces and points to the full Brain-backed summary and drilldown when Joel needs the details.
+
+### Agent Component Doctrine
+
+System-level prompting and local docs that tell agents how to create, structure, modify, and extend the Summary Component Kit without making boolean-prop soup or hiding provenance.
+
+## Component system shape
+
+The kit should preserve the Brain Component Composition split:
+
+- `.svx` page = narrative shell, short summaries, links, component invocations.
+- `.brain/data/**` = structured session memory, receipts, note index snapshots, source evidence, generated machine records, session indexes, turn logs, and tool-call references.
+- `.brain/components/**` = Svelte components that load/normalize/render data and expose focused child views.
+- Document Host / static site = durable SvelteKit/MDSvX portal that renders `.brain/` data and can be served on tailnet.
+- optional `wzrrd` site/template source = Tufte/MDSvX public review shell and copy-in recipes.
+
+Preferred component families:
+
+1. **Memory surfaces**
+   - `ProjectMemoryPortal`
+   - `WorkstreamIndex`
+   - `SessionMemoryPage`
+   - `SessionUnderstanding`
+   - `BrainContextStrip`
+   - `SessionTimeline`
+   - `TurnToolCallDrilldown`
+2. **Receipts and evidence**
+   - `ReceiptList`
+   - `CommandReceipt`
+   - `SourceMap`
+   - `VerificationGate`
+3. **Decisions and risks**
+   - `DecisionLedger`
+   - `OpenLoops`
+   - `RiskRegister`
+   - `TradeoffCard`
+4. **Operator next-action blocks**
+   - `NextActionStack`
+   - `IssueSliceList`
+   - `HandoffCard`
+5. **Review/page primitives from Tufte base**
+   - `ReportLayout`
+   - `MarginNote`
+   - `StatLine`
+   - `PatternCards`
+
+## Agent prompting requirements
+
+Agents need explicit system/project guidance for this component system:
+
+- Prefer component recipes when a summary shape repeats or depends on structured data.
+- Keep data provenance visible in every data-backed component.
+- Add or improve a component when a page shape repeats twice.
+- Do not create a mega component with many boolean props. Compose focused variants.
+- Leave an agent-readable contract for every component: purpose, props/schema, data source, privacy/freshness rules, side effects, and verification command.
+- Treat Tufte/MDSvX style as the baseline visual grammar: readable prose, margin notes, compact receipts, sober layout, and printable/static-friendly pages.
+- Public/wzrrd review pages must redact secrets, private transcript details, customer data, and machine-only paths.
+
+## Idiomatic Pi hook shape
+
+Native Pi extension semantics expose useful lifecycle hooks:
+
+- `agent_end` fires after each user prompt completes and carries the messages from that prompt.
+- `session_shutdown` fires when a session runtime is torn down because of quit, reload, new, resume, or fork.
+- `before_agent_start` is the right place to inject component doctrine or Brain context into the next turn, not to write final memory.
+
+For this Discord bridge, the idiomatic dogfood seam is slightly different: update Session Memory during the bridge's **run finalization** path, after the assistant result is persisted and before Discord posts the terminal HUD/final summary. Waiting only for Pi `session_shutdown` is too late because Discord needs the memory link at the end of every visible turn, and sessions can stay alive for many turns.
+
+If this becomes a generic Pi-native extension later, use `agent_end` for per-turn memory refresh and `session_shutdown` only as a best-effort final flush/cleanup.
+
+## Bridge integration shape
+
+For `pi-discord-threads` specifically:
+
+1. The bridge records or refreshes Session Memory data for the Discord thread/session after useful turns.
+2. The stable URL points at the Project Memory Portal/workstream page, not a new page for every turn.
+3. The HUD renderer receives a deterministic list of recent/relevant Brain notes and renders a Brain Context Strip during the run.
+4. The Session Memory writer runs at run finalization, producing the curated memory record, the full Brain page/update, and the tweet-sized terminal summary.
+5. The archived terminal HUD renders a Tweet-Sized Memory Card: one compact current-session summary plus the stable Project Memory Portal / Session Memory Link.
+6. The final-answer path appends the stable memory link when a verified tailnet Document Host URL exists; otherwise it includes the Brain path and says no phone-safe URL was verified.
+7. The final assistant response should bias shorter once the Session Memory surface is healthy: outcome, key receipts, blockers, and the link to the full memory page.
+8. The HUD narrator may see Brain context as input, but the narrator should not decide link safety, fabricate URLs, or own durable session memory.
+9. This likely belongs partly upstream in `joelhooks/pi-notes`: pi-notes already owns the Document Host, `.brain` rendering, review surface, and session bridge concepts. This bridge should emit/curate session memory data and consume verified URLs rather than fork the whole portal stack.
+
+## First implementation slices
+
+1. **Brain docs and contracts**
+   - Document the terms and component doctrine.
+   - Add a minimal project/workstream/session/turn/tool-call data schema.
+   - Confirm which parts live in `pi-discord-threads` versus `joelhooks/pi-notes` before building portal plumbing.
+2. **Component seed kit**
+   - Port/copy the Tufte starter primitives into `.brain/components` only where they are useful locally.
+   - Add `BrainContextStrip`, `ProjectMemoryPortal`, and `SessionMemoryPage` as first local/upstream component shapes.
+3. **Bridge read/render integration**
+   - Add a read-only Brain note index adapter that returns recent/relevant notes with title, path, and verified tailnet URL status.
+   - Render the strip in `src/discord/payloads.ts` without handing URL safety to the narrator.
+4. **Session memory writer / run-finalization hook**
+   - Generate/update a `.brain/**/*.svx` Session Memory Note plus `.brain/data/**` JSON for the thread/session/workstream/project index.
+   - Keep the route/link stable and update underlying data instead of churning URLs.
+   - Run after assistant result persistence and before terminal Discord HUD/final summary posting.
+   - For future generic Pi extension extraction, map this to `agent_end` plus a `session_shutdown` flush.
+5. **Terminal HUD memory card**
+   - Add an archived HUD state that displays a tweet-sized summary and the stable Project Memory Portal / Session Memory Link.
+   - Keep final answer delivery as the assistant output, but reduce duplicate status recap in Discord when the memory link is available.
+6. **Reusable extraction**
+   - Move mature portal/document-host pieces upstream into `joelhooks/pi-notes` when they are general Brain/session-history infrastructure.
+   - Move mature visual recipes/components into the `wzrrd` template/component registry so other summary pages can copy them in.
+
+## Implementation receipt: first bridge tracer bullet
+
+2026-06-23:
+
+- Added `src/session-memory.ts` as the bridge-side Project Memory Portal data/link seam.
+- Added `render.sessionMemory` config with stable portal Brain path, optional tailnet base URL verification, and per-workstream turn cap.
+- Added `.brain/data/session-memory/schema.json` plus the active [Project Memory Portal](./project-memory-portal.svx) Brain page.
+- Updated finalization paths so normal and run-control turns write session-memory data before final Discord output.
+- Final assistant output gets a Session Memory line; archived HUD cards render a compact Memory block.
+- Added `npm run test:session-memory` and a HUD regression for memory-card rendering.
+
+## Receipts
+
+- `wzrrd templates list` reports `joel/tufte-mdsvx` as the user-default Tufte SvelteKit + MDSvX shell, backed by `system/tufte-mdsvx` and theme `tufte-notes`.
+- `wzrrd init --template joel/tufte-mdsvx --slug summary-components-probe --title "Summary Components Probe" --emoji 🧠` generated a local probe site under `tmp/wzrrd-template-inspect/summary-components-probe`.
+- The generated template includes `ReportLayout`, `MarginNote`, `PatternCards`, and `StatLine` components plus a document-first `src/routes/+page.svx`.
+- Current bridge HUD rendering lives in `src/run-hud.ts`, `src/discord/progress-hud-machine.ts`, and `src/discord/payloads.ts`.
+
+## Canonical home decision
+
+Split the homes by responsibility:
+
+- `joelhooks/pi-notes` should own the durable local Project Memory Portal layer: Document Host behavior, `.brain` discovery/rendering, session-history adapters, stable routes, and tailnet-safe URL reporting.
+- `wzrrd` should own reusable visual recipes/components that need to be copied into static review/summary sites.
+- `pi-discord-threads` should dogfood the first visible slice because its HUD/session-memory loop creates immediate product pressure and real receipts. It should emit/curate session memory data and consume verified portal URLs, not fork the whole portal stack.
