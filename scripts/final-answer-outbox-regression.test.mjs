@@ -69,7 +69,7 @@ class FakeChannel {
 
   async send(options) {
     const existing = [...this.byId.values()].find((message) => options.enforceNonce && message.nonce === options.nonce);
-    this.events.push(`send:${options.nonce}`);
+    this.events.push(`send:${options.nonce}:${options.content}`);
     if (existing) return existing;
     const message = new FakeMessage(`message-${++this.created}`, options.content, options.nonce, this.events);
     this.add(message);
@@ -106,7 +106,7 @@ function createRegistry(events = []) {
   };
 }
 
-test("final answer outbox persists reserved message ids before editing final content", async () => {
+test("final answer outbox sends final chunks directly while persisting message ids", async () => {
   const events = [];
   const channel = new FakeChannel(events);
   const store = createStore(run, events);
@@ -125,8 +125,12 @@ test("final answer outbox persists reserved message ids before editing final con
   assert.deepEqual(store.currentRun.finalDiscordMessageIds, ["message-1", "message-2"]);
   assert.equal(channel.byId.get("message-1").content, "first chunk");
   assert.equal(channel.byId.get("message-2").content, "second chunk");
-  assert.ok(events.indexOf("patch:ids:message-1") < events.indexOf("edit:message-1:first chunk"));
-  assert.ok(events.indexOf("patch:ids:message-1,message-2") < events.indexOf("edit:message-2:second chunk"));
+  assert.ok(events.includes(`send:${finalAnswerOutboxNonce(run.runId, 0)}:first chunk`));
+  assert.ok(events.includes(`send:${finalAnswerOutboxNonce(run.runId, 1)}:second chunk`));
+  assert.equal(events.some((event) => event.includes("Reserving final answer")), false);
+  assert.equal(events.some((event) => event.startsWith("edit:")), false);
+  assert.ok(events.indexOf("patch:ids:message-1") < events.indexOf("registry:message:message-1"));
+  assert.ok(events.indexOf("patch:ids:message-1,message-2") < events.indexOf("registry:message:message-2"));
   assert.ok(events.includes("registry:entry:message-1:assistant-1"));
 });
 

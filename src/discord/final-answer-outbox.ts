@@ -27,14 +27,22 @@ export function finalAnswerOutboxNonce(runId: string, index: number): string {
   return `fa:${digest}:${index}`.slice(0, 25);
 }
 
+type FinalAnswerOutboxSlot = {
+  message: Message;
+  needsContentEdit: boolean;
+};
+
 export async function deliverFinalAnswerOutbox(input: DeliverFinalAnswerOutboxInput): Promise<void> {
-  const messages = await ensureFinalAnswerReservations(input);
-  const messageIds = messages.map((message) => message.id);
+  const slots = await ensureFinalAnswerMessages(input);
+  const messageIds = slots.map((slot) => slot.message.id);
 
   for (let index = 0; index < input.chunks.length; index++) {
-    await messages[index].edit({ content: input.chunks[index] });
+    const slot = slots[index];
+    if (slot.needsContentEdit) {
+      await slot.message.edit({ content: input.chunks[index] });
+    }
     await input.registry.recordMessage({
-      discordMessageId: messages[index].id,
+      discordMessageId: slot.message.id,
       threadId: input.record.threadId,
       direction: "assistant",
       createdAt: new Date().toISOString(),
@@ -57,7 +65,7 @@ export async function deliverFinalAnswerOutbox(input: DeliverFinalAnswerOutboxIn
   }).catch(() => undefined);
 }
 
-async function ensureFinalAnswerReservations(input: DeliverFinalAnswerOutboxInput): Promise<Message[]> {
+async function ensureFinalAnswerMessages(input: DeliverFinalAnswerOutboxInput): Promise<FinalAnswerOutboxSlot[]> {
   const latestRun = await input.store.getRun(input.run.runId).catch(() => undefined);
   const messageIds = [...(latestRun?.finalDiscordMessageIds ?? input.run.finalDiscordMessageIds ?? [])];
   const startedAt = latestRun?.finalDiscordOutboxStartedAt ?? new Date().toISOString();
@@ -65,7 +73,7 @@ async function ensureFinalAnswerReservations(input: DeliverFinalAnswerOutboxInpu
   const startedAtMs = Date.parse(startedAt);
   const blindNonceExpired = Number.isFinite(startedAtMs) && Date.now() - startedAtMs > FINAL_OUTBOX_BLIND_NONCE_WINDOW_MS;
   const expectedChunkCount = latestRun?.finalDiscordChunkCount ?? input.run.finalDiscordChunkCount ?? input.chunks.length;
-  const messages: Message[] = [];
+  const slots: FinalAnswerOutboxSlot[] = [];
 
   if (blindNonceExpired && messageIds.length < input.chunks.length) {
     throw new Error(`final answer outbox ${input.run.runId} has only ${messageIds.length}/${input.chunks.length} message id(s) after nonce recovery window; refusing blind send`);
@@ -79,19 +87,20 @@ async function ensureFinalAnswerReservations(input: DeliverFinalAnswerOutboxInpu
   }
 
   for (let index = 0; index < input.chunks.length; index++) {
+    const finalContent = input.chunks[index];
     const existing = messageIds[index] ? await fetchOutboxMessage(input.channel, messageIds[index]) : undefined;
     if (existing) {
-      messages.push(existing);
+      slots.push({ message: existing, needsContentEdit: existing.content !== finalContent });
       continue;
     }
 
-    const reserved = await input.channel.send({
-      content: reservationContent(index, input.chunks.length),
+    const sent = await input.channel.send({
+      content: finalContent,
       nonce: finalAnswerOutboxNonce(input.run.runId, index),
       enforceNonce: true,
     });
-    messageIds[index] = reserved.id;
-    messages.push(reserved);
+    messageIds[index] = sent.id;
+    slots.push({ message: sent, needsContentEdit: sent.content !== finalContent });
     await input.store.patchRun(input.run.runId, {
       finalizeAttemptedAt: startedAt,
       finalDiscordOutboxStartedAt: startedAt,
@@ -99,14 +108,14 @@ async function ensureFinalAnswerReservations(input: DeliverFinalAnswerOutboxInpu
       finalDiscordChunkCount: expectedChunkCount,
       finalDiscordReservedAt: reservedAt,
     }, { preserveTerminal: true });
-    await input.store.appendRunEvent(input.run.runId, "final_outbox_reserved", {
-      messageId: reserved.id,
+    await input.store.appendRunEvent(input.run.runId, "final_outbox_message_sent", {
+      messageId: sent.id,
       index,
       chunkCount: input.chunks.length,
     }).catch(() => undefined);
   }
 
-  return messages;
+  return slots;
 }
 
 async function fetchOutboxMessage(channel: FinalAnswerOutboxChannel, messageId: string): Promise<Message | undefined> {
@@ -125,7 +134,3 @@ function isUnknownDiscordMessageError(error: unknown): boolean {
     || /Unknown Message/i.test(String(candidate?.message ?? ""));
 }
 
-function reservationContent(index: number, total: number): string {
-  const suffix = total > 1 ? ` ${index + 1}/${total}` : "";
-  return `⏳ Reserving final answer slot${suffix}…`;
-}
