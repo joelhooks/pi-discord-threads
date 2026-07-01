@@ -172,16 +172,17 @@ export async function writeSessionMemory(input: WriteSessionMemoryInput): Promis
 }
 
 export function appendSessionMemoryLink(text: string, link: SessionMemoryLink | undefined): string {
+  const body = text.trimEnd();
+  if (!body) return text;
   if (!link || link.verificationStatus === "disabled") return text;
   const memoryLine = formatSessionMemoryLine(link);
   if (!memoryLine) return text;
   if (text.includes(memoryLine)) return text;
-  return `${text.trimEnd()}\n\n${memoryLine}`;
+  return `${body}\n\n${memoryLine}`;
 }
 
 export function formatSessionMemoryLine(link: SessionMemoryLink): string | undefined {
   if (link.url && link.verified) return `Session memory: ${link.url}`;
-  if (link.brainPath) return `Session memory: ${link.brainPath} (no verified phone-safe URL yet)`;
   return undefined;
 }
 

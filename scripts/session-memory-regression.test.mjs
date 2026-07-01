@@ -49,8 +49,9 @@ test("writeSessionMemory writes hashed workstream data and stable portal link", 
   assert.equal(link.verified, false);
   assert.equal(link.verificationStatus, "not_configured");
   assert.match(link.workstreamId, /^portal-test-[a-f0-9]{10}$/);
-  assert.equal(formatSessionMemoryLine(link), "Session memory: .brain/projects/project-memory-portal.svx (no verified phone-safe URL yet)");
-  assert.match(appendSessionMemoryLink("Done.", link), /Session memory: \.brain\/projects\/project-memory-portal\.svx/);
+  assert.equal(formatSessionMemoryLine(link), undefined);
+  assert.equal(appendSessionMemoryLink("Done.", link), "Done.");
+  assert.equal(appendSessionMemoryLink("", link), "");
 
   const dataPath = join(dir, link.dataPath);
   const workstream = JSON.parse(await readFile(dataPath, "utf8"));
@@ -119,5 +120,24 @@ test("writeSessionMemory refuses non-phone-safe portal base URLs", async () => {
   assert.equal(link.verified, false);
   assert.equal(link.verificationStatus, "unverified");
   assert.match(link.verificationError, /HTTPS|loopback/);
-  assert.equal(formatSessionMemoryLine(link), "Session memory: .brain/projects/project-memory-portal.svx (no verified phone-safe URL yet)");
+  assert.equal(formatSessionMemoryLine(link), undefined);
+  assert.equal(appendSessionMemoryLink("Done.", link), "Done.");
+});
+
+test("appendSessionMemoryLink only appends verified links to non-empty final text", () => {
+  const link = {
+    label: "Portal Test",
+    brainPath: ".brain/projects/project-memory-portal.svx",
+    routePath: "/notes/projects/project-memory-portal",
+    workstreamId: "portal-test-abc123",
+    verified: true,
+    verificationStatus: "verified",
+    url: "https://joels-mac-studio.tail7af24.ts.net/notes/projects/project-memory-portal",
+  };
+
+  assert.equal(
+    appendSessionMemoryLink("Done.", link),
+    "Done.\n\nSession memory: https://joels-mac-studio.tail7af24.ts.net/notes/projects/project-memory-portal",
+  );
+  assert.equal(appendSessionMemoryLink("", link), "");
 });
